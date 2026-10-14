@@ -31,7 +31,7 @@ import kotlin.math.abs
  * Menu nổi kiểu G-Vortex:
  *  - Một nút tab nhỏ bám mép trái màn hình (kéo dọc để đổi vị trí).
  *  - Kéo nút sang phải (hoặc chạm vào nút) -> menu 620x480dp trượt ra từ mép trái.
- *  - Chạm ra ngoài menu -> menu thu lại về nút.
+ *  - Chạm ra ngoài menu -> menu thu lại về nút (có animation); kéo menu sang trái cũng thu vào.
  *  - Góc trên bên trái menu: logo ZynTap (không nền) + tên app.
  */
 class OverlayService : Service() {
@@ -133,28 +133,33 @@ class OverlayService : Service() {
 
     private fun ensureHandle() {
         if (handleView != null) return
-        val w = dp(HANDLE_W_DP)
-        val h = dp(HANDLE_H_DP)
-        val logo = dp(26)
+        // Vùng chạm luôn đủ to (>= 36x72dp) dù nút nhìn thấy nhỏ thế nào -> không bị mất tương tác
+        val visW = dp(HANDLE_W_DP)
+        val visH = dp(HANDLE_H_DP)
+        val touchW = maxOf(visW, dp(MIN_TOUCH_W_DP))
+        val touchH = maxOf(visH, dp(MIN_TOUCH_H_DP))
         val params = overlayParams(
-            w, h,
+            touchW, touchH,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
         ).apply { x = 0; y = 0 }
 
         val r = dp(14).toFloat()
+        val iconSize = minOf(dp(18), (visW * 0.9f).toInt()).coerceAtLeast(dp(10))
         val handle = FrameLayout(this).apply {
-            background = GradientDrawable().apply {
-                setColor(0xE60D1524.toInt())
-                setStroke(dp(1), 0x551E2B44)
-                // bo tròn phía bên phải, sát mép trái màn hình
-                cornerRadii = floatArrayOf(0f, 0f, r, r, r, r, 0f, 0f)
-            }
-            addView(ImageView(context).apply {
-                setImageResource(R.drawable.logo_transparent)
-                scaleType = ImageView.ScaleType.FIT_CENTER
-            }, FrameLayout.LayoutParams(logo, logo, Gravity.END or Gravity.CENTER_VERTICAL)
-                .apply { marginEnd = dp(8) })
+            // Phần nhìn thấy: viên thuốc bám mép trái, nằm giữa vùng chạm
+            addView(FrameLayout(context).apply {
+                background = GradientDrawable().apply {
+                    setColor(0xE60D1524.toInt())
+                    setStroke(dp(1), 0x551E2B44)
+                    cornerRadii = floatArrayOf(0f, 0f, r, r, r, r, 0f, 0f)
+                }
+                addView(ImageView(context).apply {
+                    setImageResource(R.drawable.ic_chevrons_right)
+                    setColorFilter(0xFFE8EEFA.toInt())
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                }, FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER))
+            }, FrameLayout.LayoutParams(visW, visH, Gravity.START or Gravity.CENTER_VERTICAL))
             // Vuốt từ mép trái là cử chỉ Back của hệ thống -> loại vùng nút ra khỏi cử chỉ đó
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
@@ -186,7 +191,7 @@ class OverlayService : Service() {
                     when (mode) {
                         1 -> updatePanelDrag((dx / (cardW + cardMargin)).coerceIn(0f, 1f))
                         2 -> {
-                            val limit = screenH / 2 - h
+                            val limit = (screenH / 2 - touchH).coerceAtLeast(0)
                             params.y = (startY + dy.toInt()).coerceIn(-limit, limit)
                             runCatching { wm.updateViewLayout(handle, params) }
                         }
@@ -195,7 +200,7 @@ class OverlayService : Service() {
                 }
                 MotionEvent.ACTION_UP -> {
                     when (mode) {
-                        0 -> openPanel()
+                        0 -> openPanel() // chạm nhẹ -> menu trượt ra có animation
                         1 -> {
                             val p = ((e.rawX - downX) / (cardW + cardMargin)).coerceIn(0f, 1f)
                             if (p > 0.25f) openPanel() else closePanel()
@@ -233,10 +238,31 @@ class OverlayService : Service() {
         val scrim = FrameLayout(this).apply {
             setBackgroundColor(0x66000000)
             alpha = 0f
-            setOnClickListener { closePanel() }
+        }
+        // Chạm ra ngoài -> thu menu (có animation); kéo sang trái từ vùng ngoài cũng thu menu theo tay
+        val slop = dp(8)
+        var sDownX = 0f
+        var sDragging = false
+        scrim.setOnTouchListener { _, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { sDownX = e.rawX; sDragging = false; true }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - sDownX
+                    if (!sDragging && dx < -slop) { sDragging = true; beginPanelDrag() }
+                    if (sDragging) updatePanelDrag((1f + dx / (cardW + cardMargin)).coerceIn(0f, 1f))
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (sDragging) finishPanelDrag((1f + (e.rawX - sDownX) / (cardW + cardMargin)).coerceIn(0f, 1f))
+                    else closePanel()
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> { if (sDragging) openPanel(); true }
+                else -> false
+            }
         }
 
-        val card = LinearLayout(this).apply {
+        val card = DragCard(this).apply {
             orientation = LinearLayout.HORIZONTAL
             background = GradientDrawable().apply {
                 setColor(0xF20D1524.toInt())
@@ -339,8 +365,61 @@ class OverlayService : Service() {
     private fun beginPanelDrag() {
         panelCard?.animate()?.cancel()
         panelView?.animate()?.cancel()
+        handleView?.animate()?.cancel()
         panelAnimating = false
         ensurePanel()
+    }
+
+    /** Thả tay sau khi kéo: đủ xa thì mở hẳn, không thì thu lại. */
+    private fun finishPanelDrag(progress: Float) {
+        if (progress > 0.6f) openPanel() else closePanel()
+    }
+
+    /** Card menu: kéo ngang sang trái bằng bất kỳ chỗ nào trong card để thu menu vào. */
+    private inner class DragCard(context: Context) : LinearLayout(context) {
+        private val touchSlop = dp(8)
+        private var downX = 0f
+        private var downY = 0f
+        private var dragging = false
+
+        private fun progressFor(e: MotionEvent) =
+            (1f + (e.rawX - downX) / (cardW + cardMargin)).coerceIn(0f, 1f)
+
+        override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { downX = e.rawX; downY = e.rawY; dragging = false }
+                MotionEvent.ACTION_MOVE -> if (!dragging) {
+                    val dx = e.rawX - downX
+                    val dy = e.rawY - downY
+                    if (dx < -touchSlop && abs(dx) > abs(dy)) {
+                        dragging = true
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                        beginPanelDrag()
+                        updatePanelDrag(progressFor(e))
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+
+        override fun onTouchEvent(e: MotionEvent): Boolean {
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { downX = e.rawX; downY = e.rawY; dragging = false }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!dragging) {
+                        val dx = e.rawX - downX
+                        if (dx < -touchSlop && abs(dx) > abs(e.rawY - downY)) {
+                            dragging = true; beginPanelDrag()
+                        }
+                    }
+                    if (dragging) updatePanelDrag(progressFor(e))
+                }
+                MotionEvent.ACTION_UP -> if (dragging) { dragging = false; finishPanelDrag(progressFor(e)) }
+                MotionEvent.ACTION_CANCEL -> if (dragging) { dragging = false; openPanel() }
+            }
+            return true
+        }
     }
 
     /** progress 0 = thu hết, 1 = mở hết. */
@@ -411,6 +490,8 @@ class OverlayService : Service() {
         private const val PANEL_MARGIN_DP = 8
         private const val HANDLE_W_DP = 15
         private const val HANDLE_H_DP = 75
+        private const val MIN_TOUCH_W_DP = 36
+        private const val MIN_TOUCH_H_DP = 72
         private const val PANEL_ANIM_MS = 280L
 
         fun start(context: Context) {
