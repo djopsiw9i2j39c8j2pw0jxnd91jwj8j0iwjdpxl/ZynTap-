@@ -9,13 +9,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.zyntap.app.data.AdbLinkStore
 import com.zyntap.app.data.AdbPairing
+import com.zyntap.app.data.AdbSession
 import com.zyntap.app.data.AppEntry
 import com.zyntap.app.data.AppRepository
 import com.zyntap.app.data.PairState
 import com.zyntap.app.data.PendingAdbPairing
 import com.zyntap.app.data.WifiAdbMonitor
 import com.zyntap.app.data.WifiAdbPairing
-import com.zyntap.app.data.checkStillPaired
 import com.zyntap.app.overlay.OverlayPermission
 import com.zyntap.app.overlay.OverlayService
 import kotlinx.coroutines.Dispatchers
@@ -107,8 +107,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         verifying = true
         val app = getApplication<Application>()
         viewModelScope.launch {
-            val still = withContext(Dispatchers.IO) { checkStillPaired(app) }
-            if (still == false) {
+            // Nối thật và GIỮ kết nối (không ngắt như trước). Chỉ khi máy từ chối khoá ở cả 3 lần
+            // thử mới coi là đã mất ghép nối -> lỗi thoáng qua (vừa cập nhật app, mạng chập chờn...)
+            // không còn làm app bắt ghép nối lại từ đầu.
+            val link = AdbSession.connect(app, attempts = 3)
+            if (link is AdbSession.Link.PairingLost) {
                 AdbLinkStore.setPaired(app, false)
                 pairedPersisted = false
                 pairState = PairState.Idle
@@ -215,6 +218,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 AdbLinkStore.setPaired(getApplication<Application>(), true)
                 PairNotifier.cancel(getApplication())
                 pairedPersisted = true
+                verifyPairing() // nối luôn để bấm nút main dùng được ngay
                 delay(900)
                 screen = Screen.Home
             } else {
