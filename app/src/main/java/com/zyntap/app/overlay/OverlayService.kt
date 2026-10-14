@@ -7,6 +7,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
+import android.util.DisplayMetrics
+import android.view.DisplayCutout
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.Typeface
@@ -107,16 +110,43 @@ class OverlayService : Service() {
 
     // ---- kích thước / helper ----------------------------------------------
 
-    private val screenW get() = resources.displayMetrics.widthPixels
-    private val screenH get() = resources.displayMetrics.heightPixels
+    /** Kích thước màn hình thật (gồm cả vùng thanh trạng thái / thanh điều hướng). */
+    private val realBounds: Rect
+        get() {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                runCatching { return wm.maximumWindowMetrics.bounds }
+            }
+            val dm = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(dm)
+            return Rect(0, 0, dm.widthPixels, dm.heightPixels)
+        }
+    private val screenW get() = realBounds.width()
+    private val screenH get() = realBounds.height()
+
+    /** Thông tin tai thỏ / giọt nước / đục lỗ (null nếu máy không có). */
+    private fun displayCutoutCompat(): DisplayCutout? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching { wm.currentWindowMetrics.windowInsets.displayCutout?.let { return it } }
+        }
+        return handleView?.rootWindowInsets?.displayCutout
+    }
+
+    private val safeLeft: Int
+        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) displayCutoutCompat()?.safeInsetLeft ?: 0 else 0
+
+    /** Lề trái của card: không để card chui xuống dưới tai thỏ. */
+    private val cardStart get() = maxOf(dp(PANEL_MARGIN_DP), safeLeft)
+    private val travel get() = cardW + cardStart
 
     /** Menu 620x480dp, tự thu nhỏ nếu màn hình không đủ chỗ. */
-    private val cardW get() = minOf(dp(PANEL_W_DP), screenW - dp(PANEL_MARGIN_DP) * 2)
+    private val cardW get() = minOf(dp(PANEL_W_DP), screenW - cardStart - dp(PANEL_MARGIN_DP))
     private val cardH get() = minOf(dp(PANEL_H_DP), screenH - dp(PANEL_MARGIN_DP) * 2)
     private val cardMargin get() = dp(PANEL_MARGIN_DP)
 
     /** Quãng đường card phải trượt để ra khỏi màn hình hoàn toàn. */
-    private val hiddenX get() = -(cardW + cardMargin).toFloat()
+    private val hiddenX get() = -travel.toFloat()
 
     private fun overlayParams(width: Int, height: Int, flags: Int): WindowManager.LayoutParams {
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -126,7 +156,58 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
         return WindowManager.LayoutParams(width, height, type, flags, PixelFormat.TRANSLUCENT)
-            .apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL }
+            .apply {
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                // Cho cửa sổ lấn vào vùng tai thỏ/giọt nước -> nút sát hẳn mép màn hình
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
+            }
+    }
+
+    // ---- vị trí dọc của nút: sát mép trên/dưới, né tai thỏ -------------------
+
+    private var handleParams: WindowManager.LayoutParams? = null
+    private var handleW = 0
+    private var handleH = 0
+
+    /** y (tính từ mép trên màn hình) hợp lệ gần nhất với [desired]: trong màn hình và không đè lên cutout. */
+    private fun placeHandleY(desired: Int): Int {
+        val maxY = (screenH - handleH).coerceAtLeast(0)
+        var y = desired.coerceIn(0, maxY)
+        val rects = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+            displayCutoutCompat()?.boundingRects.orEmpty() else emptyList()
+        val pad = dp(6)
+        repeat(2) {
+            for (r in rects) {
+                if (r.left >= handleW + pad || r.right <= 0) continue          // không nằm sát mép trái
+                if (y + handleH <= r.top - pad || y >= r.bottom + pad) continue // không chồng nhau
+                val candidates = listOfNotNull(
+                    (r.top - pad - handleH).takeIf { it >= 0 },
+                    (r.bottom + pad).takeIf { it <= maxY },
+                )
+                if (candidates.isNotEmpty()) y = candidates.minByOrNull { abs(it - y) }!!
+            }
+        }
+        return y
+    }
+
+    private fun relayoutHandle() {
+        val p = handleParams ?: return
+        val v = handleView ?: return
+        p.y = placeHandleY(p.y)
+        runCatching { wm.updateViewLayout(v, p) }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Xoay màn hình: bỏ menu đang mở, đặt lại nút (cutout đổi cạnh nên chờ hệ thống cập nhật)
+        removePanel()
+        handleView?.alpha = 1f
+        relayoutHandle()
+        handleView?.postDelayed({ relayoutHandle() }, 400)
     }
 
     // ---- nút mở menu (tab bám mép trái) -----------------------------------
@@ -138,11 +219,19 @@ class OverlayService : Service() {
         val visH = dp(HANDLE_H_DP)
         val touchW = maxOf(visW, dp(MIN_TOUCH_W_DP))
         val touchH = maxOf(visH, dp(MIN_TOUCH_H_DP))
+        handleW = touchW
+        handleH = touchH
         val params = overlayParams(
             touchW, touchH,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-        ).apply { x = 0; y = 0 }
+        ).apply {
+            gravity = Gravity.START or Gravity.TOP
+            x = 0
+            y = placeHandleY(screenH / 2 - touchH / 2)
+        }
+        handleParams = params
 
         val r = dp(14).toFloat()
         val iconSize = minOf(dp(18), (visW * 0.9f).toInt()).coerceAtLeast(dp(10))
@@ -189,10 +278,9 @@ class OverlayService : Service() {
                         }
                     }
                     when (mode) {
-                        1 -> updatePanelDrag((dx / (cardW + cardMargin)).coerceIn(0f, 1f))
+                        1 -> updatePanelDrag((dx / travel).coerceIn(0f, 1f))
                         2 -> {
-                            val limit = (screenH / 2 - touchH).coerceAtLeast(0)
-                            params.y = (startY + dy.toInt()).coerceIn(-limit, limit)
+                            params.y = placeHandleY(startY + dy.toInt())
                             runCatching { wm.updateViewLayout(handle, params) }
                         }
                     }
@@ -202,7 +290,7 @@ class OverlayService : Service() {
                     when (mode) {
                         0 -> openPanel() // chạm nhẹ -> menu trượt ra có animation
                         1 -> {
-                            val p = ((e.rawX - downX) / (cardW + cardMargin)).coerceIn(0f, 1f)
+                            val p = ((e.rawX - downX) / travel).coerceIn(0f, 1f)
                             if (p > 0.25f) openPanel() else closePanel()
                         }
                     }
@@ -218,6 +306,8 @@ class OverlayService : Service() {
 
         handleView = handle
         runCatching { wm.addView(handle, params) }
+        // Sau khi gắn vào cửa sổ mới có thông tin cutout -> đặt lại vị trí cho chắc
+        handle.post { relayoutHandle() }
     }
 
     // ---- menu 620x480 trượt ra từ mép trái --------------------------------
@@ -249,11 +339,11 @@ class OverlayService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = e.rawX - sDownX
                     if (!sDragging && dx < -slop) { sDragging = true; beginPanelDrag() }
-                    if (sDragging) updatePanelDrag((1f + dx / (cardW + cardMargin)).coerceIn(0f, 1f))
+                    if (sDragging) updatePanelDrag((1f + dx / travel).coerceIn(0f, 1f))
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (sDragging) finishPanelDrag((1f + (e.rawX - sDownX) / (cardW + cardMargin)).coerceIn(0f, 1f))
+                    if (sDragging) finishPanelDrag((1f + (e.rawX - sDownX) / travel).coerceIn(0f, 1f))
                     else closePanel()
                     true
                 }
@@ -275,7 +365,7 @@ class OverlayService : Service() {
         scrim.addView(
             card,
             FrameLayout.LayoutParams(cardW, cardH, Gravity.START or Gravity.CENTER_VERTICAL)
-                .apply { marginStart = cardMargin },
+                .apply { marginStart = cardStart },
         )
 
         val contentText = TextView(this).apply {
@@ -383,7 +473,7 @@ class OverlayService : Service() {
         private var dragging = false
 
         private fun progressFor(e: MotionEvent) =
-            (1f + (e.rawX - downX) / (cardW + cardMargin)).coerceIn(0f, 1f)
+            (1f + (e.rawX - downX) / travel).coerceIn(0f, 1f)
 
         override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
             when (e.actionMasked) {
