@@ -23,6 +23,7 @@ class PointPickerOverlay(
     private val bounds: () -> Rect,
     private val params: (Int, Int, Int) -> WindowManager.LayoutParams,
     private val onVisibility: (Boolean) -> Unit,
+    private val onDrag: (Boolean) -> Unit = {},
 ) {
     private val density = ctx.resources.displayMetrics.density
     private fun dp(n: Int) = (n * density).toInt()
@@ -62,7 +63,7 @@ class PointPickerOverlay(
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.rawX - downX; val dy = event.rawY - downY
-                    if (abs(dx) > slop || abs(dy) > slop) dragging = true
+                    if (!dragging && (abs(dx) > slop || abs(dy) > slop)) { dragging = true; onDrag(true) }
                     if (dragging) {
                         val b = bounds()
                         p.x = (startX + dx).toInt().coerceIn(-dp(36), b.width() - dp(36) - 1)
@@ -73,6 +74,7 @@ class PointPickerOverlay(
                 }
                 MotionEvent.ACTION_UP -> {
                     view.animate().alpha(1f).setDuration(140).start()
+                    if (dragging) onDrag(false)
                     if (!dragging) {
                         val location = IntArray(2)
                         view.getLocationOnScreen(location)
@@ -86,6 +88,7 @@ class PointPickerOverlay(
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
+                    if (dragging) onDrag(false)
                     view.animate().alpha(1f).setDuration(100).start(); true
                 }
                 else -> true

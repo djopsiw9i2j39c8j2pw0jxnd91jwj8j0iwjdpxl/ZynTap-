@@ -294,6 +294,9 @@ class MainButtonOverlay(
         entries.values.forEach { it.view.animate().alpha(to).setDuration(durationMs).start() }
     }
 
+    /** Báo khi bắt đầu/thả kéo một nút main (để menu ẩn lúc kéo, hiện lại khi thả). */
+    var onDrag: ((Boolean) -> Unit)? = null
+
     fun containsPoint(x: Int, y: Int): Boolean = entries.values.any { e ->
         val location = IntArray(2)
         e.view.getLocationOnScreen(location)
@@ -334,7 +337,10 @@ class MainButtonOverlay(
                     if (editing) {
                         val dx = e.rawX - downX
                         val dy = e.rawY - downY
-                        if (!moved && (kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop)) moved = true
+                        if (!moved && (kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop)) {
+                            moved = true
+                            onDrag?.invoke(true) // bắt đầu kéo -> menu ẩn
+                        }
                         if (moved) {
                             val s = screenBounds()
                             val maxX = (s.width() - p.width).coerceAtLeast(0)
@@ -352,14 +358,14 @@ class MainButtonOverlay(
                     if (pointerId == e.getPointerId(e.actionIndex)) {
                         pointerId = -1
                         v.pressedVisual = false
-                        if (editing) { if (moved) repo.save() } else onAction?.invoke(b, false)
+                        if (editing) { if (moved) { repo.save(); onDrag?.invoke(false) } } else onAction?.invoke(b, false)
                     }
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     pointerId = -1
                     v.pressedVisual = false
-                    if (editing && moved) repo.save()
+                    if (editing && moved) { repo.save(); onDrag?.invoke(false) }
                     onCancel?.invoke(id)
                     true
                 }

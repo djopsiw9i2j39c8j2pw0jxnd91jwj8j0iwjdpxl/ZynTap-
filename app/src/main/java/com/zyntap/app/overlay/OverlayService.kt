@@ -77,6 +77,7 @@ class OverlayService : Service() {
     private var handleDragging = false
     private var handleAddedAt = 0L
     private var panelAddedAt = 0L
+    private var panelGhost = false     // đang ẩn tạm menu vì kéo ghim / nút main
     private var panelHidden = false    // menu vẫn còn trong bộ nhớ nhưng đang ẩn (không gỡ/dựng lại)
     private var shownTabIdx = 0        // tab đang hiển thị trong menu
 
@@ -113,14 +114,17 @@ class OverlayService : Service() {
             circles.containsPoint(x, y) || panelBlocksInput() || handleContainsPoint(x, y)
         }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
         pointPicker = PointPickerOverlay(this, wm, { realBounds },
-            { w, h, f -> overlayParams(w, h, f) }) { picking ->
-            if (picking) { pointRunner.stopAll(); circles.cancelTouches() }
-            // Keep the inputs touchable: tapping X/Y a second time cancels the pin and edits manually.
-            editLock = picking
-            panelCard?.animate()?.alpha(if (picking) 0.16f else 1f)?.setDuration(150)?.start()
-            panelView?.setBackgroundColor(if (picking) Color.TRANSPARENT else Color.argb(scrimAlpha(solidAmount), 0, 0, 0))
-            circles.fadeAll(if (picking) 0f else 1f, 100)
-        }
+            { w, h, f -> overlayParams(w, h, f) },
+            { picking ->
+                if (picking) { pointRunner.stopAll(); circles.cancelTouches() }
+                // Keep the inputs touchable: tapping X/Y a second time cancels the pin and edits manually.
+                editLock = picking
+                if (!picking) setPanelGhost(false)
+                circles.fadeAll(if (picking) 0f else 1f, 100)
+            },
+            { dragging -> setPanelGhost(dragging) }, // chỉ ẩn menu khi đang kéo ghim
+        )
+        circles.onDrag = { dragging -> setPanelGhost(dragging) } // kéo nút main -> menu ẩn, thả -> hiện
         circles.onAction = { button, down ->
             if (!pointPicker.isShowing && !editLock && !inputActive) pointRunner.touch(button, down)
             else pointRunner.cancelTouch(button.id)
@@ -810,10 +814,21 @@ class OverlayService : Service() {
     private fun applySolid(t: Float) {
         solidAmount = t
         cardBg?.setColor(Color.argb((CARD_ALPHA + (255 - CARD_ALPHA) * t).toInt(), 0x0D, 0x15, 0x24))
-        panelView?.setBackgroundColor(if (::pointPicker.isInitialized && pointPicker.isShowing) Color.TRANSPARENT else Color.argb(scrimAlpha(t), 0, 0, 0))
+        panelView?.setBackgroundColor(if (panelGhost) Color.TRANSPARENT else Color.argb(scrimAlpha(t), 0, 0, 0))
     }
 
     /** Độ đậm nền tối phía sau; nhạt đi khi đang chỉnh nút để nhìn rõ màn hình mà đặt vị trí. */
+    /** Ẩn hoàn toàn menu (card + nền tối) khi đang kéo ghim/nút main; thả ra thì hiện lại. */
+    private fun setPanelGhost(on: Boolean) {
+        if (panelGhost == on) return
+        panelGhost = on
+        if (closing) return
+        panelCard?.animate()?.cancel()
+        panelCard?.animate()?.alpha(if (on) 0f else 1f)?.setDuration(if (on) 90L else 150L)?.start()
+        panelControls?.animate()?.cancel()
+        applySolid(solidAmount)
+    }
+
     private fun scrimAlpha(t: Float): Int =
         ((SCRIM_ALPHA + (SCRIM_SOLID_ALPHA - SCRIM_ALPHA) * t) * (1f - EDIT_DIM_REDUCE * editDim)).toInt()
 
@@ -1174,6 +1189,8 @@ class OverlayService : Service() {
         promptLayer?.close()
         dropdownLayer?.dismissNow()
         inputActive = false
+        panelGhost = false
+        panelCard?.alpha = 1f
         solidAnim?.cancel()
         editDimAnim?.cancel()
         editDim = 0f
@@ -1217,6 +1234,7 @@ class OverlayService : Service() {
 
     private fun removePanel() {
         panelHidden = false
+        panelGhost = false
         pointsTab?.exit()
         pointPicker.close()
         promptLayer?.close()
