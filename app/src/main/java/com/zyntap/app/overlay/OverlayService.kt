@@ -1016,7 +1016,7 @@ class OverlayService : Service() {
         // Độ đặc (0..255) của nền card và nền tối phía sau: mặc định (trong suốt) và khi tắt trong suốt
         private const val CARD_ALPHA = 0xF2
         private const val SCRIM_ALPHA = 0x66
-        private const val SCRIM_SOLID_ALPHA = 0xE6
+        private const val SCRIM_SOLID_ALPHA = 0x66 // = SCRIM_ALPHA: tắt trong suốt chỉ làm card đặc, không đậm thêm lớp đen
 
         private const val WATCHDOG_MS = 2000L
         private const val ATTACH_GRACE_MS = 1500L

@@ -198,7 +198,7 @@ class CloseOrbView(context: Context, logo: Drawable?) : View(context) {
 
     companion object {
         /** Tổng thời lượng hiệu ứng (ms). Muốn chậm/nhanh hơn thì chỉnh số này. */
-        const val DURATION_MS = 1900L
+        const val DURATION_MS = 1100L
 
         private const val P1_END = 0.30f
         private const val ANTICIPATE = 0.2f
