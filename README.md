@@ -12,9 +12,9 @@ App Android viết bằng Kotlin + Jetpack Compose. Build APK hoàn toàn trên 
 
 ## Đổi phiên bản (cập nhật không phải gỡ cài lại)
 
-Phiên bản mặc định: **1.00.11**. Có 3 cách đổi:
+Phiên bản mặc định: **1.00.12**. Có 3 cách đổi:
 
-- Sửa dòng `appVersion=1.00.11` trong `gradle.properties`, rồi đẩy code lên.
+- Sửa dòng `appVersion=1.00.12` trong `gradle.properties`, rồi đẩy code lên.
 - Vào Actions → **Run workflow** → gõ phiên bản (vd `1.00.02`).
 - Tạo tag `v1.00.02` → bản APK sẽ tự đăng ở mục **Releases**.
 
@@ -96,3 +96,10 @@ app/src/main/java/com/zyntap/app/
           AppPickerSheet.kt, Components.kt, LucideIcons.kt, Theme.kt
 app/src/main/res/   icon launcher, logo trong suốt (drawable-nodpi/logo_transparent.png)
 ```
+
+## Thay đổi 1.00.12
+
+- **Tab nhớ vị trí**: đóng menu nổi rồi mở lại vẫn ở tab đang chọn (trước đây menu bị dựng lại nên luôn về tab 1). Lưu trong `OverlayService` (`active_tab`).
+- **Kết nối ADB**: thêm `data/AdbSession.kt`. Nút main tự nối ADB khi chưa có kết nối thay vì báo lỗi; kết nối được giữ sống;
+  menu nổi tự nối lại ở nền (sau khi cập nhật app, bật lại gỡ lỗi Wi-Fi, đổi mạng). Lỗi nối thoáng qua không còn làm app
+  "quên" ghép nối: chỉ khi máy từ chối khoá ở cả 3 lần thử mới yêu cầu ghép nối lại.
