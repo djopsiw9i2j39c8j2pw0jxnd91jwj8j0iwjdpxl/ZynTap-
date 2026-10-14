@@ -77,6 +77,8 @@ class OverlayService : Service() {
     private var handleDragging = false
     private var handleAddedAt = 0L
     private var panelAddedAt = 0L
+    private var panelHidden = false    // menu vẫn còn trong bộ nhớ nhưng đang ẩn (không gỡ/dựng lại)
+    private var shownTabIdx = 0        // tab đang hiển thị trong menu
 
     // ---- nút main tròn + tab "Tạo nút chính" ----
     private lateinit var repo: MainButtonRepo
@@ -198,7 +200,7 @@ class OverlayService : Service() {
         if (panel != null && now - panelAddedAt > ATTACH_GRACE_MS && !panel.isAttachedToWindow) {
             removePanel()
         }
-        if (panelView == null && !panelAnimating && !handleDragging) {
+        if ((panelView == null || panelHidden) && !panelAnimating && !handleDragging) {
             if (h.alpha != 1f) h.alpha = 1f
             if (h.visibility != View.VISIBLE) h.visibility = View.VISIBLE
         }
@@ -484,7 +486,7 @@ class OverlayService : Service() {
 
     /** Tạo cửa sổ menu (đang ẩn hoàn toàn bên trái) nếu chưa có. */
     private fun ensurePanel() {
-        if (panelView != null) return
+        if (panelView != null) { revealPanel(); return }
         solid = prefs.getBoolean(KEY_SOLID, false)
 
         val params = overlayParams(
@@ -583,6 +585,7 @@ class OverlayService : Service() {
         }
         if (startTab == 1) tab2.enter()
         var shownTab = startTab
+        shownTabIdx = startTab
         fun showTab(i: Int) {
             if (i == shownTab) return
             val oldIdx = shownTab
@@ -600,6 +603,7 @@ class OverlayService : Service() {
             next.alpha = 0f
             next.animate().alpha(1f).setDuration(220L).start()
             shownTab = i
+            shownTabIdx = i
             prefs.edit().putInt(KEY_TAB, i).apply()
         }
 
@@ -833,7 +837,7 @@ class OverlayService : Service() {
     }
 
     /** The panel includes a full-screen touchable scrim, not only its visible card. */
-    private fun panelBlocksInput(): Boolean = panelView != null
+    private fun panelBlocksInput(): Boolean = panelView != null && !panelHidden
 
     private fun handleContainsPoint(x: Int, y: Int): Boolean {
         val handle = handleView ?: return false
@@ -1142,7 +1146,7 @@ class OverlayService : Service() {
         if (closing) return
         val card = panelCard
         val scrim = panelView
-        if (card == null || scrim == null) {
+        if (card == null || scrim == null || panelHidden) {
             handleView?.alpha = 1f
             return
         }
@@ -1157,13 +1161,62 @@ class OverlayService : Service() {
             .withEndAction {
                 panelAnimating = false
                 // Nếu giữa chừng người dùng mở lại thì không gỡ menu
-                if (panelCard === card && card.translationX <= hiddenX + 1f) removePanel()
+                if (panelCard === card && card.translationX <= hiddenX + 1f) hidePanel()
             }.start()
         scrim.animate().alpha(0f).setDuration(PANEL_ANIM_MS).start()
         handleView?.animate()?.alpha(1f)?.setDuration(PANEL_ANIM_MS)?.start()
     }
 
+    /** Đặt lại trạng thái chỉnh nút / nhập liệu / bàn phím khi menu thu vào hoặc bị gỡ. */
+    private fun resetPanelState() {
+        pointsTab?.exit()
+        pointPicker.close()
+        promptLayer?.close()
+        dropdownLayer?.dismissNow()
+        inputActive = false
+        solidAnim?.cancel()
+        editDimAnim?.cancel()
+        editDim = 0f
+        editLock = false
+        if (::circles.isInitialized) circles.setEditing(null)
+    }
+
+    /**
+     * Thu menu: chỉ ẩn cửa sổ (không gỡ khỏi WindowManager) để giữ nguyên tab, vị trí cuộn, nội dung
+     * -> lần mở sau hiện ngay, không phải dựng lại cả cây view (đỡ lag).
+     */
+    private fun hidePanel() {
+        val v = panelView ?: return
+        val p = panelParams
+        resetPanelState()
+        confirmLayer?.let { it.animate().cancel(); it.visibility = View.GONE }
+        panelHidden = true
+        v.visibility = View.INVISIBLE
+        if (p != null) {
+            // Không chặn chạm xuống app phía sau khi đang ẩn
+            p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            runCatching { wm.updateViewLayout(v, p) }
+        }
+    }
+
+    /** Hiện lại menu đã ẩn (card vẫn ở ngoài màn hình bên trái, animation trượt ra do openPanel lo). */
+    private fun revealPanel() {
+        if (!panelHidden) return
+        val v = panelView ?: return
+        val p = panelParams
+        panelHidden = false
+        if (p != null) {
+            p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            runCatching { wm.updateViewLayout(v, p) }
+        }
+        v.visibility = View.VISIBLE
+        applySolid(solidAmount)
+        if (shownTabIdx == 1) pointsTab?.enter()
+    }
+
     private fun removePanel() {
+        panelHidden = false
         pointsTab?.exit()
         pointPicker.close()
         promptLayer?.close()
