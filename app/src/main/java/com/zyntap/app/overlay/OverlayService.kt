@@ -84,6 +84,10 @@ class OverlayService : Service() {
     private var dropdownLayer: DropdownLayer? = null
     private var promptLayer: TextPromptLayer? = null
     private var mainTab: MainButtonsTab? = null
+    private var pointsTab: PointsTab? = null
+    private lateinit var pointPicker: PointPickerOverlay
+    private lateinit var pointRunner: PointRunner
+    private var inputActive = false
     private var editLock = false     // đang chỉnh nút: không cho đóng menu nhầm
     private var editDim = 0f         // 0..1: nền tối phía sau nhạt đi khi đang chỉnh nút
     private var editDimAnim: ValueAnimator? = null
@@ -102,6 +106,23 @@ class OverlayService : Service() {
             screenBounds = { realBounds },
             newParams = { w, h, f -> overlayParams(w, h, f) },
         )
+        pointRunner = PointRunner(this, { Rect(realBounds) }, { x, y ->
+            circles.containsPoint(x, y) || panelBlocksInput() || handleContainsPoint(x, y)
+        }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
+        pointPicker = PointPickerOverlay(this, wm, { realBounds },
+            { w, h, f -> overlayParams(w, h, f) }) { picking ->
+            if (picking) { pointRunner.stopAll(); circles.cancelTouches() }
+            // Keep the inputs touchable: tapping X/Y a second time cancels the pin and edits manually.
+            editLock = picking
+            panelCard?.animate()?.alpha(if (picking) 0.16f else 1f)?.setDuration(150)?.start()
+            panelView?.setBackgroundColor(if (picking) Color.TRANSPARENT else Color.argb(scrimAlpha(solidAmount), 0, 0, 0))
+            circles.fadeAll(if (picking) 0f else 1f, 100)
+        }
+        circles.onAction = { button, down ->
+            if (!pointPicker.isShowing && !editLock && !inputActive) pointRunner.touch(button, down)
+            else pointRunner.cancelTouch(button.id)
+        }
+        circles.onCancel = { id -> pointRunner.cancelTouch(id) }
         startForegroundWithNotification()
     }
 
@@ -129,6 +150,8 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        pointPicker.close()
+        pointRunner.close()
         handler.removeCallbacksAndMessages(null)
         closeAnim?.let { it.removeAllListeners(); it.cancel() }
         closeAnim = null
@@ -331,6 +354,8 @@ class OverlayService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        pointRunner.stopAll()
+        circles.cancelTouches()
         // Xoay màn hình: bỏ menu đang mở, đặt lại nút (cutout đổi cạnh nên chờ hệ thống cập nhật)
         removePanel()
         handleView?.alpha = 1f
@@ -535,10 +560,13 @@ class OverlayService : Service() {
         }
         val tab1 = MainButtonsTab(this, repo, circles, host)
         mainTab = tab1
+        val tab2 = PointsTab(this, repo, host, pointPicker, { realBounds },
+            { on -> setPanelFocusable(on) }, { pointRunner.stopAll(); circles.cancelTouches() })
+        pointsTab = tab2
 
         val tabViews = listOf(
             tab1.build(),
-            placeholderTab(tabNames[1]),
+            tab2.build(),
             placeholderTab(tabNames[2]),
         )
         val tabContainer = FrameLayout(this)
@@ -553,8 +581,10 @@ class OverlayService : Service() {
             val old = tabViews[oldIdx]
             val next = tabViews[i]
             if (oldIdx == 0) tab1.exitEdit()   // rời tab 1 -> thoát trạng thái chỉnh nút
+            if (oldIdx == 1) tab2.exit()
             dd.dismissNow()
             pr.close()
+            if (i == 1) tab2.enter()
             old.animate().cancel(); next.animate().cancel()
             old.animate().alpha(0f).setDuration(140L)
                 .withEndAction { if (shownTab != oldIdx) old.visibility = View.GONE }.start()
@@ -767,7 +797,7 @@ class OverlayService : Service() {
     private fun applySolid(t: Float) {
         solidAmount = t
         cardBg?.setColor(Color.argb((CARD_ALPHA + (255 - CARD_ALPHA) * t).toInt(), 0x0D, 0x15, 0x24))
-        panelView?.setBackgroundColor(Color.argb(scrimAlpha(t), 0, 0, 0))
+        panelView?.setBackgroundColor(if (::pointPicker.isInitialized && pointPicker.isShowing) Color.TRANSPARENT else Color.argb(scrimAlpha(t), 0, 0, 0))
     }
 
     /** Độ đậm nền tối phía sau; nhạt đi khi đang chỉnh nút để nhìn rõ màn hình mà đặt vị trí. */
@@ -778,6 +808,7 @@ class OverlayService : Service() {
 
     /** Bật/tắt khoá đóng nhầm khi đang chỉnh một nút main. */
     private fun setEditing(on: Boolean) {
+        if (on) { pointRunner.stopAll(); circles.cancelTouches() }
         if (editLock == on) return
         editLock = on
         editDimAnim?.cancel()
@@ -792,8 +823,21 @@ class OverlayService : Service() {
         }
     }
 
-    /** Cho cửa sổ menu nhận/không nhận bàn phím (chỉ bật khi đang nhập chữ). */
+    /** The panel includes a full-screen touchable scrim, not only its visible card. */
+    private fun panelBlocksInput(): Boolean = panelView != null
+
+    private fun handleContainsPoint(x: Int, y: Int): Boolean {
+        val handle = handleView ?: return false
+        val location = IntArray(2)
+        handle.getLocationOnScreen(location)
+        return x >= location[0] && x < location[0] + handle.width &&
+            y >= location[1] && y < location[1] + handle.height
+    }
+
+    /** Cho cửa sổ menu nhận/không nhận bàn phím. */
     private fun setPanelFocusable(on: Boolean) {
+        inputActive = on
+        if (on) pointRunner.stopAll()
         val p = panelParams ?: return
         val v = panelView ?: return
         p.flags = if (on) {
@@ -816,6 +860,10 @@ class OverlayService : Service() {
                     }
                     return true
                 }
+            }
+            if (event.keyCode == KeyEvent.KEYCODE_BACK && inputActive) {
+                if (event.action == KeyEvent.ACTION_UP) pointsTab?.leaveInput()
+                return true
             }
             return super.dispatchKeyEvent(event)
         }
@@ -1090,6 +1138,7 @@ class OverlayService : Service() {
             return
         }
         mainTab?.exitEdit()
+        pointsTab?.exit()
         dropdownLayer?.dismissNow()
         promptLayer?.close()
         card.animate().cancel(); scrim.animate().cancel()
@@ -1106,6 +1155,10 @@ class OverlayService : Service() {
     }
 
     private fun removePanel() {
+        pointsTab?.exit()
+        pointPicker.close()
+        promptLayer?.close()
+        inputActive = false
         solidAnim?.cancel()
         editDimAnim?.cancel()
         editDim = 0f
@@ -1116,6 +1169,7 @@ class OverlayService : Service() {
         dropdownLayer = null
         promptLayer = null
         mainTab = null
+        pointsTab = null
         panelView = null
         panelCard = null
         panelContent = null

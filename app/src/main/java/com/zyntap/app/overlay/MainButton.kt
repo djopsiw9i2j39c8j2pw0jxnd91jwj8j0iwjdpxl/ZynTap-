@@ -17,6 +17,7 @@ class MainButton(
     var sizeDp: Int = DEFAULT_SIZE,
     var x: Float = 0.8f,
     var y: Float = 0.5f,
+    var pointScript: String = "",
 ) {
     val code: String get() = "main$id"
 
@@ -81,7 +82,8 @@ class MainButtonRepo(context: Context) {
                     .put("alpha", b.alphaPct)
                     .put("size", b.sizeDp)
                     .put("x", b.x.toDouble())
-                    .put("y", b.y.toDouble()),
+                    .put("y", b.y.toDouble())
+                    .put("pointScript", b.pointScript),
             )
         }
         prefs.edit().putString(KEY, arr.toString()).apply()
@@ -104,6 +106,7 @@ class MainButtonRepo(context: Context) {
                             .coerceIn(MainButton.MIN_ALPHA, MainButton.MAX_ALPHA),
                         sizeDp = o.optInt("size", MainButton.DEFAULT_SIZE)
                             .coerceIn(MainButton.MIN_SIZE, MainButton.MAX_SIZE),
+                        pointScript = o.optString("pointScript", "").take(PointScriptParser.MAX_TEXT),
                         x = o.optDouble("x", 0.8).toFloat().coerceIn(0f, 1f),
                         y = o.optDouble("y", 0.5).toFloat().coerceIn(0f, 1f),
                     ),

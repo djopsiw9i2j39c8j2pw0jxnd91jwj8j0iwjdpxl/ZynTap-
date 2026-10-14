@@ -158,6 +158,7 @@ class MainButtonOverlay(
     private val newParams: (width: Int, height: Int, flags: Int) -> WindowManager.LayoutParams,
 ) {
     var onAction: ((MainButton, Boolean) -> Unit)? = null
+    var onCancel: ((Int) -> Unit)? = null
 
     private class Entry(val view: MainButtonView, val params: WindowManager.LayoutParams, var addedAt: Long)
 
@@ -193,6 +194,7 @@ class MainButtonOverlay(
         val p = newParams(
             win, win,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_SPLIT_TOUCH or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
         ).apply { gravity = Gravity.TOP or Gravity.START }
@@ -213,6 +215,7 @@ class MainButtonOverlay(
     }
 
     private fun removeView(id: Int) {
+        onCancel?.invoke(id)
         val e = entries.remove(id) ?: return
         e.view.animate().cancel()
         runCatching { wm.removeViewImmediate(e.view) }
@@ -230,6 +233,7 @@ class MainButtonOverlay(
     }
 
     fun onRemoved(id: Int) {
+        onCancel?.invoke(id)
         if (editingId == id) editingId = null
         val e = entries[id] ?: return
         e.view.animate().cancel()
@@ -239,6 +243,7 @@ class MainButtonOverlay(
 
     /** Tên/độ mờ/size vừa đổi trong menu -> cập nhật ngay trên nút thật. */
     fun onChanged(b: MainButton) {
+        onCancel?.invoke(b.id)
         val e = entries[b.id] ?: return
         bind(e.view, b)
         val win = winSize(b)
@@ -261,6 +266,7 @@ class MainButtonOverlay(
 
     /** Vào/ra trạng thái chỉnh sửa của một nút (null = không nút nào đang chỉnh). */
     fun setEditing(id: Int?) {
+        if (id != null) onCancel?.invoke(id)
         editingId = id
         entries.forEach { (k, e) -> e.view.editing = k == id }
         if (id != null) bringToFront(id)
@@ -288,6 +294,17 @@ class MainButtonOverlay(
         entries.values.forEach { it.view.animate().alpha(to).setDuration(durationMs).start() }
     }
 
+    fun containsPoint(x: Int, y: Int): Boolean = entries.values.any { e ->
+        val location = IntArray(2)
+        e.view.getLocationOnScreen(location)
+        x >= location[0] && x < location[0] + e.view.width &&
+            y >= location[1] && y < location[1] + e.view.height
+    }
+
+    fun cancelTouches() {
+        entries.forEach { (id, e) -> e.view.pressedVisual = false; onCancel?.invoke(id) }
+    }
+
     fun removeAll() {
         entries.keys.toList().forEach { removeView(it) }
     }
@@ -299,11 +316,13 @@ class MainButtonOverlay(
         var startX = 0
         var startY = 0
         var moved = false
+        var pointerId = -1
         v.setOnTouchListener { _, e ->
             val b = repo.find(id) ?: return@setOnTouchListener false
             val editing = editingId == id
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    pointerId = e.getPointerId(0)
                     downX = e.rawX; downY = e.rawY
                     startX = p.x; startY = p.y
                     moved = false
@@ -329,11 +348,22 @@ class MainButtonOverlay(
                     }
                     true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    v.pressedVisual = false
-                    if (editing) { if (moved) repo.save() } else onAction?.invoke(b, false)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                    if (pointerId == e.getPointerId(e.actionIndex)) {
+                        pointerId = -1
+                        v.pressedVisual = false
+                        if (editing) { if (moved) repo.save() } else onAction?.invoke(b, false)
+                    }
                     true
                 }
+                MotionEvent.ACTION_CANCEL -> {
+                    pointerId = -1
+                    v.pressedVisual = false
+                    if (editing && moved) repo.save()
+                    onCancel?.invoke(id)
+                    true
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> true
                 else -> false
             }
         }
