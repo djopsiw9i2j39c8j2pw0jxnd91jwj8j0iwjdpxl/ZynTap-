@@ -12,6 +12,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.zyntap.app.overlay.OverlayPermission
+import com.zyntap.app.overlay.OverlayService
 import com.zyntap.app.ui.ZynTapApp
 import com.zyntap.app.ui.ZynTapTheme
 
@@ -44,6 +45,12 @@ class MainActivity : ComponentActivity() {
         }
         // Mở app là xin lần lượt từng quyền cần dùng (không cần bấm nút)
         if (savedInstanceState == null) requestNextPermission()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Menu nổi đang bật mà bị mất (bị kill, cập nhật app...) -> bật lại khi mở app
+        OverlayService.restoreIfWanted(this)
     }
 
     private fun requestNextPermission() {
