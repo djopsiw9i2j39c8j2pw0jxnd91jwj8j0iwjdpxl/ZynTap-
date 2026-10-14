@@ -928,8 +928,13 @@ class OverlayService : Service() {
         val list = buttons.toList()
         val labels = list.map { it.id + " — " + it.name }
         val spinner = TapViews.makeSpinner(this, list, { b -> b.id + " — " + b.name }) { idx ->
-            pointsSelectedId = list.getOrNull(idx)?.id
-            renderTab()
+            // Spinner tự gọi callback này ngay lần hiển thị đầu -> chỉ dựng lại tab khi
+            // người dùng THỰC SỰ đổi nút, nếu không sẽ lặp vô hạn rồi sập app.
+            val newId = list.getOrNull(idx)?.id
+            if (newId != null && newId != pointsSelectedId) {
+                pointsSelectedId = newId
+                handler.post { if (currentTab == 1) renderTab() }
+            }
         }
         if (list.isEmpty()) spinner.isEnabled = false
         val startIdx = list.indexOfFirst { it.id == pointsSelectedId }.coerceAtLeast(0)
