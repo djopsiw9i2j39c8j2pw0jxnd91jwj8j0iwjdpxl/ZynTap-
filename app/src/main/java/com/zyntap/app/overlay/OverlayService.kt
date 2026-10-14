@@ -452,7 +452,7 @@ class OverlayService : Service() {
             indicator.animate().cancel()
             if (animate) {
                 indicator.animate().translationY(target).setDuration(TAB_ANIM_MS)
-                    .setInterpolator(DecelerateInterpolator(1.8f)).start()
+                    .setInterpolator(TAB_INTERPOLATOR).start()
             } else {
                 indicator.translationY = target
             }
@@ -623,7 +623,9 @@ class OverlayService : Service() {
         private const val MIN_TOUCH_W_DP = 36
         private const val MIN_TOUCH_H_DP = 72
         private const val PANEL_ANIM_MS = 280L
-        private const val TAB_ANIM_MS = 260L
+        private const val TAB_ANIM_MS = 380L
+        // Đường cong Material "standard": êm lúc bắt đầu, chậm dần mượt về cuối
+        private val TAB_INTERPOLATOR get() = android.view.animation.PathInterpolator(0.4f, 0f, 0.2f, 1f)
 
         fun start(context: Context) {
             val intent = Intent(context, OverlayService::class.java).setAction(ACTION_SHOW)
