@@ -50,7 +50,7 @@ import kotlin.math.abs
  *  - Kéo nút sang phải (hoặc chạm vào nút) -> menu 620x480dp trượt ra từ mép trái.
  *  - Chạm ra ngoài menu -> menu thu lại về nút (có animation); kéo menu sang trái cũng thu vào.
  *  - Góc trên bên trái menu: logo ZynTap (không nền) + tên app.
- *  - Góc trên bên phải menu: 3 nút  mắt (bật/tắt giao diện trong suốt) / dấu trừ (thu menu) /
+ *  - Góc trên bên phải menu: 3 nút  mắt (bật/tắt độ trong suốt có sẵn của menu) / dấu trừ (thu menu) /
  *    dấu X (hiện hộp xác nhận -> "Có" thì menu thu thành viên tròn logo rồi bay lên, tắt hẳn menu nổi).
  */
 class OverlayService : Service() {
@@ -65,9 +65,9 @@ class OverlayService : Service() {
     private var confirmLayer: View? = null
     private var confirmDialog: View? = null
     private var eyeIcon: ImageView? = null
-    private var ghost = false          // đang ở chế độ giao diện trong suốt
-    private var ghostAmount = 0f       // 0 = đặc, 1 = trong suốt hẳn (để chuyển mượt)
-    private var ghostAnim: ValueAnimator? = null
+    private var solid = false          // đang ở chế độ giao diện trong suốt
+    private var solidAmount = 0f       // 0 = đặc, 1 = trong suốt hẳn (để chuyển mượt)
+    private var solidAnim: ValueAnimator? = null
     private var closing = false        // đang chạy hiệu ứng đóng menu
     private var closeAnim: ValueAnimator? = null
     private var panelAnimating = false
@@ -110,7 +110,7 @@ class OverlayService : Service() {
         handler.removeCallbacksAndMessages(null)
         closeAnim?.let { it.removeAllListeners(); it.cancel() }
         closeAnim = null
-        ghostAnim?.cancel()
+        solidAnim?.cancel()
         removeViews()
         super.onDestroy()
     }
@@ -431,7 +431,7 @@ class OverlayService : Service() {
     /** Tạo cửa sổ menu (đang ẩn hoàn toàn bên trái) nếu chưa có. */
     private fun ensurePanel() {
         if (panelView != null) return
-        ghost = prefs.getBoolean(KEY_GHOST, false)
+        solid = prefs.getBoolean(KEY_SOLID, false)
 
         val params = overlayParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -528,7 +528,7 @@ class OverlayService : Service() {
         panelContent = content
         cardBg = bg
         panelAddedAt = SystemClock.uptimeMillis()
-        applyGhost(if (ghost) 1f else 0f)
+        applySolid(if (solid) 1f else 0f)
         runCatching { wm.addView(scrim, params) }.onFailure { removePanel() }
     }
 
@@ -637,7 +637,7 @@ class OverlayService : Service() {
 
     private fun buildControls(): View {
         val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val eye = iconButton(if (ghost) R.drawable.ic_eye_off else R.drawable.ic_eye) { toggleGhost() }
+        val eye = iconButton(if (solid) R.drawable.ic_eye_off else R.drawable.ic_eye) { toggleSolid() }
         eyeIcon = eye
         val minus = iconButton(R.drawable.ic_minus) { closePanel() }
         val close = iconButton(R.drawable.ic_x) { showConfirm() }
@@ -666,35 +666,40 @@ class OverlayService : Service() {
         setOnClickListener { if (!closing) onClick() }
     }
 
-    /** Mắt: bật/tắt giao diện trong suốt (nền card + nội dung mờ đi, bớt nền tối phía sau). */
-    private fun toggleGhost() {
-        ghost = !ghost
-        prefs.edit().putBoolean(KEY_GHOST, ghost).apply()
-        ghostAnim?.cancel()
-        ghostAnim = ValueAnimator.ofFloat(ghostAmount, if (ghost) 1f else 0f).apply {
+    /** Mắt: bật/tắt độ trong suốt có sẵn của menu (mắt mở = trong suốt như cũ, mắt gạch chéo = đặc). */
+    private fun toggleSolid() {
+        solid = !solid
+        prefs.edit().putBoolean(KEY_SOLID, solid).apply()
+        solidAnim?.cancel()
+        solidAnim = ValueAnimator.ofFloat(solidAmount, if (solid) 1f else 0f).apply {
             duration = 260L
             interpolator = TAB_INTERPOLATOR
-            addUpdateListener { applyGhost(it.animatedValue as Float) }
+            addUpdateListener { applySolid(it.animatedValue as Float) }
             start()
         }
         // Đổi icon mắt mở <-> mắt gạch chéo, có nhún nhẹ
         eyeIcon?.let { icon ->
             icon.animate().cancel()
             icon.animate().scaleX(0.6f).scaleY(0.6f).alpha(0.3f).setDuration(90L).withEndAction {
-                icon.setImageResource(if (ghost) R.drawable.ic_eye_off else R.drawable.ic_eye)
+                icon.setImageResource(if (solid) R.drawable.ic_eye_off else R.drawable.ic_eye)
                 icon.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(180L)
                     .setInterpolator(OvershootInterpolator(2f)).start()
             }.start()
         }
     }
 
-    /** t: 0 = đặc, 1 = trong suốt. Nút điều khiển luôn rõ để còn bấm tắt chế độ này. */
-    private fun applyGhost(t: Float) {
-        ghostAmount = t
-        cardBg?.alpha = (255 + (GHOST_BG_ALPHA - 255) * t).toInt()
-        panelContent?.alpha = 1f + (GHOST_CONTENT_ALPHA - 1f) * t
-        panelView?.setBackgroundColor(Color.argb((0x66 * (1f - t)).toInt(), 0, 0, 0))
+    /**
+     * t: 0 = giữ độ trong suốt có sẵn của menu (nền card 95% + nền tối mờ 40% nhìn xuyên thấy app phía sau),
+     *    1 = tắt trong suốt (card đặc hẳn + nền phía sau gần như che kín).
+     * Nút điều khiển luôn rõ để còn bấm bật lại.
+     */
+    private fun applySolid(t: Float) {
+        solidAmount = t
+        cardBg?.setColor(Color.argb((CARD_ALPHA + (255 - CARD_ALPHA) * t).toInt(), 0x0D, 0x15, 0x24))
+        panelView?.setBackgroundColor(Color.argb(scrimAlpha(t), 0, 0, 0))
     }
+
+    private fun scrimAlpha(t: Float): Int = (SCRIM_ALPHA + (SCRIM_SOLID_ALPHA - SCRIM_ALPHA) * t).toInt()
 
     // ---- hộp xác nhận đóng menu --------------------------------------------
 
@@ -792,7 +797,7 @@ class OverlayService : Service() {
         closing = true
         setWanted(this, false) // chủ động đóng -> không tự khôi phục
         handler.removeCallbacks(watchdog)
-        ghostAnim?.cancel()
+        solidAnim?.cancel()
         card.animate().cancel(); scrim.animate().cancel()
 
         // 1) Nội dung + nút mờ đi, chỉ còn lại khung card
@@ -808,7 +813,7 @@ class OverlayService : Service() {
                 card.right + card.translationX, card.bottom.toFloat(),
             )
             fromRadius = dp(18).toFloat()
-            fromFillFactor = (cardBg?.alpha ?: 255) / 255f
+            fromFillFactor = (CARD_ALPHA + (255 - CARD_ALPHA) * solidAmount) / CARD_ALPHA
             visibility = View.INVISIBLE
         }
         scrim.addView(
@@ -816,7 +821,7 @@ class OverlayService : Service() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
         )
 
-        val dim0 = (0x66 * (1f - ghostAmount)).toInt()
+        val dim0 = scrimAlpha(solidAmount)
         val anim = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = CloseOrbView.DURATION_MS
             interpolator = LinearInterpolator()
@@ -967,7 +972,7 @@ class OverlayService : Service() {
     }
 
     private fun removePanel() {
-        ghostAnim?.cancel()
+        solidAnim?.cancel()
         panelView?.let { runCatching { wm.removeView(it) } }
         panelView = null
         panelCard = null
@@ -1007,10 +1012,12 @@ class OverlayService : Service() {
         private const val PREFS = "zyntap_overlay"
         private const val KEY_WANTED = "wanted"
         private const val KEY_Y_RATIO = "handle_y_ratio"
-        private const val KEY_GHOST = "ghost_mode"
-        // Chế độ trong suốt: độ đặc của nền card (0..255) và của phần nội dung (0..1)
-        private const val GHOST_BG_ALPHA = 60
-        private const val GHOST_CONTENT_ALPHA = 0.35f
+        private const val KEY_SOLID = "solid_mode"
+        // Độ đặc (0..255) của nền card và nền tối phía sau: mặc định (trong suốt) và khi tắt trong suốt
+        private const val CARD_ALPHA = 0xF2
+        private const val SCRIM_ALPHA = 0x66
+        private const val SCRIM_SOLID_ALPHA = 0xE6
+
         private const val WATCHDOG_MS = 2000L
         private const val ATTACH_GRACE_MS = 1500L
 

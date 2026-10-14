@@ -33,7 +33,7 @@ class CloseOrbView(context: Context, logo: Drawable?) : View(context) {
     /** Bo góc của card lúc bắt đầu (px). */
     var fromRadius = 0f
 
-    /** 1 = card đặc, <1 = card đang ở chế độ trong suốt (để chuyển màu liền mạch). */
+    /** Hệ số độ đặc của card so với mặc định (để màu khớp lúc bắt đầu). */
     var fromFillFactor = 1f
 
     var progress = 0f
@@ -43,7 +43,7 @@ class CloseOrbView(context: Context, logo: Drawable?) : View(context) {
         }
 
     private val d = resources.displayMetrics.density
-    private val orbR = 42f * d                // bán kính viên tròn: 84dp
+    private val orbR = 26f * d                // bán kính viên tròn: 52dp (muốn to/nhỏ hơn thì chỉnh số này)
 
     private val logo: Drawable? = logo?.mutate()
     private val logoRatio: Float = logo?.let {
