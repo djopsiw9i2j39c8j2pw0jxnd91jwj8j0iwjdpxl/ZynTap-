@@ -115,7 +115,7 @@ object TapExecutor {
 
     private fun tap(mgr: ZynAdbConnectionManager, x: Int, y: Int) {
         runCatching {
-            val stream = mgr.openShell("input tap $x $y")
+            val stream = mgr.openStream("shell:input tap $x $y")
             runCatching { stream.close() }
         }.onFailure { connected = false } // lỗi -> lần sau kết nối lại
     }
