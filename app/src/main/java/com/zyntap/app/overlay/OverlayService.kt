@@ -7,11 +7,6 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.graphics.Canvas
-import android.graphics.LinearGradient
-import android.graphics.Paint
-import android.graphics.Path
-import android.graphics.Shader
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.Typeface
@@ -45,7 +40,6 @@ class OverlayService : Service() {
     private var handleView: View? = null
     private var panelView: FrameLayout? = null
     private var panelCard: View? = null
-    private var panelDim: View? = null
     private var panelAnimating = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -141,14 +135,27 @@ class OverlayService : Service() {
         if (handleView != null) return
         val w = dp(HANDLE_W_DP)
         val h = dp(HANDLE_H_DP)
+        val logo = dp(26)
         val params = overlayParams(
             w, h,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
         ).apply { x = 0; y = 0 }
 
-        val handle = GamingTab(this).apply {
-            // Cử chỉ vuốt từ mép trái của hệ thống: loại vùng nút ra (Android 10+, máy dùng cử chỉ)
+        val r = dp(14).toFloat()
+        val handle = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                setColor(0xE60D1524.toInt())
+                setStroke(dp(1), 0x551E2B44)
+                // bo tròn phía bên phải, sát mép trái màn hình
+                cornerRadii = floatArrayOf(0f, 0f, r, r, r, r, 0f, 0f)
+            }
+            addView(ImageView(context).apply {
+                setImageResource(R.drawable.logo_transparent)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }, FrameLayout.LayoutParams(logo, logo, Gravity.END or Gravity.CENTER_VERTICAL)
+                .apply { marginEnd = dp(8) })
+            // Vuốt từ mép trái là cử chỉ Back của hệ thống -> loại vùng nút ra khỏi cử chỉ đó
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
                     v.systemGestureExclusionRects = listOf(Rect(0, 0, v.width, v.height))
@@ -224,21 +231,16 @@ class OverlayService : Service() {
 
         // Nền mờ toàn màn hình: chạm ra ngoài card -> thu menu lại
         val scrim = FrameLayout(this).apply {
+            setBackgroundColor(0x66000000)
+            alpha = 0f
             setOnClickListener { closePanel() }
         }
-        // Lớp tối nhẹ nằm RIÊNG phía sau card: chỉ lớp này mờ dần, card luôn rõ nét 100%
-        val dim = View(this).apply {
-            setBackgroundColor(0x59000000)
-            alpha = 0f
-        }
-        scrim.addView(dim, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
 
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             background = GradientDrawable().apply {
-                setColor(0xFF0D1524.toInt())
-                setStroke(dp(1), 0xFF1F4FB8.toInt())
+                setColor(0xF20D1524.toInt())
+                setStroke(dp(1), 0xFF1E2B44.toInt())
                 cornerRadius = dp(18).toFloat()
             }
             isClickable = true // nuốt chạm bên trong card
@@ -268,7 +270,6 @@ class OverlayService : Service() {
 
         panelView = scrim
         panelCard = card
-        panelDim = dim
         runCatching { wm.addView(scrim, params) }
     }
 
@@ -337,7 +338,7 @@ class OverlayService : Service() {
 
     private fun beginPanelDrag() {
         panelCard?.animate()?.cancel()
-        panelDim?.animate()?.cancel()
+        panelView?.animate()?.cancel()
         panelAnimating = false
         ensurePanel()
     }
@@ -346,7 +347,7 @@ class OverlayService : Service() {
     private fun updatePanelDrag(progress: Float) {
         val card = panelCard ?: return
         card.translationX = hiddenX * (1f - progress)
-        panelDim?.alpha = progress
+        panelView?.alpha = progress
         handleView?.alpha = 1f - progress
     }
 
@@ -354,14 +355,14 @@ class OverlayService : Service() {
         ensurePanel()
         val card = panelCard ?: return
         val scrim = panelView ?: return
-        card.animate().cancel(); panelDim?.animate()?.cancel()
+        card.animate().cancel(); scrim.animate().cancel()
         panelAnimating = true
         // post: đợi cửa sổ menu gắn xong rồi mới chạy animation trượt, nếu không sẽ bị "nhảy" thẳng
         scrim.post {
             card.animate().translationX(0f).setDuration(PANEL_ANIM_MS)
                 .setInterpolator(DecelerateInterpolator(1.6f))
                 .withEndAction { panelAnimating = false }.start()
-            panelDim?.animate()?.alpha(1f)?.setDuration(PANEL_ANIM_MS)?.start()
+            scrim.animate().alpha(1f).setDuration(PANEL_ANIM_MS).start()
             handleView?.animate()?.alpha(0f)?.setDuration(PANEL_ANIM_MS)?.start()
         }
     }
@@ -373,7 +374,7 @@ class OverlayService : Service() {
             handleView?.alpha = 1f
             return
         }
-        card.animate().cancel(); panelDim?.animate()?.cancel()
+        card.animate().cancel(); scrim.animate().cancel()
         panelAnimating = true
         card.animate().translationX(hiddenX).setDuration(PANEL_ANIM_MS)
             .setInterpolator(DecelerateInterpolator(1.4f))
@@ -382,7 +383,7 @@ class OverlayService : Service() {
                 // Nếu giữa chừng người dùng mở lại thì không gỡ menu
                 if (panelCard === card && card.translationX <= hiddenX + 1f) removePanel()
             }.start()
-        panelDim?.animate()?.alpha(0f)?.setDuration(PANEL_ANIM_MS)?.start()
+        scrim.animate().alpha(0f).setDuration(PANEL_ANIM_MS).start()
         handleView?.animate()?.alpha(1f)?.setDuration(PANEL_ANIM_MS)?.start()
     }
 
@@ -390,7 +391,6 @@ class OverlayService : Service() {
         panelView?.let { runCatching { wm.removeView(it) } }
         panelView = null
         panelCard = null
-        panelDim = null
     }
 
     private fun removeViews() {
@@ -401,67 +401,6 @@ class OverlayService : Service() {
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-    /**
-     * Nút mở menu kiểu gaming, nhỏ gọn: tab vát góc bên phải, nền xanh đen,
-     * viền gradient cyan -> xanh dương (tông của logo ZynTap), logo nhỏ ở giữa.
-     */
-    private class GamingTab(context: Context) : View(context) {
-        private val d = resources.displayMetrics.density
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL; color = 0xF2050A15.toInt()
-        }
-        private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE; strokeWidth = 3.5f * d; color = 0x3319D3FF
-            strokeJoin = Paint.Join.ROUND
-        }
-        private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE; strokeWidth = 1.4f * d
-            strokeJoin = Paint.Join.MITER
-        }
-        private val notch = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL; color = 0xFF19D3FF.toInt()
-        }
-        private val logo = context.getDrawable(R.drawable.logo_transparent)
-        private val path = Path()
-
-        override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-            stroke.shader = LinearGradient(
-                0f, 0f, 0f, h.toFloat(),
-                0xFF19D3FF.toInt(), 0xFF2A6BFF.toInt(), Shader.TileMode.CLAMP,
-            )
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            val inset = 2f * d
-            val w = width.toFloat() - inset
-            val h = height.toFloat() - inset * 2
-            val top = inset
-            val c = 7f * d // độ vát góc phải
-            path.reset()
-            path.moveTo(0f, top)
-            path.lineTo(w - c, top)
-            path.lineTo(w, top + c)
-            path.lineTo(w, top + h - c)
-            path.lineTo(w - c, top + h)
-            path.lineTo(0f, top + h)
-            path.close()
-            canvas.drawPath(path, fill)
-            canvas.drawPath(path, glow)
-            canvas.drawPath(path, stroke)
-
-            // logo nhỏ (không nền)
-            val lw = (w * 0.62f).toInt()
-            val lh = (lw * 256f / 313f).toInt()
-            val cx = (w * 0.5f).toInt()
-            val cy = (top + h / 2f).toInt()
-            logo?.setBounds(cx - lw / 2, cy - lh / 2, cx + lw / 2, cy + lh / 2)
-            logo?.draw(canvas)
-
-            // chấm sáng nhỏ ở mép trong làm điểm nhấn gaming
-            canvas.drawRect(0f, cy - 6f * d, 2f * d, cy + 6f * d, notch)
-        }
-    }
-
     companion object {
         const val ACTION_SHOW = "com.zyntap.app.overlay.SHOW"
         const val ACTION_HIDE = "com.zyntap.app.overlay.HIDE"
@@ -471,7 +410,7 @@ class OverlayService : Service() {
         private const val PANEL_H_DP = 480
         private const val PANEL_MARGIN_DP = 8
         private const val HANDLE_W_DP = 28
-        private const val HANDLE_H_DP = 44
+        private const val HANDLE_H_DP = 64
         private const val PANEL_ANIM_MS = 280L
 
         fun start(context: Context) {
