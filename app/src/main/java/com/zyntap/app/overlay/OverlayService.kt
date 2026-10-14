@@ -43,7 +43,10 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.zyntap.app.R
+import com.zyntap.app.data.AdbLinkStore
 import com.zyntap.app.data.AdbSession
+import com.zyntap.app.data.WifiAdbMonitor
+import com.zyntap.app.data.ZynAdbConnectionManager
 import kotlin.math.abs
 
 /**
@@ -646,6 +649,7 @@ class OverlayService : Service() {
         panelAddedAt = SystemClock.uptimeMillis()
         applySolid(if (solid) 1f else 0f)
         runCatching { wm.addView(scrim, params) }.onFailure { removePanel() }
+        startStatusTick()
     }
 
     /** Góc trên bên trái: logo không nền + tên app. */
@@ -747,8 +751,83 @@ class OverlayService : Service() {
             ).apply { if (i < tabNames.lastIndex) bottomMargin = tabGap })
         }
         col.addView(box)
+        // Đẩy khung trạng thái xuống đáy cột
+        col.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
+        col.addView(buildStatus())
         select(initialTab.coerceIn(0, tabNames.lastIndex), animate = false)
         return col
+    }
+
+    // ---- khung trạng thái ADB ở đáy cột tab -----------------------------------
+
+    private var statusWifiDot: View? = null
+    private var statusWifiText: TextView? = null
+    private var statusLinkDot: View? = null
+    private var statusLinkText: TextView? = null
+
+    private fun buildStatus(): View {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val p = dp(10)
+            setPadding(p, dp(8), p, dp(8))
+            background = roundedBg(0x14FFFFFF, 10)
+        }
+        fun row(): Triple<LinearLayout, View, TextView> {
+            val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            val dot = View(this)
+            val tv = TextView(this).apply {
+                setTextColor(0xFFC3CDE2.toInt()); textSize = 11.5f; maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }
+            r.addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
+            r.addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            return Triple(r, dot, tv)
+        }
+        val (r1, d1, t1) = row()
+        val (r2, d2, t2) = row()
+        box.addView(r1)
+        box.addView(r2, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(6) })
+        statusWifiDot = d1; statusWifiText = t1
+        statusLinkDot = d2; statusLinkText = t2
+        refreshStatus()
+        return box
+    }
+
+    private fun refreshStatus() {
+        val wifiOn = WifiAdbMonitor.isWifiAdbEnabled(this)
+        val paired = AdbLinkStore.isPaired(this)
+        val linked = runCatching { ZynAdbConnectionManager.get(applicationContext).isConnected }.getOrDefault(false)
+        val ok = 0xFF34D399.toInt()
+        val warn = 0xFFF5B544.toInt()
+        val bad = 0xFFEF5B5B.toInt()
+        fun dot(c: Int) = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(c) }
+
+        statusWifiDot?.background = dot(if (wifiOn) ok else bad)
+        statusWifiText?.text = if (wifiOn) "Gỡ lỗi Wi-Fi: Bật" else "Gỡ lỗi Wi-Fi: Tắt"
+
+        val (c, t) = when {
+            linked -> ok to "Kết nối: Đã kết nối"
+            !paired -> bad to "Kết nối: Chưa ghép nối"
+            !wifiOn -> bad to "Kết nối: Đã ngắt"
+            else -> warn to "Kết nối: Đang nối lại…"
+        }
+        statusLinkDot?.background = dot(c)
+        statusLinkText?.text = t
+    }
+
+    private val statusTick = object : Runnable {
+        override fun run() {
+            if (panelView == null || panelHidden) return
+            runCatching { refreshStatus() }
+            handler.postDelayed(this, STATUS_MS)
+        }
+    }
+
+    private fun startStatusTick() {
+        handler.removeCallbacks(statusTick)
+        handler.post(statusTick)
     }
 
     // ---- 3 nút góc phải: mắt / - / X ---------------------------------------
@@ -1208,6 +1287,7 @@ class OverlayService : Service() {
         resetPanelState()
         confirmLayer?.let { it.animate().cancel(); it.visibility = View.GONE }
         panelHidden = true
+        handler.removeCallbacks(statusTick)
         v.visibility = View.INVISIBLE
         if (p != null) {
             // Không chặn chạm xuống app phía sau khi đang ẩn
@@ -1229,10 +1309,13 @@ class OverlayService : Service() {
         }
         v.visibility = View.VISIBLE
         applySolid(solidAmount)
+        startStatusTick()
         if (shownTabIdx == 1) pointsTab?.enter()
     }
 
     private fun removePanel() {
+        handler.removeCallbacks(statusTick)
+        statusWifiDot = null; statusWifiText = null; statusLinkDot = null; statusLinkText = null
         panelHidden = false
         panelGhost = false
         pointsTab?.exit()
@@ -1298,6 +1381,7 @@ class OverlayService : Service() {
         private const val EDIT_DIM_REDUCE = 0.7f // đang chỉnh nút: nền tối nhạt đi 70%
         private const val SCRIM_SOLID_ALPHA = 0x66 // = SCRIM_ALPHA: tắt trong suốt chỉ làm card đặc, không đậm thêm lớp đen
 
+        private const val STATUS_MS = 1500L
         private const val WATCHDOG_MS = 2000L
         private const val ATTACH_GRACE_MS = 1500L
 
