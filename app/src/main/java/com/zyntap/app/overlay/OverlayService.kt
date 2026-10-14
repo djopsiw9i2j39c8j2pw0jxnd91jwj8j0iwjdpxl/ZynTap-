@@ -399,16 +399,16 @@ class OverlayService : Service() {
             setImageResource(R.drawable.logo_transparent)
             adjustViewBounds = true
             scaleType = ImageView.ScaleType.FIT_CENTER
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)))
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(22)))
         row.addView(TextView(this).apply {
             text = getString(R.string.app_name)
             setTextColor(0xFFE8EEFA.toInt())
-            textSize = 20f
+            textSize = 15f
             setTypeface(typeface, Typeface.BOLD)
         }, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT,
-        ).apply { marginStart = dp(10) })
+        ).apply { marginStart = dp(7) })
         return row
     }
 
@@ -424,12 +424,52 @@ class OverlayService : Service() {
         col.addView(buildHeader())
         col.addView(View(this), LinearLayout.LayoutParams(1, dp(14)))
 
-        val tabs = mutableListOf<TextView>()
-        fun select(i: Int) {
-            tabs.forEachIndexed { idx, t ->
-                (t.background as GradientDrawable).setColor(if (idx == i) 0xFF1E3A66.toInt() else 0x00000000)
-                t.setTextColor(if (idx == i) 0xFFFFFFFF.toInt() else 0xFF8D9DBA.toInt())
+        val tabH = dp(42)
+        val tabGap = dp(6)
+        val step = tabH + tabGap
+
+        // Khung chứa tab: thanh sáng nằm dưới, trượt tới tab được chọn
+        val box = FrameLayout(this)
+        val indicator = View(this).apply {
+            background = GradientDrawable().apply {
+                setColor(0xFF1E3A66.toInt())
+                cornerRadius = dp(10).toFloat()
             }
+        }
+        box.addView(indicator, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, tabH))
+
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(list, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+
+        val colorOff = 0xFF8D9DBA.toInt()
+        val colorOn = 0xFFFFFFFF.toInt()
+        val tabs = mutableListOf<TextView>()
+        var current = -1
+        fun select(i: Int, animate: Boolean) {
+            if (i == current) return
+            val target = i * step.toFloat()
+            indicator.animate().cancel()
+            if (animate) {
+                indicator.animate().translationY(target).setDuration(TAB_ANIM_MS)
+                    .setInterpolator(DecelerateInterpolator(1.8f)).start()
+            } else {
+                indicator.translationY = target
+            }
+            tabs.forEachIndexed { idx, t ->
+                val to = if (idx == i) colorOn else colorOff
+                if (animate) {
+                    android.animation.ValueAnimator.ofObject(
+                        android.animation.ArgbEvaluator(), t.currentTextColor, to,
+                    ).apply {
+                        duration = TAB_ANIM_MS
+                        addUpdateListener { t.setTextColor(it.animatedValue as Int) }
+                    }.start()
+                } else {
+                    t.setTextColor(to)
+                }
+            }
+            current = i
             onSelect(i)
         }
         tabNames.forEachIndexed { i, name ->
@@ -438,15 +478,15 @@ class OverlayService : Service() {
                 textSize = 15f
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(12), 0, dp(12), 0)
-                background = GradientDrawable().apply { cornerRadius = dp(10).toFloat() }
-                setOnClickListener { select(i) }
+                setOnClickListener { select(i, animate = true) }
             }
             tabs.add(t)
-            col.addView(t, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(42),
-            ).apply { bottomMargin = dp(6) })
+            list.addView(t, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, tabH,
+            ).apply { if (i < tabNames.lastIndex) bottomMargin = tabGap })
         }
-        select(0)
+        col.addView(box)
+        select(0, animate = false)
         return col
     }
 
@@ -583,6 +623,7 @@ class OverlayService : Service() {
         private const val MIN_TOUCH_W_DP = 36
         private const val MIN_TOUCH_H_DP = 72
         private const val PANEL_ANIM_MS = 280L
+        private const val TAB_ANIM_MS = 260L
 
         fun start(context: Context) {
             val intent = Intent(context, OverlayService::class.java).setAction(ACTION_SHOW)
