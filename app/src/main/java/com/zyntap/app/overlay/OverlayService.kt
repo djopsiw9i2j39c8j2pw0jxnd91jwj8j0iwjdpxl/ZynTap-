@@ -15,7 +15,10 @@ import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
@@ -44,6 +47,10 @@ class OverlayService : Service() {
     private var panelView: FrameLayout? = null
     private var panelCard: View? = null
     private var panelAnimating = false
+    private var handleDragging = false
+    private var handleAddedAt = 0L
+    private var panelAddedAt = 0L
+    private val handler = Handler(Looper.getMainLooper())
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -56,17 +63,85 @@ class OverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_HIDE -> closePanel()
-            ACTION_STOP -> stopSelf()
+            ACTION_STOP -> {
+                // Người dùng chủ động tắt -> không tự khôi phục nữa
+                setWanted(this, false)
+                stopSelf()
+                return START_NOT_STICKY
+            }
             else -> {
+                // intent == null: hệ thống tự dựng lại service sau khi bị kill
+                if (intent == null && !wanted(this)) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 ensureHandle()
+                startWatchdog()
             }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
         removeViews()
         super.onDestroy()
+    }
+
+    // ---- tự khôi phục khi menu nổi bị mất ----------------------------------
+
+    private val watchdog = object : Runnable {
+        override fun run() {
+            runCatching { checkHealth() }
+            handler.postDelayed(this, WATCHDOG_MS)
+        }
+    }
+
+    private fun startWatchdog() {
+        handler.removeCallbacks(watchdog)
+        handler.postDelayed(watchdog, WATCHDOG_MS)
+    }
+
+    /** Kiểm tra định kỳ: nút/menu bị hệ thống gỡ mất, hoặc nút kẹt trạng thái ẩn -> dựng lại. */
+    private fun checkHealth() {
+        val h = handleView
+        if (h == null) {
+            ensureHandle()
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        if (now - handleAddedAt > ATTACH_GRACE_MS && !h.isAttachedToWindow) {
+            runCatching { wm.removeViewImmediate(h) }
+            handleView = null
+            handleParams = null
+            ensureHandle()
+            return
+        }
+        val panel = panelView
+        if (panel != null && now - panelAddedAt > ATTACH_GRACE_MS && !panel.isAttachedToWindow) {
+            removePanel()
+        }
+        if (panelView == null && !panelAnimating && !handleDragging) {
+            if (h.alpha != 1f) h.alpha = 1f
+            if (h.visibility != View.VISIBLE) h.visibility = View.VISIBLE
+        }
+    }
+
+    // ---- lưu / đọc vị trí nút ----------------------------------------------
+
+    private val prefs get() = getSharedPreferences(PREFS, MODE_PRIVATE)
+
+    /** Lưu vị trí dọc dạng tỉ lệ 0..1 để đúng cả khi xoay màn hình. */
+    private fun saveHandlePosition() {
+        val p = handleParams ?: return
+        val range = (screenH - handleH).coerceAtLeast(1)
+        prefs.edit().putFloat(KEY_Y_RATIO, (p.y.toFloat() / range).coerceIn(0f, 1f)).apply()
+    }
+
+    private fun savedHandleY(): Int {
+        val ratio = prefs.getFloat(KEY_Y_RATIO, -1f)
+        val range = (screenH - handleH).coerceAtLeast(0)
+        return if (ratio in 0f..1f) (ratio * range).toInt() else range / 2
     }
 
     // ---- notification -------------------------------------------------------
@@ -97,14 +172,16 @@ class OverlayService : Service() {
             .addAction(0, "Tắt", stopIntent)
             .setOngoing(true)
             .build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIF_ID,
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-            )
-        } else {
-            startForeground(NOTIF_ID, notification)
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIF_ID,
+                    notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+                )
+            } else {
+                startForeground(NOTIF_ID, notification)
+            }
         }
     }
 
@@ -197,7 +274,7 @@ class OverlayService : Service() {
     private fun relayoutHandle() {
         val p = handleParams ?: return
         val v = handleView ?: return
-        p.y = placeHandleY(p.y)
+        if (!handleDragging) p.y = placeHandleY(savedHandleY())
         runCatching { wm.updateViewLayout(v, p) }
     }
 
@@ -214,6 +291,7 @@ class OverlayService : Service() {
 
     private fun ensureHandle() {
         if (handleView != null) return
+        if (!OverlayPermission.granted(this)) return
         // Vùng chạm luôn đủ to (>= 36x72dp) dù nút nhìn thấy nhỏ thế nào -> không bị mất tương tác
         val visW = dp(HANDLE_W_DP)
         val visH = dp(HANDLE_H_DP)
@@ -229,7 +307,7 @@ class OverlayService : Service() {
         ).apply {
             gravity = Gravity.START or Gravity.TOP
             x = 0
-            y = placeHandleY(screenH / 2 - touchH / 2)
+            y = placeHandleY(savedHandleY())
         }
         handleParams = params
 
@@ -266,6 +344,7 @@ class OverlayService : Service() {
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY; startY = params.y; mode = 0
+                    handleDragging = true
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -287,7 +366,9 @@ class OverlayService : Service() {
                     true
                 }
                 MotionEvent.ACTION_UP -> {
+                    handleDragging = false
                     when (mode) {
+                        2 -> saveHandlePosition() // nhớ vị trí nút cho lần sau
                         0 -> openPanel() // chạm nhẹ -> menu trượt ra có animation
                         1 -> {
                             val p = ((e.rawX - downX) / travel).coerceIn(0f, 1f)
@@ -297,7 +378,9 @@ class OverlayService : Service() {
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
+                    handleDragging = false
                     if (mode == 1) closePanel()
+                    if (mode == 2) saveHandlePosition()
                     true
                 }
                 else -> false
@@ -305,7 +388,13 @@ class OverlayService : Service() {
         }
 
         handleView = handle
-        runCatching { wm.addView(handle, params) }
+        handleAddedAt = SystemClock.uptimeMillis()
+        runCatching { wm.addView(handle, params) }.onFailure {
+            // Gắn thất bại -> bỏ ghi nhận để watchdog thử dựng lại
+            handleView = null
+            handleParams = null
+            return
+        }
         // Sau khi gắn vào cửa sổ mới có thông tin cutout -> đặt lại vị trí cho chắc
         handle.post { relayoutHandle() }
     }
@@ -386,7 +475,8 @@ class OverlayService : Service() {
 
         panelView = scrim
         panelCard = card
-        runCatching { wm.addView(scrim, params) }
+        panelAddedAt = SystemClock.uptimeMillis()
+        runCatching { wm.addView(scrim, params) }.onFailure { removePanel() }
     }
 
     /** Góc trên bên trái: logo không nền + tên app. */
@@ -412,7 +502,7 @@ class OverlayService : Service() {
         return row
     }
 
-    private val tabNames = listOf("Tab 1", "Tab 2")
+    private val tabNames = listOf("Tab 1", "Tab 2", "Tab 3")
 
     /** Cột bên trái: logo + tên app ở trên cùng, bên dưới là các tab xếp dọc. */
     private fun buildSidebar(onSelect: (Int) -> Unit): View {
@@ -627,7 +717,29 @@ class OverlayService : Service() {
         // Đường cong Material "standard": êm lúc bắt đầu, chậm dần mượt về cuối
         private val TAB_INTERPOLATOR get() = android.view.animation.PathInterpolator(0.4f, 0f, 0.2f, 1f)
 
+        private const val PREFS = "zyntap_overlay"
+        private const val KEY_WANTED = "wanted"
+        private const val KEY_Y_RATIO = "handle_y_ratio"
+        private const val WATCHDOG_MS = 2000L
+        private const val ATTACH_GRACE_MS = 1500L
+
+        private fun setWanted(context: Context, value: Boolean) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_WANTED, value).apply()
+        }
+
+        /** Người dùng đang muốn bật menu nổi (chưa bấm tắt). */
+        fun wanted(context: Context): Boolean =
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_WANTED, false)
+
+        /** Bật lại menu nổi nếu trước đó đang bật mà bị mất (cập nhật app, bị kill...). */
+        fun restoreIfWanted(context: Context) {
+            if (wanted(context) && OverlayPermission.granted(context)) {
+                runCatching { start(context) }
+            }
+        }
+
         fun start(context: Context) {
+            setWanted(context, true)
             val intent = Intent(context, OverlayService::class.java).setAction(ACTION_SHOW)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -637,6 +749,7 @@ class OverlayService : Service() {
         }
 
         fun stop(context: Context) {
+            setWanted(context, false)
             context.startService(Intent(context, OverlayService::class.java).setAction(ACTION_STOP))
         }
     }
