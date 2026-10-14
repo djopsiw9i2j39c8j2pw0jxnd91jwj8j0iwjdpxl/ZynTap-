@@ -72,7 +72,7 @@ internal class MacroUi(private val ctx: Context) {
         inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         gravity = Gravity.TOP or Gravity.START
-        isVerticalScrollBar = true
+        isVerticalScrollBarEnabled = true
         isScrollbarFadingEnabled = false
         isSingleLine = false
         minLines = 6
