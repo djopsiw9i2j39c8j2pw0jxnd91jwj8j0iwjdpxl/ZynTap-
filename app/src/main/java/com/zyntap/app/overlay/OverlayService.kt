@@ -1,5 +1,8 @@
 package com.zyntap.app.overlay
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,13 +10,17 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.util.DisplayMetrics
 import android.view.DisplayCutout
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -23,13 +30,17 @@ import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
+import android.view.animation.LinearInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
 import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.zyntap.app.R
 import kotlin.math.abs
 
@@ -39,6 +50,8 @@ import kotlin.math.abs
  *  - Kéo nút sang phải (hoặc chạm vào nút) -> menu 620x480dp trượt ra từ mép trái.
  *  - Chạm ra ngoài menu -> menu thu lại về nút (có animation); kéo menu sang trái cũng thu vào.
  *  - Góc trên bên trái menu: logo ZynTap (không nền) + tên app.
+ *  - Góc trên bên phải menu: 3 nút  mắt (bật/tắt giao diện trong suốt) / dấu trừ (thu menu) /
+ *    dấu X (hiện hộp xác nhận -> "Có" thì menu thu thành viên tròn logo rồi bay lên, tắt hẳn menu nổi).
  */
 class OverlayService : Service() {
 
@@ -46,6 +59,17 @@ class OverlayService : Service() {
     private var handleView: View? = null
     private var panelView: FrameLayout? = null
     private var panelCard: View? = null
+    private var panelContent: View? = null
+    private var panelControls: View? = null
+    private var cardBg: GradientDrawable? = null
+    private var confirmLayer: View? = null
+    private var confirmDialog: View? = null
+    private var eyeIcon: ImageView? = null
+    private var ghost = false          // đang ở chế độ giao diện trong suốt
+    private var ghostAmount = 0f       // 0 = đặc, 1 = trong suốt hẳn (để chuyển mượt)
+    private var ghostAnim: ValueAnimator? = null
+    private var closing = false        // đang chạy hiệu ứng đóng menu
+    private var closeAnim: ValueAnimator? = null
     private var panelAnimating = false
     private var handleDragging = false
     private var handleAddedAt = 0L
@@ -84,6 +108,9 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        closeAnim?.let { it.removeAllListeners(); it.cancel() }
+        closeAnim = null
+        ghostAnim?.cancel()
         removeViews()
         super.onDestroy()
     }
@@ -404,6 +431,7 @@ class OverlayService : Service() {
     /** Tạo cửa sổ menu (đang ẩn hoàn toàn bên trái) nếu chưa có. */
     private fun ensurePanel() {
         if (panelView != null) return
+        ghost = prefs.getBoolean(KEY_GHOST, false)
 
         val params = overlayParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -423,6 +451,7 @@ class OverlayService : Service() {
         var sDownX = 0f
         var sDragging = false
         scrim.setOnTouchListener { _, e ->
+            if (closing) return@setOnTouchListener true
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> { sDownX = e.rawX; sDragging = false; true }
                 MotionEvent.ACTION_MOVE -> {
@@ -441,16 +470,23 @@ class OverlayService : Service() {
             }
         }
 
-        val card = DragCard(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            background = GradientDrawable().apply {
-                setColor(0xF20D1524.toInt())
-                setStroke(dp(1), 0xFF1E2B44.toInt())
-                cornerRadius = dp(18).toFloat()
-            }
+        val bg = GradientDrawable().apply {
+            setColor(0xF20D1524.toInt())
+            setStroke(dp(1), 0xFF1E2B44.toInt())
+            cornerRadius = dp(18).toFloat()
+        }
+        // card = khung bo góc (nền + nút điều khiển + hộp xác nhận)
+        // content = phần nội dung bên trong, nơi kéo sang trái để thu menu
+        val card = FrameLayout(this).apply {
+            background = bg
             isClickable = true // nuốt chạm bên trong card
             translationX = hiddenX
         }
+        val content = DragCard(this).apply { orientation = LinearLayout.HORIZONTAL }
+        card.addView(
+            content,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+        )
         scrim.addView(
             card,
             FrameLayout.LayoutParams(cardW, cardH, Gravity.START or Gravity.CENTER_VERTICAL)
@@ -462,20 +498,37 @@ class OverlayService : Service() {
             textSize = 15f
             gravity = Gravity.CENTER
         }
-        card.addView(
+        content.addView(
             buildSidebar { index -> contentText.text = "Tab ${index + 1} — đang phát triển" },
             LinearLayout.LayoutParams(dp(150), LinearLayout.LayoutParams.MATCH_PARENT),
         )
-        card.addView(View(this).apply { setBackgroundColor(0xFF1E2B44.toInt()) },
+        content.addView(View(this).apply { setBackgroundColor(0xFF1E2B44.toInt()) },
             LinearLayout.LayoutParams(dp(1), LinearLayout.LayoutParams.MATCH_PARENT))
-        card.addView(
+        content.addView(
             contentText,
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f),
         )
 
+        // Góc trên bên phải: mắt / - / X
+        card.addView(
+            buildControls(),
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.END,
+            ).apply { topMargin = dp(10); marginEnd = dp(10) },
+        )
+        // Hộp xác nhận đóng menu (ẩn sẵn, nằm trên cùng trong card)
+        card.addView(
+            buildConfirm(),
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+        )
+
         panelView = scrim
         panelCard = card
+        panelContent = content
+        cardBg = bg
         panelAddedAt = SystemClock.uptimeMillis()
+        applyGhost(if (ghost) 1f else 0f)
         runCatching { wm.addView(scrim, params) }.onFailure { removePanel() }
     }
 
@@ -580,9 +633,234 @@ class OverlayService : Service() {
         return col
     }
 
+    // ---- 3 nút góc phải: mắt / - / X ---------------------------------------
+
+    private fun buildControls(): View {
+        val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val eye = iconButton(if (ghost) R.drawable.ic_eye_off else R.drawable.ic_eye) { toggleGhost() }
+        eyeIcon = eye
+        val minus = iconButton(R.drawable.ic_minus) { closePanel() }
+        val close = iconButton(R.drawable.ic_x) { showConfirm() }
+        listOf(eye, minus, close).forEachIndexed { i, v ->
+            bar.addView(v, LinearLayout.LayoutParams(dp(34), dp(34)).apply { if (i > 0) marginStart = dp(6) })
+        }
+        panelControls = bar
+        return bar
+    }
+
+    private fun roundedBg(color: Int, radiusDp: Int) = GradientDrawable().apply {
+        setColor(color)
+        cornerRadius = dp(radiusDp).toFloat()
+    }
+
+    private fun iconButton(res: Int, onClick: () -> Unit): ImageView = ImageView(this).apply {
+        setImageResource(res)
+        setColorFilter(0xFFE8EEFA.toInt())
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        val pad = dp(8)
+        setPadding(pad, pad, pad, pad)
+        background = RippleDrawable(
+            ColorStateList.valueOf(0x33FFFFFF), roundedBg(0x14FFFFFF, 10), roundedBg(Color.WHITE, 10),
+        )
+        isClickable = true
+        setOnClickListener { if (!closing) onClick() }
+    }
+
+    /** Mắt: bật/tắt giao diện trong suốt (nền card + nội dung mờ đi, bớt nền tối phía sau). */
+    private fun toggleGhost() {
+        ghost = !ghost
+        prefs.edit().putBoolean(KEY_GHOST, ghost).apply()
+        ghostAnim?.cancel()
+        ghostAnim = ValueAnimator.ofFloat(ghostAmount, if (ghost) 1f else 0f).apply {
+            duration = 260L
+            interpolator = TAB_INTERPOLATOR
+            addUpdateListener { applyGhost(it.animatedValue as Float) }
+            start()
+        }
+        // Đổi icon mắt mở <-> mắt gạch chéo, có nhún nhẹ
+        eyeIcon?.let { icon ->
+            icon.animate().cancel()
+            icon.animate().scaleX(0.6f).scaleY(0.6f).alpha(0.3f).setDuration(90L).withEndAction {
+                icon.setImageResource(if (ghost) R.drawable.ic_eye_off else R.drawable.ic_eye)
+                icon.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(180L)
+                    .setInterpolator(OvershootInterpolator(2f)).start()
+            }.start()
+        }
+    }
+
+    /** t: 0 = đặc, 1 = trong suốt. Nút điều khiển luôn rõ để còn bấm tắt chế độ này. */
+    private fun applyGhost(t: Float) {
+        ghostAmount = t
+        cardBg?.alpha = (255 + (GHOST_BG_ALPHA - 255) * t).toInt()
+        panelContent?.alpha = 1f + (GHOST_CONTENT_ALPHA - 1f) * t
+        panelView?.setBackgroundColor(Color.argb((0x66 * (1f - t)).toInt(), 0, 0, 0))
+    }
+
+    // ---- hộp xác nhận đóng menu --------------------------------------------
+
+    private fun buildConfirm(): View {
+        val layer = FrameLayout(this).apply {
+            background = roundedBg(0xB3050A15.toInt(), 18)
+            isClickable = true // nuốt chạm, không cho thao tác xuyên xuống menu
+            visibility = View.GONE
+            setOnClickListener { hideConfirm() } // chạm vùng tối ngoài hộp = "Không"
+        }
+        val dlg = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val p = dp(18)
+            setPadding(p, p, p, p)
+            background = GradientDrawable().apply {
+                setColor(0xFF121C30.toInt())
+                setStroke(dp(1), 0xFF1E2B44.toInt())
+                cornerRadius = dp(16).toFloat()
+            }
+            isClickable = true // chạm trong hộp không bị tính là chạm ra ngoài
+        }
+        dlg.addView(TextView(this).apply {
+            text = "Đóng menu?"
+            setTextColor(0xFFE8EEFA.toInt())
+            textSize = 17f
+            setTypeface(typeface, Typeface.BOLD)
+        })
+        dlg.addView(TextView(this).apply {
+            text = "Menu nổi sẽ được tắt hoàn toàn. Bạn có chắc muốn đóng không?"
+            setTextColor(0xFF8D9DBA.toInt())
+            textSize = 13.5f
+        }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(6) })
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        row.addView(
+            dialogButton("Không", 0xFF1E2B44.toInt(), 0xFFE8EEFA.toInt()) { hideConfirm() },
+            LinearLayout.LayoutParams(0, dp(40), 1f),
+        )
+        row.addView(
+            dialogButton("Có", 0xFFEF5B5B.toInt(), 0xFFFFFFFF.toInt()) { playCloseAnimation() },
+            LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(10) },
+        )
+        dlg.addView(row, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(16) })
+        layer.addView(dlg, FrameLayout.LayoutParams(dp(280), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        confirmLayer = layer
+        confirmDialog = dlg
+        return layer
+    }
+
+    private fun dialogButton(label: String, bgColor: Int, textColor: Int, onClick: () -> Unit) =
+        TextView(this).apply {
+            text = label
+            setTextColor(textColor)
+            textSize = 14.5f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            background = RippleDrawable(
+                ColorStateList.valueOf(0x33FFFFFF), roundedBg(bgColor, 12), roundedBg(Color.WHITE, 12),
+            )
+            isClickable = true
+            setOnClickListener { onClick() }
+        }
+
+    private fun showConfirm() {
+        val layer = confirmLayer ?: return
+        val dlg = confirmDialog ?: return
+        if (closing) return
+        layer.animate().cancel(); dlg.animate().cancel()
+        layer.visibility = View.VISIBLE
+        layer.alpha = 0f
+        dlg.alpha = 0f; dlg.scaleX = 0.86f; dlg.scaleY = 0.86f
+        layer.animate().alpha(1f).setDuration(180L).start()
+        dlg.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(260L)
+            .setInterpolator(OvershootInterpolator(1.2f)).start()
+    }
+
+    private fun hideConfirm() {
+        val layer = confirmLayer ?: return
+        val dlg = confirmDialog ?: return
+        layer.animate().cancel(); dlg.animate().cancel()
+        dlg.animate().alpha(0f).scaleX(0.92f).scaleY(0.92f).setDuration(150L).start()
+        layer.animate().alpha(0f).setDuration(150L)
+            .withEndAction { layer.visibility = View.GONE }.start()
+    }
+
+    // ---- hiệu ứng đóng menu: thu thành viên tròn logo rồi bay lên ----------
+
+    private fun playCloseAnimation() {
+        val card = panelCard ?: return
+        val scrim = panelView ?: return
+        if (closing) return
+        closing = true
+        setWanted(this, false) // chủ động đóng -> không tự khôi phục
+        handler.removeCallbacks(watchdog)
+        ghostAnim?.cancel()
+        card.animate().cancel(); scrim.animate().cancel()
+
+        // 1) Nội dung + nút mờ đi, chỉ còn lại khung card
+        val fadeMs = 160L
+        listOfNotNull(panelContent, panelControls, confirmLayer).forEach {
+            it.animate().cancel()
+            it.animate().alpha(0f).setDuration(fadeMs).start()
+        }
+
+        val orb = CloseOrbView(this, ContextCompat.getDrawable(this, R.drawable.logo_transparent)).apply {
+            fromRect = RectF(
+                card.left + card.translationX, card.top.toFloat(),
+                card.right + card.translationX, card.bottom.toFloat(),
+            )
+            fromRadius = dp(18).toFloat()
+            fromFillFactor = (cardBg?.alpha ?: 255) / 255f
+            visibility = View.INVISIBLE
+        }
+        scrim.addView(
+            orb,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+        )
+
+        val dim0 = (0x66 * (1f - ghostAmount)).toInt()
+        val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = CloseOrbView.DURATION_MS
+            interpolator = LinearInterpolator()
+            addUpdateListener {
+                val t = it.animatedValue as Float
+                orb.progress = t
+                // nền tối mờ dần trong lúc viên tròn bay lên
+                val dim = (dim0 * (1f - (t / 0.8f).coerceAtMost(1f))).toInt()
+                scrim.setBackgroundColor(Color.argb(dim, 0, 0, 0))
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) = finishClose()
+            })
+        }
+        closeAnim = anim
+
+        // 2) Hết mờ: ẩn card thật, thay bằng viên "orb" cùng hình dáng rồi bắt đầu thu nhỏ
+        handler.postDelayed({
+            if (closeAnim !== anim) return@postDelayed
+            card.visibility = View.INVISIBLE
+            orb.visibility = View.VISIBLE
+            orb.progress = 0f
+            anim.start()
+        }, fadeMs)
+    }
+
+    private fun finishClose() {
+        closeAnim = null
+        closing = false
+        if (wanted(this)) {
+            // Trong lúc đang đóng, người dùng bật lại menu từ app -> dựng lại nút thay vì tắt
+            removePanel()
+            ensureHandle()
+            handleView?.alpha = 1f
+            startWatchdog()
+        } else {
+            stopSelf()
+        }
+    }
+
     // ---- điều khiển + animation -------------------------------------------
 
     private fun beginPanelDrag() {
+        if (closing) return
         panelCard?.animate()?.cancel()
         panelView?.animate()?.cancel()
         handleView?.animate()?.cancel()
@@ -651,6 +929,7 @@ class OverlayService : Service() {
     }
 
     private fun openPanel() {
+        if (closing) return
         ensurePanel()
         val card = panelCard ?: return
         val scrim = panelView ?: return
@@ -667,6 +946,7 @@ class OverlayService : Service() {
     }
 
     private fun closePanel() {
+        if (closing) return
         val card = panelCard
         val scrim = panelView
         if (card == null || scrim == null) {
@@ -687,9 +967,16 @@ class OverlayService : Service() {
     }
 
     private fun removePanel() {
+        ghostAnim?.cancel()
         panelView?.let { runCatching { wm.removeView(it) } }
         panelView = null
         panelCard = null
+        panelContent = null
+        panelControls = null
+        cardBg = null
+        confirmLayer = null
+        confirmDialog = null
+        eyeIcon = null
     }
 
     private fun removeViews() {
@@ -720,6 +1007,10 @@ class OverlayService : Service() {
         private const val PREFS = "zyntap_overlay"
         private const val KEY_WANTED = "wanted"
         private const val KEY_Y_RATIO = "handle_y_ratio"
+        private const val KEY_GHOST = "ghost_mode"
+        // Chế độ trong suốt: độ đặc của nền card (0..255) và của phần nội dung (0..1)
+        private const val GHOST_BG_ALPHA = 60
+        private const val GHOST_CONTENT_ALPHA = 0.35f
         private const val WATCHDOG_MS = 2000L
         private const val ATTACH_GRACE_MS = 1500L
 
