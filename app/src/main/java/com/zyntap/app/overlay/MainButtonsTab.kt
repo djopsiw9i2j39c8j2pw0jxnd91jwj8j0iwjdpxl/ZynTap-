@@ -19,6 +19,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import com.zyntap.app.R
 
@@ -475,6 +476,9 @@ class MainButtonsTab(
             LinearLayout.LayoutParams(match, dp(46)),
         )
 
+        // Chạm xuyên
+        form.addView(passThroughRow(b, onChange = { onLive(); onCommit() }))
+
         // Độ mờ
         form.addView(slider("Độ mờ", MainButton.MIN_ALPHA, MainButton.MAX_ALPHA, b.alphaPct, "%",
             onValue = { b.alphaPct = it; onLive() }, onStop = onCommit))
@@ -482,6 +486,47 @@ class MainButtonsTab(
         form.addView(slider("Kích thước", MainButton.MIN_SIZE, MainButton.MAX_SIZE, b.sizeDp, " dp",
             onValue = { b.sizeDp = it; onLive() }, onStop = onCommit))
         return form
+    }
+
+    /** Công tắc "Chạm xuyên nút main": bật thì chạm vào nút vẫn lọt xuống app/màn hình bên dưới. */
+    private fun passThroughRow(b: MainButton, onChange: () -> Unit): View {
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(8), dp(10), dp(8))
+            background = round(0xFF142036.toInt(), 12, 0xFF1E2B44.toInt())
+        }
+        val texts = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        texts.addView(TextView(ctx).apply {
+            text = "Chạm xuyên nút"
+            setTextColor(0xFFE8EEFA.toInt())
+            textSize = 14.5f
+        })
+        texts.addView(TextView(ctx).apply {
+            text = "Bật: chạm nút main và màn hình bên dưới cùng lúc (cần ADB đang kết nối)"
+            setTextColor(0xFF8D9DBA.toInt())
+            textSize = 11.5f
+        })
+        row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
+        val sw = Switch(ctx).apply {
+            isChecked = b.passThrough
+            thumbTintList = ColorStateList.valueOf(0xFFFFFFFF.toInt())
+            trackTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(0xFF19D3FF.toInt(), 0xFF2A3A5C.toInt()),
+            )
+            setOnCheckedChangeListener { _, on ->
+                b.passThrough = on
+                onChange()
+            }
+        }
+        row.addView(sw, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        row.setOnClickListener { sw.toggle() }
+        return LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            setPadding(0, dp(12), 0, 0)
+        }
     }
 
     private fun fieldLabel(text: String) = TextView(ctx).apply {
@@ -593,11 +638,12 @@ class MainButtonsTab(
             background = round(0xFF0A1220.toInt(), 14, 0xFF1E2B44.toInt())
         }
         val preview = MainButtonView(ctx).apply {
-            number = draft.id
+            label = draft.name
             fillPct = draft.alphaPct
             ringPad = 0f
         }
         fun syncPreview() {
+            preview.label = draft.name
             preview.fillPct = draft.alphaPct
             val lp = preview.layoutParams
             val s = dp(draft.sizeDp)

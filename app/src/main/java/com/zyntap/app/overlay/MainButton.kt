@@ -18,6 +18,8 @@ class MainButton(
     var x: Float = 0.8f,
     var y: Float = 0.5f,
     var pointScript: String = "",
+    /** Chạm xuyên: chạm vào nút vừa kích hoạt nút main, vừa lọt xuống app bên dưới. */
+    var passThrough: Boolean = false,
 ) {
     val code: String get() = "main$id"
 
@@ -83,7 +85,8 @@ class MainButtonRepo(context: Context) {
                     .put("size", b.sizeDp)
                     .put("x", b.x.toDouble())
                     .put("y", b.y.toDouble())
-                    .put("pointScript", b.pointScript),
+                    .put("pointScript", b.pointScript)
+                    .put("passThrough", b.passThrough),
             )
         }
         prefs.edit().putString(KEY, arr.toString()).apply()
@@ -107,6 +110,7 @@ class MainButtonRepo(context: Context) {
                         sizeDp = o.optInt("size", MainButton.DEFAULT_SIZE)
                             .coerceIn(MainButton.MIN_SIZE, MainButton.MAX_SIZE),
                         pointScript = o.optString("pointScript", "").take(PointScriptParser.MAX_TEXT),
+                        passThrough = o.optBoolean("passThrough", false),
                         x = o.optDouble("x", 0.8).toFloat().coerceIn(0f, 1f),
                         y = o.optDouble("y", 0.5).toFloat().coerceIn(0f, 1f),
                     ),
