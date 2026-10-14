@@ -2,6 +2,7 @@ package com.zyntap.app.overlay
 
 import android.content.Context
 import android.graphics.Rect
+import com.zyntap.app.data.AdbSession
 import com.zyntap.app.data.ZynAdbConnectionManager
 import io.github.muntashirakon.adb.AdbStream
 import kotlinx.coroutines.*
@@ -81,8 +82,19 @@ class PointRunner(
             try {
                 val manager = withContext(Dispatchers.IO) { ZynAdbConnectionManager.get(context) }
                 if (!withContext(Dispatchers.IO) { manager.isConnected }) {
-                    message("Chưa kết nối ADB Wi-Fi. Mở app để ghép nối/kết nối trước.")
-                    return@launch
+                    // Chưa có kết nối sống -> tự nối (không bắt người dùng mở app nối tay)
+                    message("Đang kết nối ADB...")
+                    when (val link = AdbSession.connect(context)) {
+                        is AdbSession.Link.Connected -> Unit
+                        is AdbSession.Link.PairingLost -> {
+                            message("Máy đã quên khoá ghép nối. Mở app ghép nối lại bằng mã 6 số.")
+                            return@launch
+                        }
+                        is AdbSession.Link.Failed -> {
+                            message(link.message)
+                            return@launch
+                        }
+                    }
                 }
                 do {
                     for (step in script.steps) {
@@ -94,7 +106,22 @@ class PointRunner(
                                 if (targetBlocked(step.x, step.y)) error("Điểm nhấn trùng cửa sổ ZynTap")
                                 injectionLock.withLock {
                                     ensureActive()
-                                    withContext(Dispatchers.IO) { tap(manager, run, step) }
+                                    withContext(Dispatchers.IO) {
+                                        try {
+                                            tap(manager, run, step)
+                                        } catch (e: java.io.IOException) {
+                                            // Bị huỷ chủ động (nhả ngón/xoay màn hình) thì không nối lại
+                                            ensureActive()
+                                            // Kết nối chết giữa chừng -> nối lại 1 lần rồi thử lại bước này
+                                            AdbSession.drop(context)
+                                            val link = AdbSession.connect(context, attempts = 1)
+                                            if (link !is AdbSession.Link.Connected) {
+                                                throw IllegalStateException("ADB đã ngắt, đang nối lại. Thử lại sau giây lát.")
+                                            }
+                                            ensureActive()
+                                            tap(manager, run, step)
+                                        }
+                                    }
                                 }
                             }
                         }

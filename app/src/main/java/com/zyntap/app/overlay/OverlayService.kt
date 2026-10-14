@@ -43,6 +43,7 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.zyntap.app.R
+import com.zyntap.app.data.AdbSession
 import kotlin.math.abs
 
 /**
@@ -144,6 +145,7 @@ class OverlayService : Service() {
                 ensureHandle()
                 circles.ensureAll()
                 startWatchdog()
+                AdbSession.ensureInBackground(this)
             }
         }
         return START_STICKY
@@ -177,6 +179,8 @@ class OverlayService : Service() {
 
     /** Kiểm tra định kỳ: nút/menu bị hệ thống gỡ mất, hoặc nút kẹt trạng thái ẩn -> dựng lại. */
     private fun checkHealth() {
+        // Tự nối lại ADB khi mất kết nối (sau cập nhật app, bật lại gỡ lỗi Wi-Fi, đổi mạng...)
+        AdbSession.ensureInBackground(this)
         val h = handleView
         if (h == null) {
             ensureHandle()
@@ -569,12 +573,16 @@ class OverlayService : Service() {
             tab2.build(),
             placeholderTab(tabNames[2]),
         )
+        // Mỗi lần đóng menu là cả cửa sổ bị gỡ và dựng lại -> phải nhớ tab đang chọn ở ngoài,
+        // nếu không sẽ luôn quay về tab 1.
+        val startTab = prefs.getInt(KEY_TAB, 0).coerceIn(0, tabViews.lastIndex)
         val tabContainer = FrameLayout(this)
         tabViews.forEachIndexed { i, v ->
             tabContainer.addView(v, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            if (i != 0) { v.visibility = View.GONE; v.alpha = 0f }
+            if (i != startTab) { v.visibility = View.GONE; v.alpha = 0f }
         }
-        var shownTab = 0
+        if (startTab == 1) tab2.enter()
+        var shownTab = startTab
         fun showTab(i: Int) {
             if (i == shownTab) return
             val oldIdx = shownTab
@@ -592,10 +600,11 @@ class OverlayService : Service() {
             next.alpha = 0f
             next.animate().alpha(1f).setDuration(220L).start()
             shownTab = i
+            prefs.edit().putInt(KEY_TAB, i).apply()
         }
 
         content.addView(
-            buildSidebar { index -> showTab(index) },
+            buildSidebar(startTab) { index -> showTab(index) },
             LinearLayout.LayoutParams(dp(SIDEBAR_W_DP), LinearLayout.LayoutParams.MATCH_PARENT),
         )
         content.addView(View(this).apply { setBackgroundColor(0xFF1E2B44.toInt()) },
@@ -657,7 +666,7 @@ class OverlayService : Service() {
     private val tabNames = listOf("Tạo nút chính", "Chỉnh điểm nhấn", "Cài cấu hình")
 
     /** Cột bên trái: logo + tên app ở trên cùng, bên dưới là các tab xếp dọc. */
-    private fun buildSidebar(onSelect: (Int) -> Unit): View {
+    private fun buildSidebar(initialTab: Int, onSelect: (Int) -> Unit): View {
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             val p = dp(12)
@@ -730,7 +739,7 @@ class OverlayService : Service() {
             ).apply { if (i < tabNames.lastIndex) bottomMargin = tabGap })
         }
         col.addView(box)
-        select(0, animate = false)
+        select(initialTab.coerceIn(0, tabNames.lastIndex), animate = false)
         return col
     }
 
@@ -1211,6 +1220,7 @@ class OverlayService : Service() {
         private const val KEY_WANTED = "wanted"
         private const val KEY_Y_RATIO = "handle_y_ratio"
         private const val KEY_SOLID = "solid_mode"
+        private const val KEY_TAB = "active_tab"
         // Độ đặc (0..255) của nền card và nền tối phía sau: mặc định (trong suốt) và khi tắt trong suốt
         private const val CARD_ALPHA = 0xF2
         private const val SCRIM_ALPHA = 0x66
