@@ -58,7 +58,7 @@ object TapViews {
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
         setSingleLine(true)
         inputType = if (number) InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT
-        imeOptions = EditorInfo.IME_ACTION_DONE
+        imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
         background = GradientDrawable().apply {
             setColor(C_SURFACE)
             setStroke(2, C_BORDER)
@@ -149,7 +149,17 @@ object TapViews {
             isVerticalScrollBarEnabled = true
             isScrollbarFadingEnabled = false
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI
             setHorizontallyScrolling(false)
+            // Ô nằm trong ScrollView của tab: khi ô còn cuộn được thì kéo trong ô là cuộn nội dung ô
+            setOnTouchListener { v, ev ->
+                val inner = v.canScrollVertically(1) || v.canScrollVertically(-1)
+                v.parent?.requestDisallowInterceptTouchEvent(
+                    inner && ev.actionMasked != android.view.MotionEvent.ACTION_UP &&
+                        ev.actionMasked != android.view.MotionEvent.ACTION_CANCEL,
+                )
+                false
+            }
             background = GradientDrawable().apply {
                 setColor(C_SURFACE)
                 setStroke(2, C_BORDER)
@@ -161,7 +171,7 @@ object TapViews {
     }
 
     /** Ô nhập tọa độ nhỏ trong "click point [x] [y]" — chạm là mở bộ chọn điểm ghim. */
-    fun coordInput(ctx: Context, onTap: () -> Unit): EditText {
+    fun coordInput(ctx: Context, onTap: () -> Boolean): EditText {
         val e = EditText(ctx).apply {
             hint = "999"
             setHintTextColor(0x668D9DBA)
@@ -169,7 +179,7 @@ object TapViews {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_NUMBER
-            imeOptions = EditorInfo.IME_ACTION_DONE
+            imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
             background = GradientDrawable().apply {
                 setColor(C_SURFACE)
                 setStroke(2, C_BORDER)
@@ -177,10 +187,18 @@ object TapViews {
             }
             gravity = Gravity.CENTER
         }
-        // Chạm lần 1 -> mở ghim chọn điểm; ghim xong mới cho gõ tay (onTap bật cờ ở ngoài)
-        e.setOnTouchListener { v, event ->
-            if (event.action == android.view.MotionEvent.ACTION_DOWN) onTap()
-            false // vẫn cho EditText nhận focus/gõ
+        // onTap trả true (chưa có ghim -> vừa hiện ghim) thì nuốt cú chạm đó, chưa mở bàn phím.
+        // Trả false (đã có ghim) thì để EditText nhận focus để tự gõ/sửa.
+        var consumed = false
+        e.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> consumed = onTap()
+            }
+            val result = consumed
+            if (event.actionMasked == android.view.MotionEvent.ACTION_UP ||
+                event.actionMasked == android.view.MotionEvent.ACTION_CANCEL
+            ) consumed = false
+            result
         }
         return e
     }
@@ -192,7 +210,7 @@ object TapViews {
         selected: Boolean,
         onClick: () -> Unit,
     ): TextView = TextView(ctx).apply {
-        text = button.name
+        text = if (button.name == button.id) button.id else "${button.id}  •  ${button.name}"
         setTextColor(if (selected) Color.WHITE else C_TEXT)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         typeface = android.graphics.Typeface.DEFAULT_BOLD

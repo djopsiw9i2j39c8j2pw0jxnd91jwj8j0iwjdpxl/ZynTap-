@@ -36,6 +36,10 @@ import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.view.animation.OvershootInterpolator
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.text.Editable
+import android.text.TextWatcher
+import android.widget.Toast
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.view.WindowManager
@@ -96,9 +100,6 @@ class OverlayService : Service() {
     private var editingButtons = false // đang ở trạng thái "chỉnh sửa" -> không chạy bấm
     private var pinView: View? = null
     private var pinParams: WindowManager.LayoutParams? = null
-    private var pinTargetBtn: String? = null
-    private var pinTargetXInput: EditText? = null
-    private var pinTargetYInput: EditText? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -458,7 +459,7 @@ class OverlayService : Service() {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (sDragging) finishPanelDrag((1f + (e.rawX - sDownX) / travel).coerceIn(0f, 1f))
-                    else closePanel()
+                    else if (pinView == null) closePanel() // đang đặt ghim thì bấm ngoài không đóng nhầm
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> { if (sDragging) openPanel(); true }
@@ -495,6 +496,12 @@ class OverlayService : Service() {
         content.addView(
             buildSidebar { index ->
                 currentTab = index
+                if (editingButtons || selectedButtonForEdit != null) {
+                    editingButtons = false
+                    selectedButtonForEdit = null
+                    applyPanelWindow()
+                    refreshAllMainButtonsEditState()
+                }
                 renderTab()
             },
             LinearLayout.LayoutParams(dp(150), LinearLayout.LayoutParams.MATCH_PARENT),
@@ -685,7 +692,29 @@ class OverlayService : Service() {
         panelView?.setBackgroundColor(Color.argb(scrimAlpha(t), 0, 0, 0))
     }
 
-    private fun scrimAlpha(t: Float): Int = (SCRIM_ALPHA + (SCRIM_SOLID_ALPHA - SCRIM_ALPHA) * t).toInt()
+    private fun scrimAlpha(t: Float): Int =
+        if (editingButtons || pinView != null) 0
+        else (SCRIM_ALPHA + (SCRIM_SOLID_ALPHA - SCRIM_ALPHA) * t).toInt()
+
+    /**
+     * Khi đang chỉnh nút main: thu cửa sổ menu về đúng kích thước thẻ và cho chạm xuyên ra ngoài,
+     * nhờ vậy kéo/thả nút tròn trên màn hình mà menu không bị đóng nhầm. Thoát chỉnh sửa thì trả về toàn màn hình.
+     */
+    private fun applyPanelWindow() {
+        val scrim = panelView ?: return
+        val lp = scrim.layoutParams as? WindowManager.LayoutParams ?: return
+        if (editingButtons) {
+            lp.width = cardStart + cardW
+            lp.height = cardH
+            lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+        } else {
+            lp.width = WindowManager.LayoutParams.MATCH_PARENT
+            lp.height = WindowManager.LayoutParams.MATCH_PARENT
+            lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL.inv()
+        }
+        runCatching { wm.updateViewLayout(scrim, lp) }
+        applySolid(solidAmount)
+    }
 
     private fun buildConfirm(): View {
         val layer = FrameLayout(this).apply {
@@ -754,6 +783,13 @@ class OverlayService : Service() {
         val layer = confirmLayer ?: return
         val dlg = confirmDialog ?: return
         if (closing) return
+        if (editingButtons || selectedButtonForEdit != null) {
+            editingButtons = false
+            selectedButtonForEdit = null
+            applyPanelWindow()
+            refreshAllMainButtonsEditState()
+            renderTab()
+        }
         layer.animate().cancel(); dlg.animate().cancel()
         layer.visibility = View.VISIBLE
         layer.alpha = 0f
@@ -776,6 +812,7 @@ class OverlayService : Service() {
 
     private fun renderTab() {
         val host = tabHost ?: return
+        removePin()
         host.removeAllViews()
         when (currentTab) {
             0 -> host.addView(buildTabButtons(), FrameLayout.LayoutParams(
@@ -791,15 +828,27 @@ class OverlayService : Service() {
 
     private var selectedButtonForEdit: String? = null
 
+    /** Vào chỉnh sửa một nút main (id) hoặc thoát chỉnh sửa (null). */
+    private fun setEditing(id: String?) {
+        selectedButtonForEdit = id
+        editingButtons = id != null
+        applyPanelWindow()
+        if (editingButtons) raiseMainButtons()
+        refreshAllMainButtonsEditState()
+        renderTab()
+    }
+
     private fun buildTabButtons(): View {
         val root = TapViews.col(this)
-        val scroll = ScrollView(this)
+        val scroll = ScrollView(this).apply { isScrollbarFadingEnabled = false }
         val inner = TapViews.col(this)
 
         inner.addView(TapViews.label(this, "Settings nút main", 15f, TapViews.C_TEXT).apply {
             typeface = Typeface.DEFAULT_BOLD
         })
-        inner.addView(TapViews.label(this, "Tạo và chỉnh các nút main (main1, main2,...)."))
+        inner.addView(TapViews.label(this,
+            if (editingButtons) "Đang chỉnh sửa: kéo nút tròn ngoài màn hình để đặt vị trí. Ấn lại thanh nút bên dưới để thoát."
+            else "Tạo và chỉnh các nút main (main1, main2,...). Ấn vào thanh nút bên dưới để chỉnh."))
         inner.addView(TapViews.spacer(this, 12))
 
         val btn = selectedButtonForEdit?.let { id -> buttons.firstOrNull { it.id == id } }
@@ -808,7 +857,7 @@ class OverlayService : Service() {
             inner.addView(TapViews.label(this, "Mã: ${btn.id}", 12.5f, TapViews.C_CYAN))
             inner.addView(TapViews.spacer(this, 6))
 
-            // Tên
+            // Tên (cập nhật ngay khi gõ)
             inner.addView(TapViews.label(this, "Tên nút"))
             val nameInput = TapViews.editText(this, "Tên nút", number = false).apply {
                 setText(btn.name)
@@ -816,13 +865,15 @@ class OverlayService : Service() {
                     LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
                 ).apply { topMargin = dp(4) }
             }
-            nameInput.setOnFocusChangeListener { _, hasFocus ->
-                if (!hasFocus) {
-                    btn.name = nameInput.text.toString().ifBlank { btn.id }
+            nameInput.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: Editable?) {
+                    btn.name = s?.toString()?.trim().orEmpty().ifBlank { btn.id }
                     saveButtonsPersist()
                     refreshMainButtonLabel(btn)
                 }
-            }
+            })
             inner.addView(nameInput)
             inner.addView(TapViews.spacer(this, 10))
 
@@ -830,8 +881,11 @@ class OverlayService : Service() {
             inner.addView(TapViews.label(this, "Mode"))
             val modes = listOf(TapMode.TAP to "Nhấn", TapMode.HOLD to "Giữ", TapMode.RELEASE to "Thả")
             val modeSpinner = TapViews.makeSpinner(this, modes, { it.second }) { idx ->
-                btn.mode = modes[idx].first
-                saveButtonsPersist()
+                val m = modes.getOrNull(idx)?.first ?: return@makeSpinner
+                if (btn.mode != m) {
+                    btn.mode = m
+                    saveButtonsPersist()
+                }
             }
             modeSpinner.setSelection(modes.indexOfFirst { it.first == btn.mode }.coerceAtLeast(0))
             inner.addView(modeSpinner, LinearLayout.LayoutParams(
@@ -839,7 +893,7 @@ class OverlayService : Service() {
             ).apply { topMargin = dp(4) })
             inner.addView(TapViews.spacer(this, 10))
 
-            // Alpha
+            // Độ mờ
             inner.addView(TapViews.sliderRow(this, "Độ mờ (%)", btn.alphaPct, 10, 100) { v ->
                 btn.alphaPct = v
                 saveButtonsPersist()
@@ -860,9 +914,9 @@ class OverlayService : Service() {
             delBtn.setOnClickListener {
                 removeMainButton(btn.id)
                 buttons.remove(btn)
-                selectedButtonForEdit = null
                 saveButtonsPersist()
-                renderTab()
+                if (pointsSelectedId == btn.id) pointsSelectedId = null
+                setEditing(null)
             }
             inner.addView(delBtn, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
@@ -876,7 +930,7 @@ class OverlayService : Service() {
             LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
 
         inner.addView(TapViews.spacer(this, 14))
-        inner.addView(TapViews.label(this, "Thư mục nút (ấn vào thanh để chỉnh)"))
+        inner.addView(TapViews.label(this, "Thư mục nút (ấn vào thanh để chỉnh, ấn lần nữa để thoát)"))
         inner.addView(TapViews.spacer(this, 6))
 
         if (buttons.isEmpty()) {
@@ -885,11 +939,8 @@ class OverlayService : Service() {
             buttons.forEach { b ->
                 val sel = (selectedButtonForEdit == b.id)
                 val row = TapViews.buttonRow(this, b, sel) {
-                    // Ấn lần đầu -> mở settings; ấn lại chính nó -> thoát settings
-                    selectedButtonForEdit = if (sel) null else b.id
-                    editingButtons = selectedButtonForEdit != null
-                    renderTab()
-                    refreshAllMainButtonsEditState()
+                    // Ấn lần đầu -> vào chỉnh sửa; ấn lại chính thanh đó -> thoát chỉnh sửa
+                    setEditing(if (sel) null else b.id)
                 }
                 inner.addView(row, LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, dp(40)
@@ -908,12 +959,9 @@ class OverlayService : Service() {
         val id = TapStore.nextButtonId(this, buttons)
         val b = MainButton(id = id, name = id)
         buttons.add(b)
+        addMainButtonView(b) // đặt vị trí mặc định + lưu vào b.x / b.y
         saveButtonsPersist()
-        selectedButtonForEdit = id
-        editingButtons = true
-        addMainButtonView(b)
-        renderTab()
-        refreshAllMainButtonsEditState()
+        setEditing(id)
     }
 
     // --- Tab 2: Chỉnh điểm nhấn ---------------------------------------------
@@ -922,117 +970,141 @@ class OverlayService : Service() {
 
     private fun buildTabPoints(): View {
         val root = TapViews.col(this)
+        val scroll = ScrollView(this).apply { isScrollbarFadingEnabled = false }
+        val inner = TapViews.col(this)
+
+        val list = buttons.toList()
+        val btn = list.firstOrNull { it.id == pointsSelectedId } ?: list.firstOrNull()
+        pointsSelectedId = btn?.id
 
         // Dropdown chọn nút main
-        root.addView(TapViews.label(this, "Nút main sẽ kết nối"))
-        val list = buttons.toList()
-        val labels = list.map { it.id + " — " + it.name }
+        inner.addView(TapViews.label(this, "Nút main sẽ kết nối"))
         val spinner = TapViews.makeSpinner(this, list, { b -> b.id + " — " + b.name }) { idx ->
-            // Spinner tự gọi callback này ngay lần hiển thị đầu -> chỉ dựng lại tab khi
-            // người dùng THỰC SỰ đổi nút, nếu không sẽ lặp vô hạn rồi sập app.
-            val newId = list.getOrNull(idx)?.id
-            if (newId != null && newId != pointsSelectedId) {
-                pointsSelectedId = newId
-                handler.post { if (currentTab == 1) renderTab() }
+            val id = list.getOrNull(idx)?.id
+            // Chỉ dựng lại khi thật sự đổi nút (tránh lặp vô hạn do callback chọn lần đầu)
+            if (id != null && id != pointsSelectedId) {
+                pointsSelectedId = id
+                renderTab()
             }
         }
         if (list.isEmpty()) spinner.isEnabled = false
-        val startIdx = list.indexOfFirst { it.id == pointsSelectedId }.coerceAtLeast(0)
-        if (list.isNotEmpty()) spinner.setSelection(startIdx)
-        root.addView(spinner, LinearLayout.LayoutParams(
+        else spinner.setSelection(list.indexOfFirst { it.id == btn?.id }.coerceAtLeast(0))
+        inner.addView(spinner, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
         ).apply { topMargin = dp(4) })
-        root.addView(TapViews.spacer(this, 10))
+        inner.addView(TapViews.spacer(this, 10))
 
-        val btn = (pointsSelectedId ?: list.firstOrNull()?.id)?.let { id -> buttons.firstOrNull { it.id == id } }
         if (btn == null) {
-            root.addView(TapViews.label(this, "Hãy tạo một nút main trước ở tab 'Tạo nút chính'."))
+            inner.addView(TapViews.label(this, "Hãy tạo một nút main trước ở tab 'Tạo nút chính'."))
+            scroll.addView(inner, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+            root.addView(scroll, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT))
             return root
         }
-        pointsSelectedId = btn.id
 
-        // Ô mã lệnh to
-        root.addView(TapViews.label(this, "Chuỗi tọa độ + delay"))
-        val script = TapViews.scriptBox(this, 160).apply { setText(btn.script) }
-        script.setOnFocusChangeListener { _, has ->
-            if (!has) { btn.script = script.text.toString(); saveButtonsPersist() }
-        }
-        root.addView(script, LinearLayout.LayoutParams(
+        // Ô mã lệnh to, kéo lên xuống được; tự lưu mỗi khi nội dung đổi
+        inner.addView(TapViews.label(this, "Chuỗi tọa độ + delay"))
+        val script = TapViews.scriptBox(this, 150).apply { setText(btn.script) }
+        script.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+            override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                btn.script = s?.toString().orEmpty()
+                saveButtonsPersist()
+            }
+        })
+        inner.addView(script, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(4) })
-        root.addView(TapViews.spacer(this, 10))
+        inner.addView(TapViews.spacer(this, 10))
 
-        // Hàng click point [x] [y]
-        root.addView(TapViews.label(this, "click point"))
-        val xIn = TapViews.coordInput(this) {
-            // chạm lần đầu -> hiện ghim; nếu đã có ghim chọn cho cùng ô thì không tạo lại
-            if (pinTargetXInput !== null && pinTargetYInput !== null && pinTargetBtn == btn.id) return@coordInput
-            showPin(btn)
+        // click point [x] [y]
+        lateinit var xIn: EditText
+        lateinit var yIn: EditText
+        // Chạm lần đầu vào ô bất kỳ -> hiện ghim (nuốt cú chạm, chưa mở bàn phím);
+        // có ghim rồi thì chạm ô là để tự gõ/sửa.
+        val onFirstTouch: () -> Boolean = {
+            if (pinView == null) { showPin(xIn, yIn); true } else false
         }
-        val yIn = TapViews.coordInput(this) {
-            if (pinTargetXInput !== null && pinTargetYInput !== null && pinTargetBtn == btn.id) return@coordInput
-            showPin(btn)
-        }
+        xIn = TapViews.coordInput(this, onFirstTouch)
+        yIn = TapViews.coordInput(this, onFirstTouch)
+
         val coordRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+        coordRow.addView(TapViews.label(this, "click point", 13.5f, TapViews.C_TEXT),
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(8) })
         coordRow.addView(xIn, LinearLayout.LayoutParams(0, dp(42), 1f))
         coordRow.addView(View(this), LinearLayout.LayoutParams(dp(8), 1))
         coordRow.addView(yIn, LinearLayout.LayoutParams(0, dp(42), 1f))
-        root.addView(coordRow, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(4) })
+        inner.addView(coordRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
-        // Ấn Enter -> ghi dòng tọa độ vào ô script
+        // Enter -> ghi dòng "x, y" vào ô mã lệnh rồi xuống dòng
         val commit = {
             val x = xIn.text.toString().trim().toIntOrNull()
             val y = yIn.text.toString().trim().toIntOrNull()
-            if (x != null && y != null) {
-                appendLine(script, "$x, $y")
-                btn.script = script.text.toString()
-                saveButtonsPersist()
-                xIn.setText(""); yIn.setText("")
-                removePin()
+            when {
+                x == null -> xIn.requestFocus()
+                y == null -> yIn.requestFocus()
+                else -> {
+                    appendLine(script, "$x, $y")
+                    xIn.setText(""); yIn.setText("")
+                    xIn.clearFocus(); yIn.clearFocus()
+                    hideKeyboard(xIn)
+                    removePin()
+                }
+            }
+            Unit
+        }
+        for (field in listOf(xIn, yIn)) {
+            field.setOnEditorActionListener { _, actionId, event ->
+                val enter = actionId == EditorInfo.IME_ACTION_DONE ||
+                    actionId == EditorInfo.IME_ACTION_NEXT ||
+                    (event != null && event.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
+                if (enter) { commit(); true } else false
             }
         }
-        xIn.setOnEditorActionListener { _, actionId, event ->
-            val enter = actionId == EditorInfo.IME_ACTION_DONE ||
-                (event != null && event.keyCode == KeyEvent.KEYCODE_ENTER)
-            if (enter) { commit(); true } else false
-        }
-        yIn.setOnEditorActionListener { _, actionId, event ->
-            val enter = actionId == EditorInfo.IME_ACTION_DONE ||
-                (event != null && event.keyCode == KeyEvent.KEYCODE_ENTER)
-            if (enter) { commit(); true } else false
-        }
 
-        root.addView(TapViews.spacer(this, 10))
+        inner.addView(TapViews.spacer(this, 10))
 
-        // Hàng Delay [nhập ms]
-        root.addView(TapViews.label(this, "Delay (ms)"))
-        val delayIn = TapViews.editText(this, "ví dụ 300").apply {
-            imeOptions = EditorInfo.IME_ACTION_DONE
+        // Delay [nhập ms] -> Enter ghi "300ms" vào ô mã lệnh
+        val delayIn = TapViews.editText(this, "nhập ms rồi Enter").apply {
+            imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
         delayIn.setOnEditorActionListener { _, actionId, event ->
             val enter = actionId == EditorInfo.IME_ACTION_DONE ||
-                (event != null && event.keyCode == KeyEvent.KEYCODE_ENTER)
+                (event != null && event.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
             if (enter) {
                 val v = delayIn.text.toString().trim().toIntOrNull()
                 if (v != null && v >= 0) {
                     appendLine(script, "${v}ms")
-                    btn.script = script.text.toString()
-                    saveButtonsPersist()
                     delayIn.setText("")
+                    delayIn.clearFocus()
+                    hideKeyboard(delayIn)
                 }
                 true
             } else false
         }
-        root.addView(delayIn, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(42)
-        ).apply { topMargin = dp(4) })
+        val delayRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        delayRow.addView(TapViews.label(this, "Delay", 13.5f, TapViews.C_TEXT),
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(8) })
+        delayRow.addView(delayIn, LinearLayout.LayoutParams(0, dp(42), 1f))
+        inner.addView(delayRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
+        scroll.addView(inner, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+        root.addView(scroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT))
         return root
     }
 
@@ -1040,11 +1112,29 @@ class OverlayService : Service() {
         val cur = script.text.toString()
         val sep = if (cur.isEmpty() || cur.endsWith("\n")) "" else "\n"
         script.append("$sep$line\n")
+        script.setSelection(script.text.length)
+    }
+
+    private fun hideKeyboard(v: View) {
+        runCatching {
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                .hideSoftInputFromWindow(v.windowToken, 0)
+        }
+    }
+
+    private fun showKeyboard(v: View) {
+        v.post {
+            runCatching {
+                (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                    .showSoftInput(v, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
     }
 
     // --- Tab 3: Cài cấu hình -------------------------------------------------
 
     private var selectedConfig: String? = null
+    private var configStatus: String = ""
 
     private fun buildTabConfig(): View {
         val root = TapViews.col(this)
@@ -1096,7 +1186,7 @@ class OverlayService : Service() {
         root.addView(btnRow, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
-        val status = TapViews.label(this, "", 12.5f, TapViews.C_CYAN)
+        val status = TapViews.label(this, configStatus, 12.5f, TapViews.C_CYAN)
         root.addView(status, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(10) })
@@ -1104,9 +1194,13 @@ class OverlayService : Service() {
         createBtn.setOnClickListener {
             val name = nameIn.text.toString().trim()
             if (name.isEmpty()) { status.text = "Nhập tên cấu hình đã nha."; return@setOnClickListener }
+            if (TapStore.configNames(this).contains(name)) {
+                status.text = "Tên \"$name\" đã có — chọn nó rồi ấn Cập nhật, hoặc đặt tên khác."
+                return@setOnClickListener
+            }
             TapStore.saveConfig(this, name, buttons)
             selectedConfig = name
-            status.text = "Đã tạo cấu hình: $name"
+            configStatus = "Đã tạo cấu hình: $name"
             renderTab()
         }
         loadBtn.setOnClickListener {
@@ -1115,19 +1209,24 @@ class OverlayService : Service() {
             removeAllMainButtons()
             buttons.clear(); buttons.addAll(list)
             saveButtonsPersist()
+            selectedButtonForEdit = null
+            editingButtons = false
+            pointsSelectedId = null
             list.forEach { addMainButtonView(it) }
-            status.text = "Đã nạp: $n"
+            configStatus = "Đã nạp: $n"
+            status.text = configStatus
         }
         updBtn.setOnClickListener {
             val n = selectedConfig ?: return@setOnClickListener
             TapStore.saveConfig(this, n, buttons)
-            status.text = "Đã cập nhật: $n"
+            configStatus = "Đã cập nhật: $n"
+            status.text = configStatus
         }
         delBtn.setOnClickListener {
             val n = selectedConfig ?: return@setOnClickListener
             TapStore.deleteConfig(this, n)
             selectedConfig = null
-            status.text = "Đã xoá: $n"
+            configStatus = "Đã xoá: $n"
             renderTab()
         }
 
@@ -1141,25 +1240,40 @@ class OverlayService : Service() {
         buttons.forEach { b -> addMainButtonView(b) }
     }
 
+    /** Vị trí mặc định: sát mép phải (ngoài vùng thẻ menu), các nút xếp lệch nhau cho dễ thấy. */
+    private fun defaultButtonPos(index: Int, sizePx: Int): Pair<Int, Int> {
+        val x = (screenW - sizePx - dp(28)).coerceAtLeast(0)
+        val step = sizePx + dp(10)
+        val y = ((screenH - sizePx) / 2 + ((index % 5) - 2) * step).coerceIn(0, (screenH - sizePx).coerceAtLeast(0))
+        return x to y
+    }
+
     private fun addMainButtonView(b: MainButton) {
         if (mainButtonViews.containsKey(b.id)) return
         val sizePx = dp(b.sizeDp)
+        if (b.x < 0 || b.y < 0) {
+            val (dx, dy) = defaultButtonPos(buttons.indexOf(b).coerceAtLeast(0), sizePx)
+            b.x = dx; b.y = dy
+        }
         val lp = overlayParams(sizePx, sizePx,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS).apply {
             gravity = Gravity.START or Gravity.TOP
-            x = if (b.x >= 0) b.x else (screenW - sizePx) / 2
-            y = if (b.y >= 0) b.y else (screenH - sizePx) / 2
+            x = b.x.coerceIn(0, (screenW - sizePx).coerceAtLeast(0))
+            y = b.y.coerceIn(0, (screenH - sizePx).coerceAtLeast(0))
         }
         val v = FrameLayout(this).apply {
-            background = circleBg(b)
+            background = circleBg(false)
             val tv = TextView(context).apply {
                 text = b.name
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 gravity = Gravity.CENTER
                 typeface = Typeface.DEFAULT_BOLD
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(dp(4), 0, dp(4), 0)
             }
             addView(tv, FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER))
@@ -1171,10 +1285,10 @@ class OverlayService : Service() {
         mainButtonParams[b.id] = lp
     }
 
-    private fun circleBg(b: MainButton): GradientDrawable = GradientDrawable().apply {
+    private fun circleBg(selected: Boolean): GradientDrawable = GradientDrawable().apply {
         shape = GradientDrawable.OVAL
         setColor(0xCC1E3A66.toInt())
-        setStroke(dp(2), 0xFF19D3FF.toInt())
+        setStroke(dp(if (selected) 3 else 2), if (selected) 0xFFFFC857.toInt() else 0xFF19D3FF.toInt())
     }
 
     private fun applyMainButtonLook(b: MainButton) {
@@ -1182,7 +1296,11 @@ class OverlayService : Service() {
         v.alpha = b.alphaPct / 100f
         val lp = mainButtonParams[b.id] ?: return
         val size = dp(b.sizeDp)
+        // đổi size quanh tâm để nút không "nhảy" vị trí
+        lp.x = (lp.x + (lp.width - size) / 2).coerceIn(0, (screenW - size).coerceAtLeast(0))
+        lp.y = (lp.y + (lp.height - size) / 2).coerceIn(0, (screenH - size).coerceAtLeast(0))
         lp.width = size; lp.height = size
+        b.x = lp.x; b.y = lp.y
         (v as? FrameLayout)?.getChildAt(0)?.let { (it as TextView).text = b.name }
         runCatching { wm.updateViewLayout(v, lp) }
     }
@@ -1203,65 +1321,85 @@ class OverlayService : Service() {
         mainButtonParams.clear()
     }
 
-    private fun refreshAllMainButtonsEditState() {
-        // không đổi hình, chỉ dùng cờ editingButtons trong touch listener
+    /** Thêm lại cửa sổ các nút main để chúng nằm TRÊN thẻ menu (kéo được cả khi thẻ che vị trí nút). */
+    private fun raiseMainButtons() {
+        buttons.forEach { b ->
+            val v = mainButtonViews[b.id] ?: return@forEach
+            val lp = mainButtonParams[b.id] ?: return@forEach
+            runCatching { wm.removeViewImmediate(v) }
+            runCatching { wm.addView(v, lp) }
+        }
     }
 
+    /** Nút đang được chỉnh sửa thì viền vàng, các nút khác viền xanh. */
+    private fun refreshAllMainButtonsEditState() {
+        buttons.forEach { b ->
+            val v = mainButtonViews[b.id] ?: return@forEach
+            v.background = circleBg(editingButtons && selectedButtonForEdit == b.id)
+        }
+    }
+
+    private fun toast(msg: String) {
+        handler.post { Toast.makeText(applicationContext, msg, Toast.LENGTH_SHORT).show() }
+    }
+
+    /**
+     * Cảm ứng của nút main:
+     *  - Đang chỉnh sửa: kéo để đổi vị trí, chạm để chọn nút đó; không chạy bấm.
+     *  - Bình thường: Nhấn = chạy 1 lần ngay khi chạm; Giữ = lặp khi còn giữ, thả là dừng;
+     *    Thả = giữ rồi thả ngón mới chạy 1 lần.
+     */
     private fun attachMainButtonTouch(v: View, lp: WindowManager.LayoutParams, b: MainButton) {
         val slop = dp(8)
         var downX = 0f; var downY = 0f
         var startX = 0; var startY = 0
         var dragging = false
-        var downTime = 0L
         v.setOnTouchListener { _, e ->
+            // Menu đang mở mà không ở chế độ chỉnh sửa -> nút main không phản ứng (tránh bấm nhầm)
+            if (panelView != null && !editingButtons) return@setOnTouchListener true
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY
                     startX = lp.x; startY = lp.y
                     dragging = false
-                    downTime = SystemClock.uptimeMillis()
-                    if (editingButtons && b.mode == TapMode.HOLD) {
-                        // không chạy khi đang edit
-                    } else if (!editingButtons && b.mode == TapMode.HOLD) {
-                        TapExecutor.startLoop(this, b.script)
+                    if (!editingButtons) {
+                        when (b.mode) {
+                            TapMode.TAP -> TapExecutor.runOnce(this, b.script) { toast(it) }
+                            TapMode.HOLD -> TapExecutor.startLoop(this, b.script) { toast(it) }
+                            TapMode.RELEASE -> {}
+                        }
                     }
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = e.rawX - downX
-                    val dy = e.rawY - downY
-                    if (!dragging && (abs(dx) > slop || abs(dy) > slop)) {
-                        // chỉ cho kéo khi đang chỉnh sửa, hoặc giữ lâu > 400ms
-                        if (editingButtons || SystemClock.uptimeMillis() - downTime > 400) {
-                            dragging = true
-                            if (!editingButtons && b.mode == TapMode.HOLD) TapExecutor.stopLoop()
+                    if (editingButtons) {
+                        val dx = e.rawX - downX
+                        val dy = e.rawY - downY
+                        if (!dragging && (abs(dx) > slop || abs(dy) > slop)) dragging = true
+                        if (dragging) {
+                            lp.x = (startX + dx.toInt()).coerceIn(0, (screenW - lp.width).coerceAtLeast(0))
+                            lp.y = (startY + dy.toInt()).coerceIn(0, (screenH - lp.height).coerceAtLeast(0))
+                            runCatching { wm.updateViewLayout(v, lp) }
                         }
-                    }
-                    if (dragging) {
-                        lp.x = (startX + dx.toInt()).coerceIn(0, (screenW - lp.width).coerceAtLeast(0))
-                        lp.y = (startY + dy.toInt()).coerceIn(0, (screenH - lp.height).coerceAtLeast(0))
-                        runCatching { wm.updateViewLayout(v, lp) }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    val wasDrag = dragging
-                    dragging = false
-                    if (wasDrag) {
-                        b.x = lp.x; b.y = lp.y; saveButtonsPersist()
+                    if (editingButtons) {
+                        if (dragging) {
+                            b.x = lp.x; b.y = lp.y
+                            saveButtonsPersist()
+                        } else if (selectedButtonForEdit != b.id) {
+                            setEditing(b.id) // chạm nút khác trong lúc chỉnh -> chuyển sang chỉnh nút đó
+                        }
                     } else {
-                        if (!editingButtons) {
-                            when (b.mode) {
-                                TapMode.TAP -> TapExecutor.runOnce(this, b.script)
-                                TapMode.RELEASE -> TapExecutor.runOnce(this, b.script)
-                                TapMode.HOLD -> TapExecutor.stopLoop()
-                            }
-                        } else if (!editingButtons.not() && b.mode == TapMode.HOLD) {
-                            TapExecutor.stopLoop()
-                        } else if (b.mode == TapMode.HOLD) {
-                            TapExecutor.stopLoop()
+                        when (b.mode) {
+                            TapMode.HOLD -> TapExecutor.stopLoop()
+                            TapMode.RELEASE -> TapExecutor.runOnce(this, b.script) { toast(it) }
+                            TapMode.TAP -> {}
                         }
                     }
+                    dragging = false
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
@@ -1280,7 +1418,11 @@ class OverlayService : Service() {
 
     // ---- GHIM CHỌN ĐIỂM (map pin) ------------------------------------------
 
-    private fun showPin(b: MainButton) {
+    /**
+     * Hiện ghim nền trong suốt để kéo tới điểm cần bấm. Chạm vào ghim -> điền tọa độ (đầu ghim)
+     * vào 2 ô x, y và bật bàn phím để ấn Enter chốt dòng vào ô mã lệnh.
+     */
+    private fun showPin(xIn: EditText, yIn: EditText) {
         removePin()
         val sizePx = dp(56)
         val lp = overlayParams(sizePx, sizePx,
@@ -1288,8 +1430,8 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS).apply {
             gravity = Gravity.START or Gravity.TOP
-            x = (screenW - sizePx) / 2
-            y = (screenH - sizePx) / 2
+            x = (screenW - sizePx - dp(28)).coerceAtLeast(0)
+            y = ((screenH - sizePx) / 2).coerceAtLeast(0)
         }
         val pin = FrameLayout(this).apply {
             addView(ImageView(context).apply {
@@ -1325,43 +1467,39 @@ class OverlayService : Service() {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!dragging) {
-                        // Chạm vào ghim -> chốt tọa độ (đầu ghim nằm ở giữa dưới)
+                        // Chạm vào ghim -> chốt tọa độ tại đầu ghim (giữa, sát đáy)
                         val cx = lp.x + lp.width / 2
                         val cy = lp.y + lp.height - dp(4)
-                        pinTargetXInput?.setText("$cx")
-                        pinTargetYInput?.setText("$cy")
-                        pinTargetXInput?.requestFocus()
+                        xIn.setText("$cx")
+                        yIn.setText("$cy")
+                        xIn.requestFocus()
+                        xIn.setSelection(xIn.text.length)
+                        showKeyboard(xIn)
                     }
                     true
                 }
+                MotionEvent.ACTION_CANCEL -> true
                 else -> false
             }
         }
         runCatching { wm.addView(pin, lp) }.onFailure { return }
         pinView = pin
         pinParams = lp
-        pinTargetBtn = b.id
-        // tìm 2 EditText coord trong tab 2
-        val host = tabHost ?: return
-        val list = mutableListOf<EditText>()
-        findEditTexts(host, list)
-        pinTargetXInput = list.getOrNull(1) // index 1 = x (ô mã lệnh = 0)
-        pinTargetYInput = list.getOrNull(2) // index 2 = y
+        // Bỏ nền tối + làm mờ thẻ menu để nhìn thấy màn hình bên dưới khi đặt điểm
+        panelCard?.animate()?.cancel()
+        panelCard?.animate()?.alpha(0.55f)?.setDuration(160L)?.start()
+        applySolid(solidAmount)
     }
 
     private fun removePin() {
+        val had = pinView != null
         pinView?.let { runCatching { wm.removeView(it) } }
         pinView = null
         pinParams = null
-        pinTargetBtn = null
-        pinTargetXInput = null
-        pinTargetYInput = null
-    }
-
-    private fun findEditTexts(v: View, out: MutableList<EditText>) {
-        if (v is EditText) { out.add(v); return }
-        if (v is ViewGroup) {
-            for (i in 0 until v.childCount) findEditTexts(v.getChildAt(i), out)
+        if (had) {
+            panelCard?.animate()?.cancel()
+            panelCard?.animate()?.alpha(1f)?.setDuration(160L)?.start()
+            applySolid(solidAmount)
         }
     }
 
@@ -1510,6 +1648,12 @@ class OverlayService : Service() {
     private fun closePanel() {
         if (closing) return
         removePin()
+        if (editingButtons || selectedButtonForEdit != null) {
+            editingButtons = false
+            selectedButtonForEdit = null
+            applyPanelWindow()
+            refreshAllMainButtonsEditState()
+        }
         val card = panelCard
         val scrim = panelView
         if (card == null || scrim == null) {
@@ -1531,6 +1675,8 @@ class OverlayService : Service() {
     private fun removePanel() {
         solidAnim?.cancel()
         removePin()
+        editingButtons = false
+        selectedButtonForEdit = null
         panelView?.let { runCatching { wm.removeView(it) } }
         panelView = null
         panelCard = null
