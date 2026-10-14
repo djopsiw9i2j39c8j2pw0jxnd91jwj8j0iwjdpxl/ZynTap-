@@ -7,10 +7,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.Typeface
-import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
@@ -20,15 +19,12 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
-import android.widget.GridLayout
-import android.widget.ScrollView
 import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.zyntap.app.R
-import com.zyntap.app.data.AppRepository
 import kotlin.math.abs
 
 /**
@@ -45,14 +41,12 @@ class OverlayService : Service() {
     private var panelView: FrameLayout? = null
     private var panelCard: View? = null
     private var panelAnimating = false
-    private var repo: AppRepository? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        repo = AppRepository(this)
         startForegroundWithNotification()
     }
 
@@ -141,6 +135,7 @@ class OverlayService : Service() {
         if (handleView != null) return
         val w = dp(HANDLE_W_DP)
         val h = dp(HANDLE_H_DP)
+        val logo = dp(26)
         val params = overlayParams(
             w, h,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -158,7 +153,14 @@ class OverlayService : Service() {
             addView(ImageView(context).apply {
                 setImageResource(R.drawable.logo_transparent)
                 scaleType = ImageView.ScaleType.FIT_CENTER
-            }, FrameLayout.LayoutParams(w - dp(10), w - dp(10), Gravity.CENTER))
+            }, FrameLayout.LayoutParams(logo, logo, Gravity.END or Gravity.CENTER_VERTICAL)
+                .apply { marginEnd = dp(8) })
+            // Vuốt từ mép trái là cử chỉ Back của hệ thống -> loại vùng nút ra khỏi cử chỉ đó
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                    v.systemGestureExclusionRects = listOf(Rect(0, 0, v.width, v.height))
+                }
+            }
         }
 
         val slop = dp(8)
@@ -235,14 +237,12 @@ class OverlayService : Service() {
         }
 
         val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = LinearLayout.HORIZONTAL
             background = GradientDrawable().apply {
                 setColor(0xF20D1524.toInt())
                 setStroke(dp(1), 0xFF1E2B44.toInt())
                 cornerRadius = dp(18).toFloat()
             }
-            val pad = dp(16)
-            setPadding(pad, pad, pad, pad)
             isClickable = true // nuốt chạm bên trong card
             translationX = hiddenX
         }
@@ -252,15 +252,20 @@ class OverlayService : Service() {
                 .apply { marginStart = cardMargin },
         )
 
-        card.addView(buildHeader())
-        card.addView(View(this).apply {
-            setBackgroundColor(0xFF1E2B44.toInt())
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply {
-            topMargin = dp(10); bottomMargin = dp(10)
-        })
+        val contentText = TextView(this).apply {
+            setTextColor(0xFF8D9DBA.toInt())
+            textSize = 15f
+            gravity = Gravity.CENTER
+        }
         card.addView(
-            buildBody(),
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f),
+            buildSidebar { index -> contentText.text = "Tab ${index + 1} — đang phát triển" },
+            LinearLayout.LayoutParams(dp(150), LinearLayout.LayoutParams.MATCH_PARENT),
+        )
+        card.addView(View(this).apply { setBackgroundColor(0xFF1E2B44.toInt()) },
+            LinearLayout.LayoutParams(dp(1), LinearLayout.LayoutParams.MATCH_PARENT))
+        card.addView(
+            contentText,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f),
         )
 
         panelView = scrim
@@ -291,65 +296,41 @@ class OverlayService : Service() {
         return row
     }
 
-    /** Thân menu: lưới app đã chọn (chạm để mở). Các tính năng khác sẽ thêm sau. */
-    private fun buildBody(): View {
-        val pinned = repo?.loadPinned().orEmpty()
-        if (pinned.isEmpty()) {
-            return TextView(this).apply {
-                text = "Chưa có app nào được chọn"
-                setTextColor(0xFF8D9DBA.toInt())
-                textSize = 14f
-                gravity = Gravity.CENTER
-            }
-        }
-        val cols = 5
-        val grid = GridLayout(this).apply { columnCount = cols }
-        val cell = (cardW - dp(32)) / cols
-        pinned.forEach { pkg ->
-            grid.addView(appCell(pkg), GridLayout.LayoutParams().apply {
-                width = cell
-                height = GridLayout.LayoutParams.WRAP_CONTENT
-            })
-        }
-        return ScrollView(this).apply {
-            isVerticalScrollBarEnabled = false
-            addView(grid)
-        }
-    }
+    private val tabNames = listOf("Tab 1", "Tab 2")
 
-    private fun appCell(pkg: String): View {
+    /** Cột bên trái: logo + tên app ở trên cùng, bên dưới là các tab xếp dọc. */
+    private fun buildSidebar(onSelect: (Int) -> Unit): View {
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            val p = dp(6)
+            val p = dp(12)
             setPadding(p, p, p, p)
         }
-        val icon: Drawable? = try {
-            packageManager.getApplicationIcon(pkg)
-        } catch (e: PackageManager.NameNotFoundException) {
-            null
-        }
-        col.addView(ImageView(this).apply { setImageDrawable(icon) }, LinearLayout.LayoutParams(dp(48), dp(48)))
-        col.addView(TextView(this).apply {
-            text = repo?.resolve(pkg)?.label ?: pkg
-            setTextColor(0xFFE8EEFA.toInt())
-            textSize = 12f
-            gravity = Gravity.CENTER
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-        }, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(4) })
-        col.setOnClickListener {
-            val launch = packageManager.getLaunchIntentForPackage(pkg)?.apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        col.addView(buildHeader())
+        col.addView(View(this), LinearLayout.LayoutParams(1, dp(14)))
+
+        val tabs = mutableListOf<TextView>()
+        fun select(i: Int) {
+            tabs.forEachIndexed { idx, t ->
+                (t.background as GradientDrawable).setColor(if (idx == i) 0xFF1E3A66.toInt() else 0x00000000)
+                t.setTextColor(if (idx == i) 0xFFFFFFFF.toInt() else 0xFF8D9DBA.toInt())
             }
-            if (launch != null) {
-                runCatching { startActivity(launch) }
-                closePanel()
-            }
+            onSelect(i)
         }
+        tabNames.forEachIndexed { i, name ->
+            val t = TextView(this).apply {
+                text = name
+                textSize = 15f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), 0, dp(12), 0)
+                background = GradientDrawable().apply { cornerRadius = dp(10).toFloat() }
+                setOnClickListener { select(i) }
+            }
+            tabs.add(t)
+            col.addView(t, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(42),
+            ).apply { bottomMargin = dp(6) })
+        }
+        select(0)
         return col
     }
 
@@ -376,11 +357,14 @@ class OverlayService : Service() {
         val scrim = panelView ?: return
         card.animate().cancel(); scrim.animate().cancel()
         panelAnimating = true
-        card.animate().translationX(0f).setDuration(PANEL_ANIM_MS)
-            .setInterpolator(DecelerateInterpolator(1.6f))
-            .withEndAction { panelAnimating = false }.start()
-        scrim.animate().alpha(1f).setDuration(PANEL_ANIM_MS).start()
-        handleView?.animate()?.alpha(0f)?.setDuration(PANEL_ANIM_MS)?.start()
+        // post: đợi cửa sổ menu gắn xong rồi mới chạy animation trượt, nếu không sẽ bị "nhảy" thẳng
+        scrim.post {
+            card.animate().translationX(0f).setDuration(PANEL_ANIM_MS)
+                .setInterpolator(DecelerateInterpolator(1.6f))
+                .withEndAction { panelAnimating = false }.start()
+            scrim.animate().alpha(1f).setDuration(PANEL_ANIM_MS).start()
+            handleView?.animate()?.alpha(0f)?.setDuration(PANEL_ANIM_MS)?.start()
+        }
     }
 
     private fun closePanel() {
@@ -425,7 +409,7 @@ class OverlayService : Service() {
         private const val PANEL_W_DP = 620
         private const val PANEL_H_DP = 480
         private const val PANEL_MARGIN_DP = 8
-        private const val HANDLE_W_DP = 32
+        private const val HANDLE_W_DP = 48
         private const val HANDLE_H_DP = 64
         private const val PANEL_ANIM_MS = 280L
 
