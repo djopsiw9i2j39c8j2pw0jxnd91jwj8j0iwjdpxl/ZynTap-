@@ -178,6 +178,8 @@ class TouchWatcher(
     context: Context,
     private val screen: () -> Rect,
     private val sink: TouchSink,
+    /** Báo trạng thái (tiếng Việt) lên luồng chính, để hiện cho người dùng biết vì sao chạm xuyên chưa chạy. */
+    private val onStatus: (String) -> Unit = {},
 ) {
     private val app = context.applicationContext
     private val wm = app.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -185,6 +187,8 @@ class TouchWatcher(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
     @Volatile private var stream: AdbStream? = null
+
+    private fun status(text: String) { main.post { onStatus(text) } }
 
     val running get() = job?.isActive == true
 
@@ -217,25 +221,31 @@ class TouchWatcher(
                 val manager = ZynAdbConnectionManager.get(app)
                 if (!manager.isConnected) {
                     // Nối lại ở nền (đã tự giãn nhịp), rồi thử lại sau
+                    status("ADB chưa kết nối")
                     AdbSession.ensureInBackground(app)
                     delay(RETRY_MS)
                     continue
                 }
                 device = device ?: detect(manager)
                 val dev = device
-                if (dev == null) { delay(RETRY_MS * 3); continue }
+                if (dev == null) {
+                    status("Không đọc được thiết bị cảm ứng (getevent -lp)")
+                    delay(RETRY_MS * 3); continue
+                }
                 val s = manager.openStream("shell:getevent -l ${dev.path}")
                 stream = s
+                status("Đang nghe cảm ứng ${dev.path} (${dev.maxX}x${dev.maxY})")
                 BufferedReader(InputStreamReader(s.openInputStream())).use { reader ->
                     while (true) {
                         val line = reader.readLine() ?: break
                         parser.feed(line)
                     }
                 }
+                status("Luồng getevent bị đóng, đang nối lại")
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Exception) {
-                // mất kết nối -> thử lại bên dưới
+            } catch (e: Exception) {
+                status("Lỗi đọc chạm: ${e.message ?: e.javaClass.simpleName}")
             } finally {
                 parser.reset()
                 main.post { sink.onLost() } // huỷ các nút đang giữ, không để kẹt
