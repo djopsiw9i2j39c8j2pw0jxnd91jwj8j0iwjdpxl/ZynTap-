@@ -409,8 +409,8 @@ class OverlayService : Service() {
         private const val PANEL_W_DP = 620
         private const val PANEL_H_DP = 480
         private const val PANEL_MARGIN_DP = 8
-        private const val HANDLE_W_DP = 28
-        private const val HANDLE_H_DP = 64
+        private const val HANDLE_W_DP = 20
+        private const val HANDLE_H_DP = 70
         private const val PANEL_ANIM_MS = 280L
 
         fun start(context: Context) {
