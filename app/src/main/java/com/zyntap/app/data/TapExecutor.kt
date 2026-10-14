@@ -81,12 +81,13 @@ object TapExecutor {
                 val mgr = connect(appCtx)
                     ?: throw IllegalStateException("Chưa kết nối được gỡ lỗi Wi-Fi")
                 val steps = parse(script)
+                if (steps.none { it is Step.Tap }) return@execute
                 while (loopRunning) {
                     for (s in steps) {
                         if (!loopRunning) break
                         when (s) {
                             is Step.Tap -> tap(mgr, s.x, s.y)
-                            is Step.Wait -> Thread.sleep(s.ms)
+                            is Step.Wait -> sleepWhileLooping(s.ms)
                         }
                     }
                 }
@@ -102,6 +103,16 @@ object TapExecutor {
         loopRunning = false
     }
 
+    /** Chờ ms mili-giây nhưng dừng ngay khi stopLoop() được gọi. */
+    private fun sleepWhileLooping(ms: Long) {
+        var left = ms
+        while (left > 0 && loopRunning) {
+            val chunk = minOf(left, 25L)
+            Thread.sleep(chunk)
+            left -= chunk
+        }
+    }
+
     private fun connect(ctx: Context): ZynAdbConnectionManager? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         val mgr = ZynAdbConnectionManager.get(ctx)
@@ -115,7 +126,9 @@ object TapExecutor {
 
     private fun tap(mgr: ZynAdbConnectionManager, x: Int, y: Int) {
         runCatching {
-            val stream = mgr.openStream("shell:input tap $x $y")
+            val stream = mgr.openShell("input tap $x $y")
+            // Đọc tới khi lệnh kết thúc (EOF) để chắc chắn lệnh đã được máy chạy
+            runCatching { stream.openInputStream().use { it.readBytes() } }
             runCatching { stream.close() }
         }.onFailure { connected = false } // lỗi -> lần sau kết nối lại
     }
