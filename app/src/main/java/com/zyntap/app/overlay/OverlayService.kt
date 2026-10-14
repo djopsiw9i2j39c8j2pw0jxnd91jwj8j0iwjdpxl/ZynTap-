@@ -8,8 +8,10 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Canvas
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Shader
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.Typeface
@@ -226,7 +228,7 @@ class OverlayService : Service() {
         }
         // Lớp tối nhẹ nằm RIÊNG phía sau card: chỉ lớp này mờ dần, card luôn rõ nét 100%
         val dim = View(this).apply {
-            setBackgroundColor(0x33000000)
+            setBackgroundColor(0x59000000)
             alpha = 0f
         }
         scrim.addView(dim, FrameLayout.LayoutParams(
@@ -236,7 +238,7 @@ class OverlayService : Service() {
             orientation = LinearLayout.HORIZONTAL
             background = GradientDrawable().apply {
                 setColor(0xFF0D1524.toInt())
-                setStroke(dp(1), 0xFF2A6B45.toInt())
+                setStroke(dp(1), 0xFF1F4FB8.toInt())
                 cornerRadius = dp(18).toFloat()
             }
             isClickable = true // nuốt chạm bên trong card
@@ -400,42 +402,63 @@ class OverlayService : Service() {
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
     /**
-     * Nút mở menu kiểu gaming: tab nhỏ vát góc, nền đen, viền xanh neon, sát mép trái.
-     * View rộng hơn phần vẽ một chút (vùng trong suốt) để dễ chạm/kéo.
+     * Nút mở menu kiểu gaming, nhỏ gọn: tab vát góc bên phải, nền xanh đen,
+     * viền gradient cyan -> xanh dương (tông của logo ZynTap), logo nhỏ ở giữa.
      */
     private class GamingTab(context: Context) : View(context) {
         private val d = resources.displayMetrics.density
         private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL; color = 0xFF0A0F0C.toInt()
+            style = Paint.Style.FILL; color = 0xF2050A15.toInt()
+        }
+        private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE; strokeWidth = 3.5f * d; color = 0x3319D3FF
+            strokeJoin = Paint.Join.ROUND
         }
         private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE; strokeWidth = 1.5f * d; color = 0xFF39FF6A.toInt()
+            style = Paint.Style.STROKE; strokeWidth = 1.4f * d
             strokeJoin = Paint.Join.MITER
         }
-        private val grip = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL; color = 0xFF39FF6A.toInt()
+        private val notch = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL; color = 0xFF19D3FF.toInt()
         }
+        private val logo = context.getDrawable(R.drawable.logo_transparent)
         private val path = Path()
 
+        override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+            stroke.shader = LinearGradient(
+                0f, 0f, 0f, h.toFloat(),
+                0xFF19D3FF.toInt(), 0xFF2A6BFF.toInt(), Shader.TileMode.CLAMP,
+            )
+        }
+
         override fun onDraw(canvas: Canvas) {
-            val w = 9f * d              // bề rộng phần nhìn thấy
-            val h = height.toFloat() - 8f * d
-            val top = 4f * d
-            val c = h * 0.22f           // độ vát phía trên/dưới
+            val inset = 2f * d
+            val w = width.toFloat() - inset
+            val h = height.toFloat() - inset * 2
+            val top = inset
+            val c = 7f * d // độ vát góc phải
             path.reset()
             path.moveTo(0f, top)
-            path.lineTo(w * 0.55f, top + c * 0.4f)
+            path.lineTo(w - c, top)
             path.lineTo(w, top + c)
             path.lineTo(w, top + h - c)
-            path.lineTo(w * 0.55f, top + h - c * 0.4f)
+            path.lineTo(w - c, top + h)
             path.lineTo(0f, top + h)
             path.close()
             canvas.drawPath(path, fill)
+            canvas.drawPath(path, glow)
             canvas.drawPath(path, stroke)
-            // vạch sáng nhỏ ở giữa làm "tay nắm"
-            val gh = 18f * d
-            val cy = top + h / 2f
-            canvas.drawRoundRect(w * 0.45f, cy - gh / 2f, w * 0.45f + 2f * d, cy + gh / 2f, d, d, grip)
+
+            // logo nhỏ (không nền)
+            val lw = (w * 0.62f).toInt()
+            val lh = (lw * 256f / 313f).toInt()
+            val cx = (w * 0.5f).toInt()
+            val cy = (top + h / 2f).toInt()
+            logo?.setBounds(cx - lw / 2, cy - lh / 2, cx + lw / 2, cy + lh / 2)
+            logo?.draw(canvas)
+
+            // chấm sáng nhỏ ở mép trong làm điểm nhấn gaming
+            canvas.drawRect(0f, cy - 6f * d, 2f * d, cy + 6f * d, notch)
         }
     }
 
@@ -447,8 +470,8 @@ class OverlayService : Service() {
         private const val PANEL_W_DP = 620
         private const val PANEL_H_DP = 480
         private const val PANEL_MARGIN_DP = 8
-        private const val HANDLE_W_DP = 22
-        private const val HANDLE_H_DP = 76
+        private const val HANDLE_W_DP = 28
+        private const val HANDLE_H_DP = 44
         private const val PANEL_ANIM_MS = 280L
 
         fun start(context: Context) {
