@@ -131,7 +131,6 @@ class PointPickerOverlay(
             color = 0xFF19D3FF.toInt(); style = Paint.Style.STROKE
             strokeWidth = 2.4f * d; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
         }
-        private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x3319D3FF }
         private val path = Path().apply {
             // Same silhouette as the supplied Lucide map-pin, scaled from its 24x24 path.
             moveTo(20f, 10f)
@@ -143,7 +142,6 @@ class PointPickerOverlay(
         }
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            canvas.drawCircle(36f * d, 32f * d, 24f * d, glow)
             canvas.save()
             canvas.translate(12f * d, 10f * d)
             canvas.scale(2f * d, 2f * d)
@@ -151,9 +149,6 @@ class PointPickerOverlay(
             canvas.drawPath(path, stroke)
             canvas.drawCircle(12f, 10f, 3f, stroke)
             canvas.restore()
-            stroke.strokeWidth = 1.2f * d
-            canvas.drawLine(30f*d, 54f*d, 42f*d, 54f*d, stroke)
-            canvas.drawLine(36f*d, 49f*d, 36f*d, 59f*d, stroke)
         }
     }
 }
