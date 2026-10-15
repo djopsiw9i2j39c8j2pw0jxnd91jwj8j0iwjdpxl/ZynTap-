@@ -92,7 +92,7 @@ class PointsTab(
         }
         page.addView(mainField, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(6) })
         val caption = row()
-        caption.addView(label("KỊCH BẢN / PIXEL", 10.5f), LinearLayout.LayoutParams(0, dp(25), 1f))
+        caption.addView(label("KỊCH BẢN", 10.5f), LinearLayout.LayoutParams(0, dp(25), 1f))
         caption.addView(label("Tự động lưu", 10.5f).apply { setTextColor(cyan) })
         page.addView(caption)
         editor = EditText(ctx).apply {

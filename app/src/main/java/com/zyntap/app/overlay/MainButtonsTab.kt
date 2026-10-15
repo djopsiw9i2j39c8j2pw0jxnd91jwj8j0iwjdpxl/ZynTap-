@@ -503,7 +503,7 @@ class MainButtonsTab(
             textSize = 14.5f
         })
         texts.addView(TextView(ctx).apply {
-            text = "Bật: chạm nút main và màn hình bên dưới cùng lúc (cần ADB đang kết nối)"
+            text = "Giúp chạm các tính năng bên dưới nút nổi cùng lúc."
             setTextColor(0xFF8D9DBA.toInt())
             textSize = 11.5f
         })
