@@ -288,12 +288,24 @@ class OverlayService : Service() {
             DebugLog.w("Tự đóng", "Không đọc được app đang ở trước màn hình", it)
             return
         }
-        if (tracker.foreground == pkg) {
+        // Tắt màn hình / đang khoá máy: app bị STOP nhưng người dùng chưa hề thoát -> bỏ qua
+        val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val km = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+        if (!pm.isInteractive || km.isKeyguardLocked) {
+            targetMisses = 0
+            return
+        }
+        if (tracker.isTargetResumed(pkg)) {
             targetSeen = true
             targetMisses = 0
-        } else if (targetSeen && ++targetMisses >= TARGET_MISS_LIMIT) {
-            DebugLog.i("Tự đóng", "Đã thoát khỏi $pkg -> tự đóng menu, nút main và tâm ảo")
-            autoClose()
+        } else if (targetSeen && tracker.hasLeft(pkg)) {
+            if (++targetMisses >= TARGET_MISS_LIMIT) {
+                DebugLog.i("Tự đóng", "Đã thoát khỏi $pkg -> tự đóng menu, nút main và tâm ảo")
+                autoClose()
+            }
+        } else {
+            // popup / hộp thoại / popup app khác che tạm: chưa phải thoát, không đếm
+            targetMisses = 0
         }
     }
 
