@@ -35,7 +35,9 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
     val isOpen: Boolean get() = popup != null
 
     init {
-        visibility = View.GONE
+        // INVISIBLE (không phải GONE): lớp luôn được đo/xếp bố cục sẵn nên width/height đúng ngay lần mở ĐẦU TIÊN.
+        // Với GONE thì width/height = 0 lần đầu -> bảng chọn bị tính sai vị trí và bay lên góc trên bên trái.
+        visibility = View.INVISIBLE
         // Ấn vào vùng trống = đóng bảng
         setOnClickListener { dismiss() }
     }
@@ -52,6 +54,15 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         val gap = dp(6)
         val margin = dp(8)
 
+        // Phòng hờ lớp chưa kịp bố cục: lấy kích thước từ khung cha
+        val layerW = if (width > 0) width else (parent as? View)?.width ?: 0
+        val layerH = if (height > 0) height else (parent as? View)?.height ?: 0
+        if (layerW <= 0 || layerH <= 0) {
+            // Chưa có kích thước thật: đợi bố cục xong rồi mở lại (hiếm khi xảy ra)
+            post { show(anchor, items, selected, onPick) }
+            return
+        }
+
         val a = IntArray(2)
         val l = IntArray(2)
         anchor.getLocationOnScreen(a)
@@ -59,14 +70,14 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         val ax = a[0] - l[0]
         val ay = a[1] - l[1]
 
-        val spaceBelow = height - (ay + anchor.height) - gap - margin
+        val spaceBelow = layerH - (ay + anchor.height) - gap - margin
         val spaceAbove = ay - gap - margin
         val wantH = minOf(full, maxByCount)
         val below = wantH <= spaceBelow || spaceBelow >= spaceAbove
         val room = if (below) spaceBelow else spaceAbove
         val popH = wantH.coerceAtMost(room.coerceAtLeast(itemH + pad * 2))
-        val popW = maxOf(anchor.width, dp(150)).coerceAtMost(width - margin * 2)
-        val left = ax.coerceIn(margin, (width - popW - margin).coerceAtLeast(margin))
+        val popW = maxOf(anchor.width, dp(150)).coerceAtMost(layerW - margin * 2)
+        val left = ax.coerceIn(margin, (layerW - popW - margin).coerceAtLeast(margin))
         val top = if (below) ay + anchor.height + gap else ay - gap - popH
 
         val list = LinearLayout(context).apply {
@@ -137,7 +148,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         popup?.let { it.animate().cancel(); removeView(it) }
         popup = null
         closing = false
-        visibility = View.GONE
+        visibility = View.INVISIBLE
         isClickable = false
     }
 
