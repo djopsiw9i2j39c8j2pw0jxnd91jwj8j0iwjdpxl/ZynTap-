@@ -73,7 +73,7 @@ object InjectServer {
             "N" -> {
                 val name = line.removePrefix("N").trim()
                 injector.useDevice(name) // không thấy tên thì giữ id tự dò
-                "OK"
+                "OK ${injector.deviceInfo()}"
             }
             "D", "U" -> {
                 if (p.size < 10) return "ERR lệnh ${p[0]} thiếu tham số"
@@ -136,6 +136,8 @@ object InjectServer {
             // CÙNG device-id với tấm cảm ứng thật: lần chạm ảo là ngón thêm trong cùng cử chỉ, không cắt ngón thật
             deviceId = touch?.id ?: -1
         }
+
+        fun deviceInfo(): String = "device=$deviceId touch=$touchName"
 
         fun info(): String = "sdk=${Build.VERSION.SDK_INT} route=$route touch=$touchName device=$deviceId"
 
