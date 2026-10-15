@@ -157,6 +157,7 @@ class PointRunner(
         // nhờ vậy ngón thật đang vuốt/giữ không bị mất. Helper luôn tự nhả (UP) dù coroutine bị huỷ giữa chừng.
         if (TouchWatcher.current?.tap(point.x, point.y) == true) return
         // Helper chưa sẵn sàng / ROM không cho grab -> cách cũ.
+        TouchWatcher.current?.requestReinject("click phải lùi về input tap (helper chưa READY / chưa grab)")
         DebugLog.w("Bơm", "Helper chưa bơm được (${if (TouchWatcher.current == null) "chưa chạy" else "chưa READY/không grab được"}) -> click bằng `input tap` (chậm hơn, không chung luồng với ngón thật)")
         // Only validated integer coordinates enter the command. Never execute editor text.
         val stream = manager.openStream("shell:input tap ${point.x} ${point.y}; echo ZYN_EXIT:\$?")

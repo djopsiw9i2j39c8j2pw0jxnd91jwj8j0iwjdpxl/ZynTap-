@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Surface
 import android.view.WindowManager
 import com.zyntap.app.data.AdbSession
@@ -335,6 +336,36 @@ class TouchWatcher(
     @Volatile private var stream: AdbStream? = null
     @Volatile private var link: ProxyLink? = null
 
+    /** Bước vòng theo dõi đang làm — hiện trong Debug log để biết nó đang kẹt ở đâu. */
+    @Volatile var stage: String = "chưa chạy"
+        private set
+    @Volatile private var proxyFails = 0
+    @Volatile private var fastRetry = false
+    @Volatile private var lastReinjectAt = 0L
+    @Volatile private var reinjectGap = REINJECT_MIN_MS // giãn dần nếu bơm lại mà vẫn lỗi, về mức đầu khi bơm được
+
+    private fun setStage(text: String, log: Boolean = true) {
+        if (stage == text) return
+        stage = text
+        if (log) DebugLog.i("Bơm", text)
+    }
+
+    /**
+     * Ép chạy lại helper bơm (lỗi -> bơm lại -> lặp). Gọi khi click phải lùi về `input tap` hoặc helper không phản hồi.
+     * Đóng luồng helper hiện tại, xoá bộ đếm thất bại và thử lại gần như ngay. Có giãn nhịp để không bơm lại liên tục.
+     */
+    fun requestReinject(reason: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastReinjectAt < reinjectGap) return
+        lastReinjectAt = now
+        DebugLog.w("Bơm", "Ép bơm lại helper: $reason (lần kế tiếp cách tối thiểu ${reinjectGap * 2 / 1000}s nếu vẫn lỗi)")
+        reinjectGap = (reinjectGap * 2).coerceAtMost(REINJECT_MAX_MS)
+        proxyFails = 0
+        fastRetry = true
+        val s = stream
+        if (s != null) scope.launch { runCatching { s.close() } }
+    }
+
     val running get() = job?.isActive == true
 
     /** Helper đã grab cảm ứng và đang phát lại luồng chạm (click của app đi qua [tap]). */
@@ -380,6 +411,7 @@ class TouchWatcher(
         if (!l.injecting) return false
         check(l.tap(x, y, holdMs)) {
             DebugLog.e("Bơm", "Helper không phản hồi click ($x,$y) trong ${holdMs + 3_000L}ms")
+            requestReinject("helper không phản hồi click")
             "Helper chạm không phản hồi"
         }
         return true
@@ -391,10 +423,13 @@ class TouchWatcher(
     fun start() {
         if (running) return
         current = this
+        proxyFails = 0
+        setStage("Khởi động vòng theo dõi cảm ứng")
         job = scope.launch { loop() }
     }
 
     fun stop() {
+        setStage("đã dừng", log = false)
         if (current === this) current = null
         job?.cancel()
         job = null
@@ -407,7 +442,6 @@ class TouchWatcher(
         var device: TouchDevice? = null
         var useShell = false // false: exec:cat (thô, không pty); true: shell:stty raw; cat
         var failures = 0
-        var proxyFails = 0
         while (currentCoroutineContext().isActive) {
             val parser = InputEventParser { slot, down, rx, ry ->
                 val d = device ?: return@InputEventParser
@@ -417,35 +451,55 @@ class TouchWatcher(
             }
             val framer = InputEventStream(parser)
             var received = 0L
+            var reaper: Job? = null
             try {
                 val manager = ZynAdbConnectionManager.get(app)
                 if (!manager.isConnected) {
                     // Nối lại ở nền (đã tự giãn nhịp), rồi thử lại sau
+                    setStage("Chờ ADB nối để chạy helper bơm")
                     AdbSession.ensureInBackground(app)
                     delay(RETRY_MS)
                     continue
                 }
-                device = device ?: detect(manager)
+                if (device == null) {
+                    setStage("Đang dò thiết bị cảm ứng (getevent)")
+                    device = detect(manager)
+                    device?.let { DebugLog.i("Cảm ứng", "Thiết bị cảm ứng: ${it.path} \"${it.name}\" max=${it.maxX}x${it.maxY} áp lực=${it.maxPressure}") }
+                }
                 val dev = device
                 if (dev == null) {
                     DebugLog.e("Cảm ứng", "Không dò được thiết bị cảm ứng (getevent/wm size/proc đều không ra) -> chạm xuyên + bơm không hoạt động")
                     delay(RETRY_MS * 3); continue
                 }
                 if (proxyFails < MAX_PROXY_FAILS) {
+                    setStage("Đang chạy helper bơm trên ${dev.path} (chờ READY)")
                     val ok = runProxy(manager, dev)
                     proxyFails = if (ok) 0 else proxyFails + 1
+                    if (ok) {
+                        DebugLog.w("Bơm", "Helper đã dừng (mất ADB / bị đóng) -> chạy lại")
+                        setStage("Helper dừng, chuẩn bị chạy lại", log = false)
+                    }
                     if (!ok) {
                         DebugLog.e("Bơm", "Helper bơm cảm ứng thoát mà chưa READY (lần $proxyFails/$MAX_PROXY_FAILS) trên ${dev.path} — ROM chặn app_process/grab hoặc sai node cảm ứng")
                         if (proxyFails >= MAX_PROXY_FAILS) DebugLog.e("Bơm", "Bỏ helper, lùi về đọc thô `cat` + click bằng `input tap` (không bơm chung luồng được)")
                     }
                     if (!ok) device = null // lần sau dò lại đường dẫn cảm ứng
-                    delay(RETRY_MS)
+                    delay(if (fastRetry) FAST_RETRY_MS else RETRY_MS)
+                    fastRetry = false
                     continue
                 }
+                // Lùi về đọc thô: chỉ tạm thời. Sau PROXY_RETRY_MS tự đóng luồng và thử bơm lại helper (lặp).
+                setStage("Đọc thô bằng cat (helper không bơm được) — sẽ thử bơm lại sau ${PROXY_RETRY_MS / 1000}s")
                 val cmd = if (useShell) "shell:stty raw -echo 2>/dev/null; exec cat ${dev.path}"
                 else "exec:cat ${dev.path}"
                 val s = manager.openStream(cmd)
                 stream = s
+                reaper = scope.launch {
+                    delay(PROXY_RETRY_MS)
+                    proxyFails = 0
+                    DebugLog.i("Bơm", "Thử bơm lại helper sau khoảng lùi về cat")
+                    runCatching { s.close() }
+                }
                 val input = s.openInputStream()
                 val chunk = ByteArray(4096)
                 while (true) {
@@ -461,6 +515,7 @@ class TouchWatcher(
                 // mất kết nối / luồng không phải input_event -> thử lại bên dưới
                 DebugLog.w("Cảm ứng", "Luồng đọc cảm ứng bị ngắt (nhận $received byte)", e)
             } finally {
+                reaper?.cancel()
                 parser.reset()
                 main.post { sink.onLost() } // huỷ các nút đang giữ, không để kẹt
                 val s = stream
@@ -475,7 +530,8 @@ class TouchWatcher(
             } else {
                 failures = 0
             }
-            delay(RETRY_MS)
+            delay(if (fastRetry) FAST_RETRY_MS else RETRY_MS)
+            fastRetry = false
         }
     }
 
@@ -495,6 +551,15 @@ class TouchWatcher(
         val l = ProxyLink(s)
         link = l
         var sawReady = false
+        var unknownLines = 0
+        // Helper không báo READY trong thời hạn (treo / app_process không chạy) -> đóng luồng để vòng thử lại, không đứng im
+        val readyGuard = launch(Dispatchers.IO) {
+            delay(READY_TIMEOUT_MS)
+            if (!sawReady) {
+                DebugLog.e("Bơm", "Helper không báo READY sau ${READY_TIMEOUT_MS / 1000}s (treo hoặc app_process không chạy) — đóng và thử lại")
+                runCatching { s.close() }
+            }
+        }
         // Nhịp tim (helper tự thoát + nhả grab nếu mất nhịp) kèm báo đổi xoay màn hình
         val beat = launch(Dispatchers.IO) {
             var lastW = b.width()
@@ -530,11 +595,13 @@ class TouchWatcher(
                             }
                             line.startsWith("READY") -> {
                                 sawReady = true; l.injecting = line.contains("inj=1")
-                                if (l.injecting) DebugLog.i("Bơm", "Helper sẵn sàng: $line")
+                                setStage("Helper READY: ${line.trim()}", log = false)
+                                if (l.injecting) { reinjectGap = REINJECT_MIN_MS; DebugLog.i("Bơm", "Helper sẵn sàng: $line") }
                                 else DebugLog.e("Bơm", "Helper chạy nhưng KHÔNG bơm được ($line) — grab cảm ứng thất bại hoặc không tạo được bộ phát")
                             }
                             line.startsWith("LOG ") -> DebugLog.w("Bơm", "Helper báo: ${line.substring(4).trim()}")
                             line.startsWith("FAIL") -> { DebugLog.e("Bơm", "Helper báo lỗi: ${line.trim()}"); break }
+                            else -> if (unknownLines++ < 5) DebugLog.w("Bơm", "Helper nói: ${line.take(200)}")
                         }
                     }
                 }
@@ -546,6 +613,7 @@ class TouchWatcher(
             DebugLog.w("Bơm", "Luồng helper bị ngắt (ADB đứt?) — helper tự thoát và nhả cảm ứng", e)
         } finally {
             beat.cancel()
+            readyGuard.cancel()
             l.injecting = false
             link = null
             l.failAll()
@@ -602,6 +670,11 @@ class TouchWatcher(
 
         private const val RETRY_MS = 3_000L
         private const val MAX_PROXY_FAILS = 3
+        private const val FAST_RETRY_MS = 400L
+        private const val READY_TIMEOUT_MS = 10_000L
+        private const val REINJECT_MAX_MS = 120_000L
+        private const val PROXY_RETRY_MS = 30_000L
+        private const val REINJECT_MIN_MS = 8_000L
         /** Thời gian giữ của một click (ms): đủ để game/app nhận trọn DOWN rồi UP. */
         const val TAP_HOLD_MS = 40L
         private val PATH_RE = Regex("^/dev/input/event\\d+$")
