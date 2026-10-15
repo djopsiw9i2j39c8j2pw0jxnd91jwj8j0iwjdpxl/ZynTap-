@@ -230,74 +230,12 @@ class MainButtonOverlay(
     private val entries = HashMap<Int, Entry>()
     private var editingId: Int? = null
 
-    /** Ngón (slot getevent) đang đặt trên nút chạm xuyên: slot -> id nút. */
+    /** Ngón (slot input_event) đang đặt trên nút chạm xuyên: slot -> id nút. */
     private val watched = HashMap<Int, Int>()
-    private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var lastStatus = ""
-
-    /**
-     * Chạm xuyên chỉ thật sự bật (cửa sổ nút -> NOT_TOUCHABLE) SAU KHI đã kiểm chứng: người dùng chạm vào nút
-     * (lúc này nút vẫn nhận chạm bình thường) và ADB cũng báo đúng ngón chạm đó nằm trong nút.
-     * Chưa kiểm chứng được thì nút main vẫn chạy bình thường, không bao giờ "chết".
-     */
-    private var passVerified = false
-    private val viewDownAt = HashMap<Int, Long>()
-    private val watchHitAt = HashMap<Int, Long>()
-
     private val watcher = TouchWatcher(ctx, screenBounds, object : TouchSink {
         override fun onFinger(slot: Int, down: Boolean, x: Int, y: Int) = onWatchedFinger(slot, down, x, y)
-        override fun onLost() { cancelWatched(); setVerified(false) }
-    }) { msg ->
-        if (msg != lastStatus) {
-            lastStatus = msg
-            android.widget.Toast.makeText(ctx, "Chạm xuyên: $msg", android.widget.Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun setVerified(v: Boolean) {
-        if (passVerified == v) return
-        passVerified = v
-        viewDownAt.clear(); watchHitAt.clear()
-        if (v) android.widget.Toast.makeText(ctx, "Chạm xuyên: đã sẵn sàng", android.widget.Toast.LENGTH_SHORT).show()
-        reapplyFlags()
-    }
-
-    private fun reapplyFlags() {
-        entries.forEach { (id, e) ->
-            val b = repo.find(id) ?: return@forEach
-            applyTouchable(b, e.params)
-            runCatching { wm.updateViewLayout(e.view, e.params) }
-        }
-    }
-
-    private fun hitCircle(id: Int, x: Int, y: Int): Boolean {
-        val e = entries[id] ?: return false
-        val b = repo.find(id) ?: return false
-        val dx = x - (e.params.x + e.params.width / 2f)
-        val dy = y - (e.params.y + e.params.height / 2f)
-        val r = dp(b.sizeDp) / 2f
-        return dx * dx + dy * dy <= r * r
-    }
-
-    /** Nút nhận chạm thật (chưa xuyên) -> ghi lại để đối chiếu với toạ độ ADB. */
-    private fun noteViewDown(id: Int) {
-        val now = SystemClock.uptimeMillis()
-        viewDownAt[id] = now
-        checkVerify(id)
-        uiHandler.postDelayed({
-            if (!passVerified && viewDownAt[id] == now && watchHitAt[id].let { it == null || kotlin.math.abs(it - now) > VERIFY_MS }) {
-                android.widget.Toast.makeText(
-                    ctx, "Chạm xuyên: ADB chưa báo đúng toạ độ chạm, nút main chạy bình thường", android.widget.Toast.LENGTH_SHORT,
-                ).show()
-            }
-        }, VERIFY_MS + 300)
-    }
-
-    private fun checkVerify(id: Int) {
-        val v = viewDownAt[id] ?: return
-        val w = watchHitAt[id] ?: return
-        if (kotlin.math.abs(v - w) <= VERIFY_MS) setVerified(true)
-    }
+        override fun onLost() = cancelWatched()
+    })
     private val d = ctx.resources.displayMetrics.density
     private fun dp(v: Int) = (v * d).toInt()
     private val ringPad get() = dp(RING_PAD_DP)
@@ -327,7 +265,7 @@ class MainButtonOverlay(
     // ---- chạm xuyên ---------------------------------------------------------
 
     /** Nút đang ở chế độ chạm xuyên (và không phải đang kéo chỉnh vị trí). */
-    private fun isPassThrough(b: MainButton) = b.passThrough && passVerified && editingId != b.id
+    private fun isPassThrough(b: MainButton) = b.passThrough && editingId != b.id
 
     /**
      * Cờ cửa sổ cho nút chạm xuyên: không nhận chạm (chạm lọt xuống app dưới).
@@ -343,7 +281,7 @@ class MainButtonOverlay(
 
     private fun refreshWatcher() {
         val need = OverlayPermission.granted(ctx) && repo.buttons.any { it.passThrough }
-        if (need) watcher.start() else { watcher.stop(); cancelWatched(); setVerified(false) }
+        if (need) watcher.start() else { watcher.stop(); cancelWatched() }
     }
 
     private fun buttonAt(x: Int, y: Int): Int? {
@@ -363,14 +301,6 @@ class MainButtonOverlay(
     }
 
     private fun onWatchedFinger(slot: Int, down: Boolean, x: Int, y: Int) {
-        if (!passVerified) {
-            // Giai đoạn kiểm chứng: chỉ ghi nhận ngón chạm rơi trong nút chạm xuyên, không kích hoạt gì
-            if (down) {
-                val id = repo.buttons.firstOrNull { it.passThrough && editingId != it.id && hitCircle(it.id, x, y) }?.id
-                if (id != null) { watchHitAt[id] = SystemClock.uptimeMillis(); checkVerify(id) }
-            }
-            return
-        }
         if (down) {
             if (watched.containsKey(slot)) return
             val id = buttonAt(x, y) ?: return
@@ -558,7 +488,6 @@ class MainButtonOverlay(
                     startX = p.x; startY = p.y
                     moved = false
                     v.pressedVisual = true
-                    if (!editing && b.passThrough) noteViewDown(id)
                     if (!editing) onAction?.invoke(b, true)
                     true
                 }
@@ -608,6 +537,5 @@ class MainButtonOverlay(
         const val RING_PAD_DP = 8
         const val ATTACH_GRACE_MS = 1500L
         const val PASS_THROUGH_ALPHA = 0.8f
-        const val VERIFY_MS = 900L
     }
 }

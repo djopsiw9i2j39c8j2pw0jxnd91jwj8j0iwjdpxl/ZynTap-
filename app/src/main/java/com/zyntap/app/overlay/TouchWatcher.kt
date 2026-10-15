@@ -19,8 +19,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import java.io.IOException
 
 /** Một ngón chạm đã được đổi sang toạ độ pixel của màn hình hiện tại. */
 interface TouchSink {
@@ -31,15 +30,16 @@ interface TouchSink {
     fun onLost()
 }
 
-/** Thông số cảm ứng đọc từ `getevent -lp`. */
+/** Thông số cảm ứng: node `/dev/input/eventN` + khoảng giá trị thô của trục X/Y. */
 data class TouchDevice(val path: String, val maxX: Int, val maxY: Int)
 
 /**
- * Bộ phân tích đầu ra của `getevent -l` (giao thức đa chạm kiểu B).
+ * Máy trạng thái đa chạm kiểu B, ăn thẳng các `struct input_event` ĐÃ GIẢI MÃ NHỊ PHÂN
+ * (type/code/value là số, không phải chữ như `getevent -l`).
  * Thuần Kotlin, không phụ thuộc Android -> test được.
  * Chỉ báo "ngón chạm xuống" và "ngón nhả" (toạ độ thô); không báo di chuyển.
  */
-class GeteventParser(private val emit: (slot: Int, down: Boolean, rawX: Int, rawY: Int) -> Unit) {
+class InputEventParser(private val emit: (slot: Int, down: Boolean, rawX: Int, rawY: Int) -> Unit) {
     private class Slot {
         var active = false
         var wantDown = false
@@ -55,25 +55,11 @@ class GeteventParser(private val emit: (slot: Int, down: Boolean, rawX: Int, raw
 
     private fun slot() = slots.getOrPut(current) { Slot() }
 
-    fun feed(rawLine: String) {
-        var line = rawLine.trim()
-        if (line.isEmpty()) return
-        // Nhiều thiết bị: dòng có dạng "/dev/input/event3: EV_ABS ..."
-        if (line.startsWith("/dev/")) line = line.substringAfter(": ", "").trim()
-        val t = line.split(WS).filter { it.isNotEmpty() }
-        if (t.size < 3) return
-        val code = t[1]
-        // EV_KEY in ra chữ (DOWN/UP/REPEAT), còn lại là số hex 8 chữ số
-        val value = when (t[2]) {
-            "DOWN" -> 1
-            "UP" -> 0
-            "REPEAT" -> 2
-            else -> hex(t[2]) ?: return
-        }
-        when (t[0]) {
-            "EV_ABS" -> when (code) {
-                "ABS_MT_SLOT" -> current = value
-                "ABS_MT_TRACKING_ID" -> {
+    fun onEvent(type: Int, code: Int, value: Int) {
+        when (type) {
+            EV_ABS -> when (code) {
+                ABS_MT_SLOT -> current = value.coerceIn(0, MAX_SLOTS)
+                ABS_MT_TRACKING_ID -> {
                     val s = slot()
                     if (value == -1) {
                         if (s.active || s.wantDown) s.wantUp = true
@@ -85,10 +71,10 @@ class GeteventParser(private val emit: (slot: Int, down: Boolean, rawX: Int, raw
                         s.hasY = false
                     }
                 }
-                "ABS_MT_POSITION_X" -> slot().apply { x = value; hasX = true }
-                "ABS_MT_POSITION_Y" -> slot().apply { y = value; hasY = true }
+                ABS_MT_POSITION_X -> slot().apply { x = value; hasX = true }
+                ABS_MT_POSITION_Y -> slot().apply { y = value; hasY = true }
             }
-            "EV_KEY" -> if (code == "BTN_TOUCH") {
+            EV_KEY -> if (code == BTN_TOUCH) {
                 if (value == 0) {
                     slots.values.forEach { if (it.active || it.wantDown) { it.wantUp = true; it.wantDown = false } }
                 } else if (slots.values.none { it.active || it.wantDown }) {
@@ -96,7 +82,7 @@ class GeteventParser(private val emit: (slot: Int, down: Boolean, rawX: Int, raw
                     slots.getOrPut(0) { Slot() }.apply { wantDown = true; wantUp = false }
                 }
             }
-            "EV_SYN" -> if (code == "SYN_REPORT") flush()
+            EV_SYN -> if (code == SYN_REPORT) flush()
         }
     }
 
@@ -121,31 +107,16 @@ class GeteventParser(private val emit: (slot: Int, down: Boolean, rawX: Int, raw
     fun reset() { slots.clear(); current = 0 }
 
     companion object {
-        private val WS = Regex("\\s+")
-        private fun hex(v: String): Int? = runCatching { java.lang.Long.parseLong(v, 16).toInt() }.getOrNull()
-
-        /** Đọc `getevent -lp`, chọn thiết bị có ABS_MT_POSITION_X/Y đầu tiên. */
-        fun parseDevice(output: String): TouchDevice? {
-            var path: String? = null
-            var mx = -1
-            var my = -1
-            val maxRe = Regex("max\\s+(\\d+)")
-            fun done(): TouchDevice? =
-                if (path != null && mx > 0 && my > 0) TouchDevice(path!!, mx, my) else null
-            for (raw in output.lines()) {
-                val line = raw.trim()
-                if (line.startsWith("add device")) {
-                    done()?.let { return it }
-                    path = line.substringAfter(": ", "").trim().ifEmpty { null }
-                    mx = -1; my = -1
-                } else if (line.contains("ABS_MT_POSITION_X")) {
-                    mx = maxRe.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
-                } else if (line.contains("ABS_MT_POSITION_Y")) {
-                    my = maxRe.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
-                }
-            }
-            return done()
-        }
+        const val EV_SYN = 0x00
+        const val EV_KEY = 0x01
+        const val EV_ABS = 0x03
+        const val SYN_REPORT = 0x00
+        const val BTN_TOUCH = 0x14a
+        const val ABS_MT_SLOT = 0x2f
+        const val ABS_MT_POSITION_X = 0x35
+        const val ABS_MT_POSITION_Y = 0x36
+        const val ABS_MT_TRACKING_ID = 0x39
+        private const val MAX_SLOTS = 63
 
         /**
          * Đổi toạ độ thô của tấm cảm ứng (theo chiều tự nhiên của máy) sang pixel màn hình
@@ -167,9 +138,155 @@ class GeteventParser(private val emit: (slot: Int, down: Boolean, rawX: Int, raw
 }
 
 /**
- * Theo dõi chạm của TOÀN MÀN HÌNH qua ADB (`getevent`), kể cả khi cửa sổ nút main không nhận chạm
+ * Tách luồng byte THÔ của `cat /dev/input/eventN` thành từng `struct input_event` rồi đẩy cho [InputEventParser].
+ *
+ * Kernel 64-bit: `{ long sec; long usec; u16 type; u16 code; s32 value }` = 24 byte.
+ * Kernel/tiến trình 32-bit: `{ s32 sec; s32 usec; ... }` = 16 byte.
+ * Không biết trước máy nào -> tự nhận dạng từ 48 byte đầu (bội chung của 16 và 24): bản ghi hợp lệ
+ * có `usec < 1.000.000` (và phần cao của sec/usec = 0 với dạng 24 byte) và `type <= 0x1f`.
+ */
+class InputEventStream(private val parser: InputEventParser) {
+    private var buf = ByteArray(4096)
+    private var n = 0
+    private var rec = 0 // kích thước 1 bản ghi; 0 = chưa nhận dạng
+
+    /** Kích thước bản ghi đã nhận dạng (16/24), 0 nếu chưa biết. */
+    val recordSize get() = rec
+
+    /** @throws IOException nếu dữ liệu không giống input_event dạng nào (sai node, bị biến dạng...). */
+    fun feed(data: ByteArray, len: Int) {
+        if (len <= 0) return
+        if (n + len > buf.size) buf = buf.copyOf(maxOf(buf.size * 2, n + len))
+        System.arraycopy(data, 0, buf, n, len)
+        n += len
+        if (rec == 0) {
+            if (n < PROBE) return
+            rec = when {
+                valid(24) -> 24
+                valid(16) -> 16
+                else -> throw IOException("Luồng /dev/input không phải input_event")
+            }
+        }
+        var off = 0
+        while (n - off >= rec) {
+            decode(off)
+            off += rec
+        }
+        if (off > 0) {
+            System.arraycopy(buf, off, buf, 0, n - off)
+            n -= off
+        }
+    }
+
+    private fun u16(o: Int) = (buf[o].toInt() and 0xff) or ((buf[o + 1].toInt() and 0xff) shl 8)
+    private fun u32(o: Int): Long = (u16(o).toLong()) or (u16(o + 2).toLong() shl 16)
+    private fun s32(o: Int): Int = u32(o).toInt()
+
+    private fun valid(size: Int): Boolean {
+        var o = 0
+        while (o + size <= PROBE) {
+            val ok = if (size == 24) {
+                u32(o + 4) == 0L && u32(o + 12) == 0L && u32(o + 8) < 1_000_000L && u16(o + 16) <= 0x1f
+            } else {
+                u32(o + 4) < 1_000_000L && u16(o + 8) <= 0x1f
+            }
+            if (!ok) return false
+            o += size
+        }
+        return true
+    }
+
+    private fun decode(o: Int) {
+        val t = if (rec == 24) o + 16 else o + 8
+        parser.onEvent(u16(t), u16(t + 2), s32(t + 4))
+    }
+
+    private companion object {
+        const val PROBE = 48
+    }
+}
+
+/** Dò thiết bị cảm ứng từ đầu ra văn bản (chỉ chạy MỘT lần lúc dò, không phải luồng sự kiện). */
+object TouchDeviceFinder {
+    private class Cand(val path: String) {
+        var name = ""
+        var direct = false
+        var mx = -1
+        var my = -1
+        fun score(): Int {
+            var s = 0
+            if (direct) s += 4
+            if (NAME_OK.containsMatchIn(name)) s += 2
+            if (NAME_BAD.containsMatchIn(name)) s -= 3
+            return s
+        }
+    }
+
+    private val NAME_OK = Regex("touch|screen|(^|[^a-z])ts([^a-z]|$)|fts|goodix|synaptics|atmel|himax|novatek|gt9", RegexOption.IGNORE_CASE)
+    private val NAME_BAD = Regex("pen|stylus|finger.?print|fp_|key|button|hall|gpio", RegexOption.IGNORE_CASE)
+    private val MAX_RE = Regex("max\\s+(\\d+)")
+
+    /** Đọc `getevent -lp`, chọn tấm cảm ứng có ABS_MT_POSITION_X/Y (ưu tiên INPUT_PROP_DIRECT / tên "touch"). */
+    fun parseGetevent(output: String): TouchDevice? {
+        val all = ArrayList<Cand>()
+        var cur: Cand? = null
+        for (raw in output.lines()) {
+            val line = raw.trim()
+            if (line.startsWith("add device")) {
+                val path = line.substringAfter(": ", "").trim()
+                cur = if (path.startsWith("/dev/")) Cand(path).also { all.add(it) } else null
+                continue
+            }
+            val c = cur ?: continue
+            when {
+                line.startsWith("name:") -> c.name = line.substringAfter(':').trim().trim('"')
+                line.contains("INPUT_PROP_DIRECT") -> c.direct = true
+                line.contains("ABS_MT_POSITION_X") ->
+                    c.mx = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+                line.contains("ABS_MT_POSITION_Y") ->
+                    c.my = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+            }
+        }
+        val best = all.filter { it.mx > 0 && it.my > 0 }.maxByOrNull { it.score() } ?: return null
+        return TouchDevice(best.path, best.mx, best.my)
+    }
+
+    /**
+     * Đường lui khi máy không có `getevent`: đọc `/proc/bus/input/devices` chọn node theo tên cảm ứng,
+     * khoảng giá trị thô lấy tạm bằng kích thước vật lý màn hình (`wm size`) [screenW] x [screenH].
+     */
+    fun parseProc(output: String, screenW: Int, screenH: Int): TouchDevice? {
+        if (screenW <= 0 || screenH <= 0) return null
+        var best: Pair<Int, String>? = null
+        for (block in output.split(Regex("\\n\\s*\\n"))) {
+            val name = Regex("N:\\s*Name=\"([^\"]*)\"").find(block)?.groupValues?.get(1) ?: continue
+            val node = Regex("\\bevent(\\d+)\\b").find(block)?.value ?: continue
+            val c = Cand("/dev/input/$node").apply {
+                this.name = name
+                direct = block.contains("PROP=2") || block.contains("PROP=02")
+            }
+            val sc = c.score()
+            if (sc >= 2 && (best == null || sc > best.first)) best = sc to c.path
+        }
+        val b = best ?: return null
+        return TouchDevice(b.second, screenW - 1, screenH - 1)
+    }
+
+    /** Đọc "Physical size: 1080x2400" của `wm size`. */
+    fun parseWmSize(output: String): Pair<Int, Int>? {
+        val m = Regex("Physical size:\\s*(\\d+)x(\\d+)").find(output) ?: return null
+        return m.groupValues[1].toInt() to m.groupValues[2].toInt()
+    }
+}
+
+/**
+ * Theo dõi chạm của TOÀN MÀN HÌNH qua ADB, kể cả khi cửa sổ nút main không nhận chạm
  * (FLAG_NOT_TOUCHABLE). Dùng cho "chạm xuyên": ngón chạm lọt thẳng xuống app bên dưới, còn app này
  * chỉ "nghe" xem ngón có đặt lên nút main nào không.
+ *
+ * Cách làm: mở một luồng ADB chạy với quyền shell (`exec:cat /dev/input/eventN`) rồi đọc THẲNG
+ * các `struct input_event` dạng nhị phân, không qua `getevent` / không parse chữ. Dùng dịch vụ `exec:`
+ * (không cấp pty) nên byte không bị đổi `\n` -> `\r\n`; nếu máy không hỗ trợ thì lùi về `shell:` kèm `stty raw`.
  *
  * Android không cho một cửa sổ vừa nhận chạm vừa để chạm lọt xuống dưới, và ACTION_OUTSIDE bị
  * che toạ độ từ Android 12, nên đây là cách đáng tin duy nhất khi đã có ADB không dây.
@@ -178,8 +295,6 @@ class TouchWatcher(
     context: Context,
     private val screen: () -> Rect,
     private val sink: TouchSink,
-    /** Báo trạng thái (tiếng Việt) lên luồng chính, để hiện cho người dùng biết vì sao chạm xuyên chưa chạy. */
-    private val onStatus: (String) -> Unit = {},
 ) {
     private val app = context.applicationContext
     private val wm = app.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -187,8 +302,6 @@ class TouchWatcher(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
     @Volatile private var stream: AdbStream? = null
-
-    private fun status(text: String) { main.post { onStatus(text) } }
 
     val running get() = job?.isActive == true
 
@@ -210,42 +323,45 @@ class TouchWatcher(
 
     private suspend fun loop() {
         var device: TouchDevice? = null
+        var useShell = false // false: exec:cat (thô, không pty); true: shell:stty raw; cat
+        var failures = 0
         while (currentCoroutineContext().isActive) {
-            val parser = GeteventParser { slot, down, rx, ry ->
-                val d = device ?: return@GeteventParser
+            val parser = InputEventParser { slot, down, rx, ry ->
+                val d = device ?: return@InputEventParser
                 val b = screen()
-                val (x, y) = GeteventParser.toScreen(rx, ry, d, rotation(), b.width(), b.height())
+                val (x, y) = InputEventParser.toScreen(rx, ry, d, rotation(), b.width(), b.height())
                 main.post { sink.onFinger(slot, down, x, y) }
             }
+            val framer = InputEventStream(parser)
+            var received = 0L
             try {
                 val manager = ZynAdbConnectionManager.get(app)
                 if (!manager.isConnected) {
                     // Nối lại ở nền (đã tự giãn nhịp), rồi thử lại sau
-                    status("ADB chưa kết nối")
                     AdbSession.ensureInBackground(app)
                     delay(RETRY_MS)
                     continue
                 }
                 device = device ?: detect(manager)
                 val dev = device
-                if (dev == null) {
-                    status("Không đọc được thiết bị cảm ứng (getevent -lp)")
-                    delay(RETRY_MS * 3); continue
-                }
-                val s = manager.openStream("shell:getevent -l ${dev.path}")
+                if (dev == null) { delay(RETRY_MS * 3); continue }
+                val cmd = if (useShell) "shell:stty raw -echo 2>/dev/null; exec cat ${dev.path}"
+                else "exec:cat ${dev.path}"
+                val s = manager.openStream(cmd)
                 stream = s
-                status("Đang nghe cảm ứng ${dev.path} (${dev.maxX}x${dev.maxY})")
-                BufferedReader(InputStreamReader(s.openInputStream())).use { reader ->
-                    while (true) {
-                        val line = reader.readLine() ?: break
-                        parser.feed(line)
-                    }
+                val input = s.openInputStream()
+                val chunk = ByteArray(4096)
+                while (true) {
+                    val n = input.read(chunk)
+                    if (n < 0) break
+                    if (n == 0) continue
+                    received += n
+                    framer.feed(chunk, n)
                 }
-                status("Luồng getevent bị đóng, đang nối lại")
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                status("Lỗi đọc chạm: ${e.message ?: e.javaClass.simpleName}")
+            } catch (_: Exception) {
+                // mất kết nối / luồng không phải input_event -> thử lại bên dưới
             } finally {
                 parser.reset()
                 main.post { sink.onLost() } // huỷ các nút đang giữ, không để kẹt
@@ -253,26 +369,45 @@ class TouchWatcher(
                 stream = null
                 if (s != null) runCatching { s.close() }
             }
+            // Chưa nhận được byte nào / sai định dạng: đổi kiểu mở luồng, rồi dò lại thiết bị
+            if (received == 0L || framer.recordSize == 0) {
+                failures++
+                if (failures % 2 == 0) useShell = !useShell
+                if (failures % 4 == 0) device = null
+            } else {
+                failures = 0
+            }
             delay(RETRY_MS)
         }
     }
 
-    private suspend fun detect(manager: ZynAdbConnectionManager): TouchDevice? = withContext(Dispatchers.IO) {
-        val s = manager.openStream("shell:getevent -lp; echo ZYN_END")
+    /** Chạy 1 lệnh shell (không pty), đọc hết đầu ra chữ. Rỗng nếu lỗi. */
+    private suspend fun runText(manager: ZynAdbConnectionManager, cmd: String): String = withContext(Dispatchers.IO) {
         val sb = StringBuilder()
-        try {
-            BufferedReader(InputStreamReader(s.openInputStream())).use { r ->
-                while (sb.length < 200_000) {
-                    val line = r.readLine() ?: break
-                    if (line.contains("ZYN_END")) break
-                    sb.append(line).append('\n')
+        for (prefix in arrayOf("exec:", "shell:")) {
+            val s = try { manager.openStream(prefix + cmd) } catch (_: Exception) { continue }
+            try {
+                s.openInputStream().bufferedReader().use { r ->
+                    val cb = CharArray(4096)
+                    while (sb.length < 400_000) {
+                        val n = r.read(cb)
+                        if (n < 0) break
+                        sb.append(cb, 0, n)
+                    }
                 }
+            } catch (_: Exception) {
+            } finally {
+                runCatching { s.close() }
             }
-        } catch (_: Exception) {
-        } finally {
-            runCatching { s.close() }
+            if (sb.isNotBlank()) break
         }
-        GeteventParser.parseDevice(sb.toString())
+        sb.toString()
+    }
+
+    private suspend fun detect(manager: ZynAdbConnectionManager): TouchDevice? {
+        TouchDeviceFinder.parseGetevent(runText(manager, "getevent -lp"))?.let { return it }
+        val size = TouchDeviceFinder.parseWmSize(runText(manager, "wm size")) ?: return null
+        return TouchDeviceFinder.parseProc(runText(manager, "cat /proc/bus/input/devices"), size.first, size.second)
     }
 
     private companion object {
