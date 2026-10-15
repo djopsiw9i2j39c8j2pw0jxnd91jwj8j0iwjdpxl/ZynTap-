@@ -12,7 +12,7 @@ App Android viết bằng Kotlin + Jetpack Compose. Build APK hoàn toàn trên 
 
 ## Đổi phiên bản (cập nhật không phải gỡ cài lại)
 
-Phiên bản mặc định: **1.00.17**. Có 3 cách đổi:
+Phiên bản mặc định: **1.00.20**. Có 3 cách đổi:
 
 - Sửa dòng `appVersion=1.00.17` trong `gradle.properties`, rồi đẩy code lên.
 - Vào Actions → **Run workflow** → gõ phiên bản (vd `1.00.02`).
@@ -46,6 +46,11 @@ trong thư mục riêng của app (`data/ZynAdbConnectionManager.kt`). Menu nổ
   Chạm lại X/Y khi ghim đang mở để chuyển sang nhập tay. Chọn ghim xong hiện bàn phím; Enter thêm `x, y` và xuống dòng.
   Ô Delay nhận mili giây; Enter thêm `300ms` và xuống dòng. Có báo lỗi dòng sai/toạ độ ngoài màn hình.
 - **Cài cấu hình**: vẫn giữ placeholder, không nằm trong đợt cập nhật này.
+- **Debug log** (tab 5): ô in log các lỗi của app — bơm/click, ADB, helper cảm ứng, tâm ảo, dọn dẹp khi tắt, crash.
+  Nút **Chỉ lỗi** lọc cảnh báo + lỗi, **Kiểm tra** ghi trạng thái hiện tại (ADB, helper bơm, quyền, tâm ảo) vào log,
+  **Sao chép** chép toàn bộ log kèm thông tin máy để dán gửi người sửa lỗi, **Xóa** (chạm 2 lần). Log được lưu ra file
+  nên vẫn xem được sau khi app/dịch vụ tắt hoặc crash (`files/zyntap_debug.log`).
+  Màn hình chính của app cũng có một ô **Debug log** giống vậy (cuối trang) để xem lại log khi menu nổi đã mất.
 
 ### Dùng nút main
 
@@ -113,6 +118,13 @@ app/src/main/res/   icon launcher, logo trong suốt (drawable-nodpi/logo_transp
   - Android 12+ chặn chạm xuyên qua cửa sổ phủ đục hơn 0.8 nên nút chạm xuyên bị đặt độ đục cửa sổ 0.8 (nhìn mờ hơn một chút).
   - Lúc đang chỉnh nút (kéo vị trí) nút vẫn nhận chạm bình thường; chỉnh xong mới xuyên lại.
   - Chưa kiểm thử trên máy thật: bộ giải mã input_event nhị phân + ánh xạ toạ độ/xoay màn hình, luồng ADB + cửa sổ phủ cần thử trên thiết bị.
+
+## Thay đổi 1.00.20 — bơm lại helper tự động
+
+- Helper bơm lỗi / chưa READY -> tự **ép bơm lại, lặp** (giãn dần 8s -> 120s nếu vẫn lỗi, về 8s khi bơm được).
+- Helper không báo READY sau 10s -> đóng và chạy lại, không đứng im.
+- Lùi về `cat` + `input tap` chỉ tạm 30s rồi tự thử bơm lại (trước đây bỏ hẳn sau 3 lần lỗi).
+- Debug log ghi từng bước vòng helper (chờ ADB, dò cảm ứng, chạy helper, READY...) và dòng "Vòng helper" trong báo cáo.
 
 ## Thay đổi 1.00.17
 
