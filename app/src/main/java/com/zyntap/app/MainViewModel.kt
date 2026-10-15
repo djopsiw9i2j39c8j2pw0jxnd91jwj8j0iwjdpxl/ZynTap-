@@ -18,6 +18,7 @@ import com.zyntap.app.data.WifiAdbMonitor
 import com.zyntap.app.data.WifiAdbPairing
 import com.zyntap.app.overlay.OverlayPermission
 import com.zyntap.app.overlay.OverlayService
+import com.zyntap.app.overlay.UsageAccess
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -186,16 +187,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun launchApp(entry: AppEntry) {
         val ctx = getApplication<Application>()
+        // Thiếu quyền thì KHÔNG mở app: đưa người dùng tới đúng mục bật quyền (từng quyền một)
+        if (!OverlayPermission.granted(ctx)) {
+            show("Cần cấp quyền hiển thị trên ứng dụng khác để mở ${entry.label}")
+            OverlayPermission.openSettings(ctx)
+            return
+        }
+        if (!UsageAccess.granted(ctx)) {
+            show("Cần bật Truy cập dữ liệu sử dụng cho ZynTap để mở ${entry.label}")
+            UsageAccess.openSettings(ctx)
+            return
+        }
         if (!repo.launch(entry.packageName)) {
             show("Không mở được ${entry.label}")
             return
         }
         // Mở app đã chọn -> vẽ menu nổi (icon + tên app) lên trên app đó
-        if (OverlayPermission.granted(ctx)) {
-            OverlayService.start(ctx, entry.packageName)
-        } else {
-            show("Cấp quyền hiển thị trên ứng dụng khác để dùng menu nổi")
-        }
+        OverlayService.start(ctx, entry.packageName)
     }
 
     fun requestOverlayPermission() {
