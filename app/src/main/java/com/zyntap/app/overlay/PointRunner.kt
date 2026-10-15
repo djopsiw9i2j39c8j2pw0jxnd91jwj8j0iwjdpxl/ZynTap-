@@ -166,7 +166,7 @@ class PointRunner(
         // Ưu tiên bộ tiêm riêng: device-id riêng + pointer-id trống + thông số clone từ ngón gốc,
         // nên không làm đứt ngón thật đang vuốt. Không dùng được thì lùi về `input tap` như trước.
         val source = fingers
-        if (injector.tap(manager, point.x, point.y, source?.freePointerId() ?: 0, source?.profile)) {
+        if (injector.tap(manager, point.x, point.y, source)) {
             if (!announcedReady) {
                 announcedReady = true
                 scope.launch { message("Tiêm chạm riêng: BẬT (${injector.info})") }

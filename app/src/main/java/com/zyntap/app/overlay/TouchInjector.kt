@@ -35,6 +35,7 @@ class TouchInjector(context: Context) {
     private var reader: BufferedReader? = null
     private var retryAt = 0L
     private var consecutiveErrors = 0
+    private var sentDeviceName = ""
 
     /** Lý do gần nhất khiến bộ tiêm không dùng được (để báo người dùng). */
     @Volatile var lastError: String = ""
@@ -58,30 +59,44 @@ class TouchInjector(context: Context) {
 
     /**
      * Chạm một lần tại ([x], [y]). Chạy trên luồng IO, chặn đến khi xong (thường vài chục ms).
+     *
+     * Cách không làm đứt ngón thật: lần chạm được tiêm như MỘT NGÓN THÊM trong CÙNG cử chỉ của tấm
+     * cảm ứng thật (cùng device-id, ACTION_POINTER_DOWN/UP kèm đủ toạ độ MỚI NHẤT của các ngón thật),
+     * y hệt khi bạn đặt thêm một ngón thứ hai. Game thấy đó là đa chạm bình thường nên ngón đang xoay cam
+     * không bị CANCEL / UP. Nếu không có ngón thật nào đang chạm thì chạm đơn ACTION_DOWN/UP như thường.
+     *
      * @return true = đã tiêm; false = bộ tiêm không dùng được lúc này, nơi gọi dùng đường lui.
      */
     @Synchronized
-    fun tap(manager: ZynAdbConnectionManager, x: Int, y: Int, pointerId: Int, finger: FingerProfile?): Boolean {
-        val command = buildCommand(x, y, pointerId, finger)
+    fun tap(manager: ZynAdbConnectionManager, x: Int, y: Int, source: FingerSource?): Boolean {
         repeat(2) { attempt ->
             if (!ensureStarted(manager)) return false
+            var downSent = false
             try {
-                val reply = request(command, REPLY_TIMEOUT_MS)
-                if (reply == "OK") {
-                    consecutiveErrors = 0
-                    return true
+                syncDevice(source?.deviceName.orEmpty())
+                val finger = source?.profile
+                val before = source?.activePointers() ?: IntArray(0)
+                val id = freeId(before)
+                val downReply = request(buildCommand('D', x, y, id, finger, before), REPLY_TIMEOUT_MS)
+                if (downReply != "OK") return fail(downReply)
+                downSent = true
+                try {
+                    Thread.sleep(HOLD_MS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
                 }
-                // Server còn sống nhưng hệ thống từ chối lần chạm này
-                lastError = reply.removePrefix("ERR").trim().ifBlank { "tiêm chạm bị từ chối" }
-                if (++consecutiveErrors >= MAX_ERRORS) {
-                    shutdown()
-                    retryAt = SystemClock.elapsedRealtime() + BACKOFF_MS
-                }
-                return false
+                // Toạ độ ngón thật lúc NHẢ phải lấy mới (ngón xoay cam đã di chuyển trong lúc giữ)
+                val after = if (before.isEmpty()) IntArray(0) else without(source?.activePointers() ?: IntArray(0), id)
+                val upReply = request(buildCommand('U', x, y, id, finger, after), REPLY_TIMEOUT_MS)
+                if (upReply != "OK") return fail(upReply)
+                consecutiveErrors = 0
+                return true
             } catch (e: IOException) {
-                // Tiến trình chết / ADB đứt: dọn rồi dựng lại đúng một lần
+                // Tiến trình chết / ADB đứt: dọn rồi dựng lại. Đã gửi DOWN rồi thì KHÔNG tiêm lại (tránh chạm đúp);
+                // server tự nhả ngón ảo khi luồng đóng.
                 lastError = e.message ?: "mất kết nối bộ tiêm chạm"
                 shutdown()
+                if (downSent) return true
                 if (attempt == 1) {
                     retryAt = SystemClock.elapsedRealtime() + BACKOFF_MS
                     return false
@@ -91,17 +106,58 @@ class TouchInjector(context: Context) {
         return false
     }
 
-    private fun buildCommand(x: Int, y: Int, pointerId: Int, f: FingerProfile?): String {
+    /** Server còn sống nhưng hệ thống từ chối: đếm lỗi, quá nhiều thì tạm nghỉ để dùng đường lui. */
+    private fun fail(reply: String): Boolean {
+        lastError = reply.removePrefix("ERR").trim().ifBlank { "tiêm chạm bị từ chối" }
+        if (++consecutiveErrors >= MAX_ERRORS) {
+            shutdown()
+            retryAt = SystemClock.elapsedRealtime() + BACKOFF_MS
+        }
+        return false
+    }
+
+    /** Báo cho server tên tấm cảm ứng thật để nó dùng ĐÚNG device-id đó (cùng cử chỉ với ngón thật). */
+    private fun syncDevice(name: String) {
+        if (name.isBlank() || name == sentDeviceName) return
+        val reply = request("N " + name.replace('\n', ' '), REPLY_TIMEOUT_MS)
+        if (reply == "OK") sentDeviceName = name
+    }
+
+    /** Pointer-id nhỏ nhất chưa có ngón thật nào dùng. [pointers] dạng phẳng [id, x, y, ...]. */
+    private fun freeId(pointers: IntArray): Int {
+        var id = 0
+        while (id < MAX_POINTER_ID) {
+            var used = false
+            for (i in pointers.indices step 3) if (pointers[i] == id) { used = true; break }
+            if (!used) return id
+            id++
+        }
+        return MAX_POINTER_ID
+    }
+
+    private fun without(pointers: IntArray, id: Int): IntArray {
+        val out = ArrayList<Int>(pointers.size)
+        for (i in pointers.indices step 3) if (pointers[i] != id) {
+            out.add(pointers[i]); out.add(pointers[i + 1]); out.add(pointers[i + 2])
+        }
+        return out.toIntArray()
+    }
+
+    private fun buildCommand(op: Char, x: Int, y: Int, pointerId: Int, f: FingerProfile?, others: IntArray): String {
         // Chưa thấy ngón thật nào -> giá trị giống `input tap` (áp lực 1, size 1) để hành vi cũ không đổi
         val pressure = f?.pressure ?: 1f
         val size = f?.size ?: 1f
         val major = f?.touchMajor ?: 0f
         val minor = f?.touchMinor ?: 0f
         val orientation = f?.orientation ?: 0f
-        return String.format(
-            Locale.US, "T %d %d %d %d %.3f %.3f %.2f %.2f %.3f",
-            x, y, HOLD_MS, pointerId.coerceIn(0, 31), pressure, size, major, minor, orientation,
+        val sb = StringBuilder(
+            String.format(
+                Locale.US, "%c %d %d %d %.3f %.3f %.2f %.2f %.3f %d",
+                op, x, y, pointerId.coerceIn(0, MAX_POINTER_ID), pressure, size, major, minor, orientation, others.size / 3,
+            ),
         )
+        for (i in others.indices step 3) sb.append(' ').append(others[i]).append(' ').append(others[i + 1]).append(' ').append(others[i + 2])
+        return sb.toString()
     }
 
     // ---- vòng đời tiến trình phụ ---------------------------------------------------------------
@@ -184,6 +240,7 @@ class TouchInjector(context: Context) {
         stream = null
         writer = null
         reader = null
+        sentDeviceName = ""
         // Báo server thoát gọn; đóng luồng cũng làm nó thoát (EOF)
         runCatching { w?.write("Q\n".toByteArray()); w?.flush() }
         runCatching { s?.close() }
@@ -195,7 +252,8 @@ class TouchInjector(context: Context) {
     }
 
     private companion object {
-        const val HOLD_MS = 30           // giữ ngón 30ms mỗi lần chạm (đủ để game nhận ít nhất một khung hình)
+        const val HOLD_MS = 30L          // giữ ngón 30ms mỗi lần chạm (đủ để game nhận ít nhất một khung hình)
+        const val MAX_POINTER_ID = 30
         const val START_TIMEOUT_MS = 8_000L
         const val REPLY_TIMEOUT_MS = 3_000L
         const val MAX_ERRORS = 3

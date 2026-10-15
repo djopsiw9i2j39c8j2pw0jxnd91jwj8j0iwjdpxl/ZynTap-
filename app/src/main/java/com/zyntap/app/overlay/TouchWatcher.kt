@@ -41,6 +41,8 @@ data class TouchDevice(
     val maxPressure: Int = 0,
     val maxMajor: Int = 0,
     val maxMinor: Int = 0,
+    /** Tên thiết bị cảm ứng (để bộ tiêm chạm chọn ĐÚNG device-id của tấm cảm ứng thật). */
+    val name: String = "",
 )
 
 /** Thông số của ngón thật gần nhất, đã đổi sang đơn vị MotionEvent (pressure/size 0..1, vùng chạm theo pixel). */
@@ -59,6 +61,12 @@ interface FingerSource {
 
     /** Pointer-id nhỏ nhất chưa có ngón thật nào dùng (Android cũng cấp id theo kiểu "nhỏ nhất còn trống"). */
     fun freePointerId(): Int
+
+    /** Tên tấm cảm ứng thật đã dò được ("" = chưa biết). */
+    val deviceName: String
+
+    /** Các ngón thật đang chạm, phẳng hoá: [id0, x0, y0, id1, x1, y1, ...] (pixel màn hình hiện tại, id tăng dần). */
+    fun activePointers(): IntArray
 }
 
 /**
@@ -70,6 +78,8 @@ interface FingerSource {
 class InputEventParser(
     /** Gọi ngay trước khi báo "ngón chạm xuống": giá trị thô áp lực / trục lớn / trục nhỏ (-1 = máy không báo). */
     private val onDownProfile: (pressure: Int, major: Int, minor: Int) -> Unit = { _, _, _ -> },
+    /** Ngón đang chạm vừa di chuyển tới toạ độ thô mới (báo sau khi đã báo "chạm xuống"). */
+    private val onMove: (slot: Int, rawX: Int, rawY: Int) -> Unit = { _, _, _ -> },
     private val emit: (slot: Int, down: Boolean, rawX: Int, rawY: Int) -> Unit,
 ) {
     private class Slot {
@@ -83,6 +93,7 @@ class InputEventParser(
         var y = 0
         var hasX = false
         var hasY = false
+        var moved = false
     }
 
     private val slots = HashMap<Int, Slot>()
@@ -112,8 +123,8 @@ class InputEventParser(
                 ABS_MT_PRESSURE -> slot().pressure = value
                 ABS_MT_TOUCH_MAJOR -> slot().major = value
                 ABS_MT_TOUCH_MINOR -> slot().minor = value
-                ABS_MT_POSITION_X -> slot().apply { x = value; hasX = true }
-                ABS_MT_POSITION_Y -> slot().apply { y = value; hasY = true }
+                ABS_MT_POSITION_X -> slot().apply { x = value; hasX = true; moved = true }
+                ABS_MT_POSITION_Y -> slot().apply { y = value; hasY = true; moved = true }
             }
             EV_KEY -> if (code == BTN_TOUCH) {
                 if (value == 0) {
@@ -132,6 +143,7 @@ class InputEventParser(
             if (s.wantDown && s.hasX && s.hasY) {
                 s.wantDown = false
                 s.active = true
+                s.moved = false
                 onDownProfile(s.pressure, s.major, s.minor)
                 emit(id, true, s.x, s.y)
             }
@@ -141,6 +153,11 @@ class InputEventParser(
                     s.active = false
                     emit(id, false, s.x, s.y)
                 }
+                s.moved = false
+            }
+            if (s.active && s.moved && s.hasX && s.hasY) {
+                s.moved = false
+                onMove(id, s.x, s.y)
             }
         }
     }
@@ -302,7 +319,7 @@ object TouchDeviceFinder {
             }
         }
         val best = all.filter { it.mx > 0 && it.my > 0 }.maxByOrNull { it.score() } ?: return null
-        return TouchDevice(best.path, best.mx, best.my, best.pmax, best.majmax, best.minmax)
+        return TouchDevice(best.path, best.mx, best.my, best.pmax, best.majmax, best.minmax, best.name)
     }
 
     /**
@@ -311,7 +328,7 @@ object TouchDeviceFinder {
      */
     fun parseProc(output: String, screenW: Int, screenH: Int): TouchDevice? {
         if (screenW <= 0 || screenH <= 0) return null
-        var best: Pair<Int, String>? = null
+        var best: Triple<Int, String, String>? = null
         for (block in output.split(Regex("\\n\\s*\\n"))) {
             val name = Regex("N:\\s*Name=\"([^\"]*)\"").find(block)?.groupValues?.get(1) ?: continue
             val node = Regex("\\bevent(\\d+)\\b").find(block)?.value ?: continue
@@ -320,10 +337,10 @@ object TouchDeviceFinder {
                 direct = block.contains("PROP=2") || block.contains("PROP=02")
             }
             val sc = c.score()
-            if (sc >= 2 && (best == null || sc > best.first)) best = sc to c.path
+            if (sc >= 2 && (best == null || sc > best.first)) best = Triple(sc, c.path, name)
         }
         val b = best ?: return null
-        return TouchDevice(b.second, screenW - 1, screenH - 1)
+        return TouchDevice(b.second, screenW - 1, screenH - 1, name = b.third)
     }
 
     /** Đọc "Physical size: 1080x2400" của `wm size`. */
@@ -367,7 +384,12 @@ class TouchWatcher(
 
     private val idLock = Any()
     private val slotIds = HashMap<Int, Int>()
+    private val slotPos = HashMap<Int, IntArray>() // slot -> [x, y] (pixel màn hình)
     private var usedIds = 0 // bit n = pointer-id n đang có ngón thật
+
+    @Volatile
+    override var deviceName: String = ""
+        private set
 
     private fun lowestFree(): Int {
         var id = 0
@@ -386,16 +408,35 @@ class TouchWatcher(
 
     private fun releaseId(slot: Int) {
         synchronized(idLock) {
+            slotPos.remove(slot)
             val id = slotIds.remove(slot) ?: return
             usedIds = usedIds and (1 shl id).inv()
         }
     }
 
     private fun clearIds() {
-        synchronized(idLock) { slotIds.clear(); usedIds = 0 }
+        synchronized(idLock) { slotIds.clear(); slotPos.clear(); usedIds = 0 }
+    }
+
+    private fun setPos(slot: Int, x: Int, y: Int) {
+        synchronized(idLock) {
+            if (!slotIds.containsKey(slot)) return
+            val p = slotPos.getOrPut(slot) { IntArray(2) }
+            p[0] = x
+            p[1] = y
+        }
     }
 
     override fun freePointerId(): Int = synchronized(idLock) { lowestFree() }
+
+    override fun activePointers(): IntArray = synchronized(idLock) {
+        val list = slotIds.entries.mapNotNull { (slot, id) ->
+            slotPos[slot]?.let { intArrayOf(id, it[0], it[1]) }
+        }.sortedBy { it[0] }
+        val out = IntArray(list.size * 3)
+        list.forEachIndexed { i, t -> out[i * 3] = t[0]; out[i * 3 + 1] = t[1]; out[i * 3 + 2] = t[2] }
+        out
+    }
 
     /** Đổi giá trị thô của ngón vừa chạm xuống sang đơn vị MotionEvent rồi nhớ lại làm "ngón gốc". */
     private fun noteProfile(dev: TouchDevice, rawPressure: Int, rawMajor: Int, rawMinor: Int) {
@@ -439,13 +480,21 @@ class TouchWatcher(
         var useShell = false // false: exec:cat (thô, không pty); true: shell:stty raw; cat
         var failures = 0
         while (currentCoroutineContext().isActive) {
-            val parser = InputEventParser(onDownProfile = { p, maj, min ->
-                device?.let { noteProfile(it, p, maj, min) }
-            }) { slot, down, rx, ry ->
+            val parser = InputEventParser(
+                onDownProfile = { p, maj, min -> device?.let { noteProfile(it, p, maj, min) } },
+                onMove = { slot, rx, ry ->
+                    val d = device
+                    if (d != null) {
+                        val b = screen()
+                        val (x, y) = InputEventParser.toScreen(rx, ry, d, rotation(), b.width(), b.height())
+                        setPos(slot, x, y)
+                    }
+                },
+            ) { slot, down, rx, ry ->
                 val d = device ?: return@InputEventParser
-                if (down) claimId(slot) else releaseId(slot)
                 val b = screen()
                 val (x, y) = InputEventParser.toScreen(rx, ry, d, rotation(), b.width(), b.height())
+                if (down) { claimId(slot); setPos(slot, x, y) } else releaseId(slot)
                 main.post { sink.onFinger(slot, down, x, y) }
             }
             val framer = InputEventStream(parser)
@@ -461,6 +510,7 @@ class TouchWatcher(
                 device = device ?: detect(manager)
                 val dev = device
                 if (dev == null) { delay(RETRY_MS * 3); continue }
+                deviceName = dev.name
                 val cmd = if (useShell) "shell:stty raw -echo 2>/dev/null; exec cat ${dev.path}"
                 else "exec:cat ${dev.path}"
                 val s = manager.openStream(cmd)
