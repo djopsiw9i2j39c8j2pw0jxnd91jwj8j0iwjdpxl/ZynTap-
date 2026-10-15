@@ -13,13 +13,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.zyntap.app.overlay.OverlayPermission
 import com.zyntap.app.overlay.OverlayService
+import com.zyntap.app.overlay.UsageAccess
 import com.zyntap.app.ui.ZynTapApp
 import com.zyntap.app.ui.ZynTapTheme
 
 class MainActivity : ComponentActivity() {
 
     /**
-     * Bước xin quyền: 0 = thông báo, 1 = hiển thị trên ứng dụng khác.
+     * Bước xin quyền: 0 = thông báo, 1 = hiển thị trên ứng dụng khác, 2 = truy cập dữ liệu sử dụng.
      * Mỗi bước chỉ thử đúng 1 lần mỗi lần mở app, nên không bị hỏi lặp khi người dùng từ chối.
      */
     private var permissionStep = 0
@@ -54,7 +55,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestNextPermission() {
-        while (permissionStep < 2) {
+        while (permissionStep < 3) {
             val step = permissionStep++
             if (step == 0 &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -66,6 +67,11 @@ class MainActivity : ComponentActivity() {
             }
             if (step == 1 && !OverlayPermission.granted(this)) {
                 overlayLauncher.launch(OverlayPermission.settingsIntent(this))
+                return
+            }
+            if (step == 2 && !UsageAccess.granted(this)) {
+                // Để menu nổi tự đóng khi thoát app đã mở
+                overlayLauncher.launch(UsageAccess.settingsIntent(this))
                 return
             }
         }
