@@ -29,9 +29,11 @@ class MainButton(
         const val MODE_RELEASE = 2  // thả
         val MODE_LABELS = listOf("Nhấn", "Giữ", "Thả")
 
-        const val MIN_ALPHA = 10
+        const val MIN_ALPHA = 0
         const val MAX_ALPHA = 100
         const val DEFAULT_ALPHA = 80
+        /** Khi menu đang mở, nút có độ mờ thấp hơn mức này vẫn được vẽ ở mức này để còn thấy mà chỉnh. */
+        const val MENU_MIN_ALPHA = 20
         const val MIN_SIZE = 32
         const val MAX_SIZE = 120
         const val DEFAULT_SIZE = 56

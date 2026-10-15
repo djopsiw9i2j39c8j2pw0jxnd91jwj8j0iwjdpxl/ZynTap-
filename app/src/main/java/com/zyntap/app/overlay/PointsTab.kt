@@ -76,9 +76,7 @@ class PointsTab(
             orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), dp(12))
             isFocusableInTouchMode = true
         }
-        page.addView(label("Điểm nhấn", 17f).apply {
-            setTextColor(fg); setTypeface(typeface, Typeface.BOLD)
-        }, LinearLayout.LayoutParams(-1, dp(30)).apply { marginEnd = dp(126) })
+        addTabHeader(ctx, page, "Điểm nhấn", "Kịch bản click cho từng nút main")
         mainField = TextView(ctx).apply {
             scaledTextSize(14f); setTextColor(fg); gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), 0, dp(12), 0)

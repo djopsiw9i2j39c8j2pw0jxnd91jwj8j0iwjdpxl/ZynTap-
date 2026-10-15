@@ -107,24 +107,8 @@ class MainButtonsTab(
             setPadding(dp(14), dp(14), dp(14), dp(12))
         }
 
-        // Tiêu đề (chừa chỗ cho 3 nút mắt / - / X của menu ở góc phải)
-        val header = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        header.addView(TextView(ctx).apply {
-            text = "Nút chính"
-            setTextColor(0xFFE8EEFA.toInt())
-            scaledTextSize(17f)
-            setTypeface(typeface, Typeface.BOLD)
-        })
-        countText = TextView(ctx).apply {
-            setTextColor(0xFF8D9DBA.toInt())
-            scaledTextSize(12f)
-        }
-        header.addView(countText)
-        page.addView(
-            header,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                .apply { marginEnd = dp(128); bottomMargin = dp(10) },
-        )
+        // Tiêu đề (khung chung với 2 tab kia, chừa chỗ cho 3 nút mắt / - / X của menu ở góc phải)
+        countText = addTabHeader(ctx, page, "Nút chính", "")
 
         // Danh sách thanh nút
         listBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
@@ -640,6 +624,7 @@ class MainButtonsTab(
         val preview = MainButtonView(ctx).apply {
             label = draft.name
             fillPct = draft.alphaPct
+            minPct = MainButton.MENU_MIN_ALPHA // xem trước luôn thấy được, kể cả khi chọn 0%
             ringPad = 0f
         }
         fun syncPreview() {

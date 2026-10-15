@@ -546,7 +546,7 @@ class OverlayService : Service() {
 
     /** Tạo cửa sổ menu (đang ẩn hoàn toàn bên trái) nếu chưa có. */
     private fun ensurePanel() {
-        if (panelView != null) { revealPanel(); return }
+        if (panelView != null) { revealPanel(); circles.setMenuOpen(true); return }
         solid = prefs.getBoolean(KEY_SOLID, false)
 
         val params = overlayParams(
@@ -726,6 +726,7 @@ class OverlayService : Service() {
         cardBg = bg
         panelAddedAt = SystemClock.uptimeMillis()
         applySolid(if (solid) 1f else 0f)
+        circles.setMenuOpen(true)
         runCatching { wm.addView(scrim, params) }.onFailure { removePanel() }
         startStatusTick()
     }
@@ -1188,6 +1189,7 @@ class OverlayService : Service() {
         solidAnim?.cancel()
         editDimAnim?.cancel()
         promptLayer?.close()
+        circles.setMenuOpen(false)
         circles.setEditing(null)
         circles.fadeAll(0f, 250L)   // các nút tròn mờ đi cùng lúc menu thu lại
         card.animate().cancel(); scrim.animate().cancel()
@@ -1350,6 +1352,7 @@ class OverlayService : Service() {
             handleView?.alpha = 1f
             return
         }
+        circles.setMenuOpen(false) // menu thu lại: nút 0% biến mất
         mainTab?.exitEdit()
         pointsTab?.exit()
         configTab?.exit()
@@ -1394,6 +1397,7 @@ class OverlayService : Service() {
         resetPanelState()
         confirmLayer?.let { it.animate().cancel(); it.visibility = View.GONE }
         panelHidden = true
+        if (::circles.isInitialized) circles.setMenuOpen(false)
         handler.removeCallbacks(statusTick)
         v.visibility = View.INVISIBLE
         if (p != null) {
@@ -1424,6 +1428,7 @@ class OverlayService : Service() {
         handler.removeCallbacks(statusTick)
         statusWifiDot = null; statusWifiText = null; statusLinkDot = null; statusLinkText = null
         panelHidden = false
+        if (::circles.isInitialized) circles.setMenuOpen(false)
         resetGhost()
         pointsTab?.exit()
         configTab?.exit()

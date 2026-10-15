@@ -30,9 +30,13 @@ class MainButtonView(context: Context) : View(context) {
     var label = ""
         set(v) { if (field != v) { field = v; labelKey = ""; invalidate() } }
 
-    /** Độ đặc của thân nút, 0..100. */
+    /** Độ đặc của thân nút, 0..100 (0 = vô hình). */
     var fillPct = 80
         set(v) { field = v; invalidate() }
+
+    /** Sàn độ đặc đang áp dụng (menu mở = [MainButton.MENU_MIN_ALPHA], đóng = 0), để nút 0% vẫn thấy được lúc chỉnh. */
+    var minPct = 0
+        set(v) { if (field != v) { field = v; invalidate() } }
 
     /** Khoảng chừa quanh nút (px) cho vòng viền chỉnh sửa. */
     var ringPad = 0f
@@ -109,7 +113,8 @@ class MainButtonView(context: Context) : View(context) {
         val cy = height / 2f
         val r = minOf(width, height) / 2f - ringPad
         if (r <= 0f) return
-        val a = fillPct / 100f
+        val a = maxOf(fillPct, minPct) / 100f
+        if (a <= 0f && !editing) return // 0% và menu đóng: nút vô hình hoàn toàn (vẫn nhận chạm)
 
         // thân nút: gradient xanh, độ đặc theo [fillPct]
         val key = r
@@ -122,13 +127,13 @@ class MainButtonView(context: Context) : View(context) {
         canvas.drawCircle(cx, cy, r, fill)
 
         edge.color = 0xFFFFFFFF.toInt()
-        edge.alpha = (255 * (0.2f + 0.4f * a)).toInt()
+        edge.alpha = if (a <= 0f) 0 else (255 * (0.2f + 0.4f * a)).toInt()
         canvas.drawCircle(cx, cy, r - edge.strokeWidth / 2f, edge)
 
         // tên nút, tự co cỡ chữ cho vừa trong vòng tròn
         val lay = fitLabel(r)
         if (lay != null) {
-            text.alpha = (255 * (0.55f + 0.45f * a)).toInt()
+            text.alpha = if (a <= 0f) 0 else (255 * (0.55f + 0.45f * a)).toInt()
             canvas.save()
             canvas.translate(cx - lay.width / 2f, cy - lay.height / 2f)
             lay.draw(canvas)
@@ -348,9 +353,18 @@ class MainButtonOverlay(
         }
     }
 
+    /** Menu đang mở? Mở thì nút có độ mờ 0% vẫn hiện ở 20% để còn nhìn thấy mà chỉnh. */
+    private var menuOpen = false
+
+    fun setMenuOpen(open: Boolean) {
+        menuOpen = open
+        entries.values.forEach { it.view.minPct = if (open) MainButton.MENU_MIN_ALPHA else 0 }
+    }
+
     private fun bind(v: MainButtonView, b: MainButton) {
         v.label = b.name
         v.fillPct = b.alphaPct
+        v.minPct = if (menuOpen) MainButton.MENU_MIN_ALPHA else 0
         v.ringPad = ringPad.toFloat()
     }
 

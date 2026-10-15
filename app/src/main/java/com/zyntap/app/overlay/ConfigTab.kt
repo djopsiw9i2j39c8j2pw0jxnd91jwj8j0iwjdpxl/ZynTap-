@@ -149,9 +149,7 @@ class ConfigTab(
             orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), dp(12))
             isFocusableInTouchMode = true
         }
-        page.addView(label("Cấu hình", 17f).apply {
-            setTextColor(fg); setTypeface(typeface, Typeface.BOLD)
-        }, LinearLayout.LayoutParams(-1, dp(30)).apply { marginEnd = dp(126) })
+        addTabHeader(ctx, page, "Cấu hình", "Lưu macro và kích thước menu")
 
         // ---- Lưu macro ----
         page.addView(label("LƯU MACRO", 10.5f), LinearLayout.LayoutParams(-1, dp(25)).apply { topMargin = dp(4) })
