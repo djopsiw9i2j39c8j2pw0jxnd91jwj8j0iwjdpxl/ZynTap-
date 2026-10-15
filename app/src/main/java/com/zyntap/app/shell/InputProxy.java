@@ -488,6 +488,14 @@ public final class InputProxy {
             down = true;
         }
         stopping = true;
+        // Chốt chặn cuối: dù bước dọn dưới đây kẹt (khoá LOCK, bộ phát treo...) tiến trình vẫn phải chết,
+        // nếu không helper mồ côi giữ grab cảm ứng và lần mở app sau không bơm được.
+        Thread killer = new Thread(() -> {
+            SystemClock.sleep(3000);
+            Runtime.getRuntime().halt(0);
+        }, "zyn-kill");
+        killer.setDaemon(true);
+        killer.start();
         try {
             // Nhả grab khi đã không còn ngón thật chạm (tối đa ~1.5s) để hệ thống không bị kẹt ngón "ma".
             long end = SystemClock.uptimeMillis() + 1500;
