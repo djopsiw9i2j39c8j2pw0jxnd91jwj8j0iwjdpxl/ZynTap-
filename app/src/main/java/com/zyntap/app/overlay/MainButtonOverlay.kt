@@ -56,7 +56,7 @@ class MainButtonView(context: Context) : View(context) {
             invalidate()
         }
 
-    private val d = resources.displayMetrics.density
+    private val d = UiScale.density(resources)
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1.5f * d }
     private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -236,7 +236,7 @@ class MainButtonOverlay(
         override fun onFinger(slot: Int, down: Boolean, x: Int, y: Int) = onWatchedFinger(slot, down, x, y)
         override fun onLost() = cancelWatched()
     })
-    private val d = ctx.resources.displayMetrics.density
+    private val d = UiScale.density(ctx.resources)
     private fun dp(v: Int) = (v * d).toInt()
     private val ringPad get() = dp(RING_PAD_DP)
 

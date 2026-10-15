@@ -75,7 +75,7 @@ class MainButtonsTab(
     private val overlay: MainButtonOverlay,
     private val host: PanelHost,
 ) {
-    private val d = ctx.resources.displayMetrics.density
+    private val d = UiScale.density(ctx.resources)
     private fun dp(v: Int) = (v * d).toInt()
     private fun round(color: Int, r: Int, strokeColor: Int? = null) = GradientDrawable().apply {
         setColor(color)
@@ -112,12 +112,12 @@ class MainButtonsTab(
         header.addView(TextView(ctx).apply {
             text = "Nút chính"
             setTextColor(0xFFE8EEFA.toInt())
-            textSize = 17f
+            scaledTextSize(17f)
             setTypeface(typeface, Typeface.BOLD)
         })
         countText = TextView(ctx).apply {
             setTextColor(0xFF8D9DBA.toInt())
-            textSize = 12f
+            scaledTextSize(12f)
         }
         header.addView(countText)
         page.addView(
@@ -131,7 +131,7 @@ class MainButtonsTab(
         emptyView = TextView(ctx).apply {
             text = "Chưa có nút nào\nẤn “Tạo nút mới” ở dưới để bắt đầu"
             setTextColor(0xFF8D9DBA.toInt())
-            textSize = 13.5f
+            scaledTextSize(13.5f)
             gravity = Gravity.CENTER
             setPadding(0, dp(40), 0, dp(40))
         }
@@ -183,7 +183,7 @@ class MainButtonsTab(
         row.addView(TextView(ctx).apply {
             text = label
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 15f
+            scaledTextSize(15f)
             setTypeface(typeface, Typeface.BOLD)
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(8) })
         return row
@@ -203,7 +203,7 @@ class MainButtonsTab(
         private val orb = TextView(ctx).apply {
             gravity = Gravity.CENTER
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 14f
+            scaledTextSize(14f)
             setTypeface(typeface, Typeface.BOLD)
             background = GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
@@ -212,14 +212,14 @@ class MainButtonsTab(
         }
         private val title = TextView(ctx).apply {
             setTextColor(0xFFE8EEFA.toInt())
-            textSize = 15f
+            scaledTextSize(15f)
             setTypeface(typeface, Typeface.BOLD)
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
         private val sub = TextView(ctx).apply {
             setTextColor(0xFF8D9DBA.toInt())
-            textSize = 12f
+            scaledTextSize(12f)
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
@@ -279,7 +279,7 @@ class MainButtonsTab(
             body.addView(TextView(ctx).apply {
                 text = "Đang chỉnh sửa — kéo nút tròn trên màn hình để đặt vị trí. Ấn lại thanh này để thoát."
                 setTextColor(0xFF19D3FF.toInt())
-                textSize = 12f
+                scaledTextSize(12f)
             })
             body.addView(
                 buildForm(b, onLive = { overlay.onChanged(b); refresh() }, onCommit = { repo.save() }),
@@ -289,7 +289,7 @@ class MainButtonsTab(
             val del = TextView(ctx).apply {
                 text = "Xoá nút"
                 setTextColor(0xFFEF5B5B.toInt())
-                textSize = 14f
+                scaledTextSize(14f)
                 setTypeface(typeface, Typeface.BOLD)
                 gravity = Gravity.CENTER
                 background = ripple(round(0x22EF5B5B, 12, 0x55EF5B5B), 12)
@@ -446,7 +446,7 @@ class MainButtonsTab(
         val nameText = TextView(ctx).apply {
             text = b.name
             setTextColor(0xFFE8EEFA.toInt())
-            textSize = 14.5f
+            scaledTextSize(14.5f)
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
@@ -500,12 +500,12 @@ class MainButtonsTab(
         texts.addView(TextView(ctx).apply {
             text = "Chạm xuyên nút"
             setTextColor(0xFFE8EEFA.toInt())
-            textSize = 14.5f
+            scaledTextSize(14.5f)
         })
         texts.addView(TextView(ctx).apply {
             text = "Giúp chạm các tính năng bên dưới nút nổi cùng lúc."
             setTextColor(0xFF8D9DBA.toInt())
-            textSize = 11.5f
+            scaledTextSize(11.5f)
         })
         row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
         val sw = Switch(ctx).apply {
@@ -532,7 +532,7 @@ class MainButtonsTab(
     private fun fieldLabel(text: String) = TextView(ctx).apply {
         this.text = text
         setTextColor(0xFF8D9DBA.toInt())
-        textSize = 12f
+        scaledTextSize(12f)
         setPadding(dp(2), dp(12), 0, dp(5))
     }
 
@@ -548,12 +548,12 @@ class MainButtonsTab(
         head.addView(TextView(ctx).apply {
             text = label
             setTextColor(0xFF8D9DBA.toInt())
-            textSize = 12f
+            scaledTextSize(12f)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         val valueText = TextView(ctx).apply {
             text = "$value$unit"
             setTextColor(0xFFE8EEFA.toInt())
-            textSize = 12.5f
+            scaledTextSize(12.5f)
             setTypeface(typeface, Typeface.BOLD)
         }
         head.addView(valueText)
@@ -620,13 +620,13 @@ class MainButtonsTab(
         titles.addView(TextView(ctx).apply {
             text = "Tạo nút mới"
             setTextColor(0xFFE8EEFA.toInt())
-            textSize = 17f
+            scaledTextSize(17f)
             setTypeface(typeface, Typeface.BOLD)
         })
         titles.addView(TextView(ctx).apply {
             text = "Mã nút: ${draft.code}"
             setTextColor(0xFF8D9DBA.toInt())
-            textSize = 12f
+            scaledTextSize(12f)
         })
         top.addView(titles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(10) })
         page.addView(top, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)

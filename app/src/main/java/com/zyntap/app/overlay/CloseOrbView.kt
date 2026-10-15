@@ -42,7 +42,7 @@ class CloseOrbView(context: Context, logo: Drawable?) : View(context) {
             invalidate()
         }
 
-    private val d = resources.displayMetrics.density
+    private val d = UiScale.density(resources)
     private val orbR = 26f * d                // bán kính viên tròn: 52dp (muốn to/nhỏ hơn thì chỉnh số này)
 
     private val logo: Drawable? = logo?.mutate()

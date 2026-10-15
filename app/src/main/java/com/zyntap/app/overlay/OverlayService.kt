@@ -32,6 +32,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.view.animation.OvershootInterpolator
@@ -81,6 +82,9 @@ class OverlayService : Service() {
     private var handleAddedAt = 0L
     private var panelAddedAt = 0L
     private var panelGhost = false     // đang ẩn tạm menu vì kéo ghim / nút main
+    private var uiDensitySig = 0f      // mật độ đã co giãn lúc dựng UI (để biết khi nào phải dựng lại)
+    private var ghostAmt = 0f          // 0 = menu hiện đủ, 1 = ẩn hẳn (chạy mượt giữa hai mức)
+    private var ghostAnim: ValueAnimator? = null
     private var panelHidden = false    // menu vẫn còn trong bộ nhớ nhưng đang ẩn (không gỡ/dựng lại)
     private var shownTabIdx = 0        // tab đang hiển thị trong menu
 
@@ -105,6 +109,7 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        uiDensitySig = UiScale.density(resources)
         repo = MainButtonRepo(this)
         circles = MainButtonOverlay(
             ctx = this,
@@ -371,6 +376,17 @@ class OverlayService : Service() {
         circles.cancelTouches()
         // Xoay màn hình: bỏ menu đang mở, đặt lại nút (cutout đổi cạnh nên chờ hệ thống cập nhật)
         removePanel()
+        // Đổi DPI / "Kích thước hiển thị" / máy gập: hệ số co giãn đổi -> dựng lại tay nắm + nút main theo cỡ mới
+        val sig = UiScale.density(resources)
+        if (kotlin.math.abs(sig - uiDensitySig) > 0.001f) {
+            uiDensitySig = sig
+            handleView?.let { runCatching { wm.removeViewImmediate(it) } }
+            handleView = null
+            handleParams = null
+            circles.removeAll()
+            ensureHandle()
+            circles.ensureAll()
+        }
         handleView?.alpha = 1f
         relayoutHandle()
         circles.relayoutAll()
@@ -666,7 +682,7 @@ class OverlayService : Service() {
         row.addView(TextView(this).apply {
             text = getString(R.string.app_name)
             setTextColor(0xFFE8EEFA.toInt())
-            textSize = 15f
+            scaledTextSize(15f)
             setTypeface(typeface, Typeface.BOLD)
         }, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -738,7 +754,7 @@ class OverlayService : Service() {
         tabNames.forEachIndexed { i, name ->
             val t = TextView(this).apply {
                 text = name
-                textSize = 14f
+                scaledTextSize(14f)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
                 gravity = Gravity.CENTER_VERTICAL
@@ -776,7 +792,7 @@ class OverlayService : Service() {
             val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             val dot = View(this)
             val tv = TextView(this).apply {
-                setTextColor(0xFFC3CDE2.toInt()); textSize = 11.5f; maxLines = 1
+                setTextColor(0xFFC3CDE2.toInt()); scaledTextSize(11.5f); maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             }
             r.addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
@@ -893,7 +909,7 @@ class OverlayService : Service() {
     private fun applySolid(t: Float) {
         solidAmount = t
         cardBg?.setColor(Color.argb((CARD_ALPHA + (255 - CARD_ALPHA) * t).toInt(), 0x0D, 0x15, 0x24))
-        panelView?.setBackgroundColor(if (panelGhost) Color.TRANSPARENT else Color.argb(scrimAlpha(t), 0, 0, 0))
+        panelView?.setBackgroundColor(Color.argb((scrimAlpha(t) * (1f - ghostAmt)).toInt().coerceIn(0, 255), 0, 0, 0))
     }
 
     /** Độ đậm nền tối phía sau; nhạt đi khi đang chỉnh nút để nhìn rõ màn hình mà đặt vị trí. */
@@ -902,10 +918,38 @@ class OverlayService : Service() {
         if (panelGhost == on) return
         panelGhost = on
         if (closing) return
-        panelCard?.animate()?.cancel()
-        panelCard?.animate()?.alpha(if (on) 0f else 1f)?.setDuration(if (on) 90L else 150L)?.start()
         panelControls?.animate()?.cancel()
+        // Mờ dần + thu nhẹ khi ẩn, hiện lại thì nở ra: card và nền tối chạy chung một animator cho đồng bộ.
+        ghostAnim?.cancel()
+        ghostAnim = ValueAnimator.ofFloat(ghostAmt, if (on) 1f else 0f).apply {
+            duration = if (on) 220L else 280L
+            interpolator = if (on) AccelerateDecelerateInterpolator() else TAB_INTERPOLATOR
+            addUpdateListener {
+                ghostAmt = it.animatedValue as Float
+                applyGhost()
+            }
+            start()
+        }
+    }
+
+    /** Áp [ghostAmt] lên card (độ mờ + co nhẹ) và nền tối phía sau. */
+    private fun applyGhost() {
+        val g = ghostAmt
+        panelCard?.let {
+            it.alpha = 1f - g
+            val sc = 1f - GHOST_SHRINK * g
+            it.pivotX = it.width * 0.5f
+            it.pivotY = it.height * 0.5f
+            it.scaleX = sc; it.scaleY = sc
+        }
         applySolid(solidAmount)
+    }
+
+    private fun resetGhost() {
+        ghostAnim?.cancel()
+        ghostAmt = 0f
+        panelGhost = false
+        panelCard?.let { it.alpha = 1f; it.scaleX = 1f; it.scaleY = 1f }
     }
 
     private fun scrimAlpha(t: Float): Int =
@@ -979,7 +1023,7 @@ class OverlayService : Service() {
     private fun placeholderTab(name: String): View = TextView(this).apply {
         text = "$name\nđang phát triển"
         setTextColor(0xFF8D9DBA.toInt())
-        textSize = 15f
+        scaledTextSize(15f)
         gravity = Gravity.CENTER
     }
 
@@ -1006,13 +1050,13 @@ class OverlayService : Service() {
         dlg.addView(TextView(this).apply {
             text = "Đóng menu?"
             setTextColor(0xFFE8EEFA.toInt())
-            textSize = 17f
+            scaledTextSize(17f)
             setTypeface(typeface, Typeface.BOLD)
         })
         dlg.addView(TextView(this).apply {
             text = "Menu nổi sẽ được tắt hoàn toàn. Bạn có chắc muốn đóng không?"
             setTextColor(0xFF8D9DBA.toInt())
-            textSize = 13.5f
+            scaledTextSize(13.5f)
         }, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(6) })
@@ -1038,7 +1082,7 @@ class OverlayService : Service() {
         TextView(this).apply {
             text = label
             setTextColor(textColor)
-            textSize = 14.5f
+            scaledTextSize(14.5f)
             setTypeface(typeface, Typeface.BOLD)
             gravity = Gravity.CENTER
             background = RippleDrawable(
@@ -1268,8 +1312,7 @@ class OverlayService : Service() {
         promptLayer?.close()
         dropdownLayer?.dismissNow()
         inputActive = false
-        panelGhost = false
-        panelCard?.alpha = 1f
+        resetGhost()
         solidAnim?.cancel()
         editDimAnim?.cancel()
         editDim = 0f
@@ -1317,7 +1360,7 @@ class OverlayService : Service() {
         handler.removeCallbacks(statusTick)
         statusWifiDot = null; statusWifiText = null; statusLinkDot = null; statusLinkText = null
         panelHidden = false
-        panelGhost = false
+        resetGhost()
         pointsTab?.exit()
         pointPicker.close()
         promptLayer?.close()
@@ -1350,13 +1393,14 @@ class OverlayService : Service() {
         if (::circles.isInitialized) circles.removeAll()
     }
 
-    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+    private fun dp(v: Int): Int = (v * UiScale.density(resources)).toInt()
 
     companion object {
         const val ACTION_SHOW = "com.zyntap.app.overlay.SHOW"
         const val ACTION_HIDE = "com.zyntap.app.overlay.HIDE"
         const val ACTION_STOP = "com.zyntap.app.overlay.STOP"
         private const val NOTIF_ID = 1001
+        private const val GHOST_SHRINK = 0.06f
         private const val PANEL_W_DP = 620
         private const val PANEL_H_DP = 480
         private const val PANEL_MARGIN_DP = 8

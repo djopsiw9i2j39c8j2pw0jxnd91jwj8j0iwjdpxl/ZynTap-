@@ -28,19 +28,19 @@ class TextPromptLayer(
     private val onKeyboard: (Boolean) -> Unit,
 ) : FrameLayout(context) {
 
-    private val d = resources.displayMetrics.density
+    private val d = UiScale.density(resources)
     private fun dp(v: Int) = (v * d).toInt()
     private fun round(color: Int, r: Int) = GradientDrawable().apply { setColor(color); cornerRadius = dp(r).toFloat() }
 
     private val titleText = TextView(context).apply {
         setTextColor(0xFFE8EEFA.toInt())
-        textSize = 16f
+        scaledTextSize(16f)
         setTypeface(typeface, Typeface.BOLD)
     }
     private val input = EditText(context).apply {
         setTextColor(0xFFE8EEFA.toInt())
         setHintTextColor(0xFF5E6E8C.toInt())
-        textSize = 15f
+        scaledTextSize(15f)
         isSingleLine = true
         setPadding(dp(14), 0, dp(14), 0)
         background = GradientDrawable().apply {
@@ -159,7 +159,7 @@ class TextPromptLayer(
     private fun button(label: String, bg: Int, fg: Int, onClick: () -> Unit) = TextView(context).apply {
         text = label
         setTextColor(fg)
-        textSize = 14.5f
+        scaledTextSize(14.5f)
         setTypeface(typeface, Typeface.BOLD)
         gravity = Gravity.CENTER
         background = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), round(bg, 12), round(0xFFFFFFFF.toInt(), 12))

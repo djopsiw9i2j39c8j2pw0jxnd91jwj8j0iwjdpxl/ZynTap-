@@ -25,7 +25,7 @@ import com.zyntap.app.R
  */
 class DropdownLayer(context: Context) : FrameLayout(context) {
 
-    private val d = resources.displayMetrics.density
+    private val d = UiScale.density(resources)
     private fun dp(v: Int) = (v * d).toInt()
     private fun dpf(v: Float) = v * d
 
@@ -159,7 +159,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         }
         row.addView(TextView(context).apply {
             text = label
-            textSize = 14.5f
+            scaledTextSize(14.5f)
             setTextColor(if (selected) 0xFF19D3FF.toInt() else 0xFFE8EEFA.toInt())
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
@@ -191,14 +191,14 @@ class DropdownField(
     private val onSelect: (Int) -> Unit,
 ) : LinearLayout(context) {
 
-    private val d = resources.displayMetrics.density
+    private val d = UiScale.density(resources)
     private fun dp(v: Int) = (v * d).toInt()
 
     var current: Int = selected
         private set
 
     private val valueText = TextView(context).apply {
-        textSize = 14.5f
+        scaledTextSize(14.5f)
         setTextColor(0xFFE8EEFA.toInt())
         maxLines = 1
         ellipsize = android.text.TextUtils.TruncateAt.END

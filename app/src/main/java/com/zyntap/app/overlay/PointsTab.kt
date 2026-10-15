@@ -32,7 +32,7 @@ class PointsTab(
     private val keyboard: (Boolean) -> Unit,
     private val stopRuns: () -> Unit,
 ) {
-    private val d = ctx.resources.displayMetrics.density
+    private val d = UiScale.density(ctx.resources)
     private fun dp(n: Int) = (n * d).toInt()
     private val fg = 0xFFE8EEFA.toInt()
     private val muted = 0xFF8D9DBA.toInt()
@@ -52,13 +52,13 @@ class PointsTab(
         setColor(color); cornerRadius = dp(12).toFloat(); setStroke(dp(1), stroke)
     }
     private fun label(text: String, size: Float = 12f) = TextView(ctx).apply {
-        this.text = text; textSize = size; setTextColor(muted); gravity = Gravity.CENTER_VERTICAL
+        this.text = text; scaledTextSize(size); setTextColor(muted); gravity = Gravity.CENTER_VERTICAL
     }
     private fun row() = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
     }
     private fun field(hint: String) = EditText(ctx).apply {
-        this.hint = hint; textSize = 14f
+        this.hint = hint; scaledTextSize(14f)
         setTextColor(fg); setHintTextColor(0xFF596D8D.toInt())
         background = round(0xFF0A1220.toInt()); setPadding(dp(12), dp(6), dp(10), dp(6))
         setSingleLine(true); inputType = InputType.TYPE_CLASS_NUMBER
@@ -80,7 +80,7 @@ class PointsTab(
             setTextColor(fg); setTypeface(typeface, Typeface.BOLD)
         }, LinearLayout.LayoutParams(-1, dp(30)).apply { marginEnd = dp(126) })
         mainField = TextView(ctx).apply {
-            textSize = 14f; setTextColor(fg); gravity = Gravity.CENTER_VERTICAL
+            scaledTextSize(14f); setTextColor(fg); gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), 0, dp(12), 0)
             background = RippleDrawable(ColorStateList.valueOf(0x2219D3FF), round(0xFF142036.toInt()), round(-1))
             setOnClickListener {
@@ -98,7 +98,7 @@ class PointsTab(
         editor = EditText(ctx).apply {
             hint = "828, 191\n300ms\n18, 181"
             setTextColor(0xFFC3EAFE.toInt()); setHintTextColor(0xFF405675.toInt())
-            textSize = 13.5f; typeface = Typeface.MONOSPACE; gravity = Gravity.TOP or Gravity.START
+            scaledTextSize(13.5f); typeface = Typeface.MONOSPACE; gravity = Gravity.TOP or Gravity.START
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_FLAG_NO_FULLSCREEN
             filters = arrayOf(InputFilter.LengthFilter(PointScriptParser.MAX_TEXT))

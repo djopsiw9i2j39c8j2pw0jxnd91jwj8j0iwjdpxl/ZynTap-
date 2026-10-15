@@ -25,7 +25,7 @@ class PointPickerOverlay(
     private val onVisibility: (Boolean) -> Unit,
     private val onDrag: (Boolean) -> Unit = {},
 ) {
-    private val density = ctx.resources.displayMetrics.density
+    private val density = UiScale.density(ctx.resources)
     private fun dp(n: Int) = (n * density).toInt()
     private var pin: Pin? = null
     private var cancelView: View? = null
@@ -36,15 +36,15 @@ class PointPickerOverlay(
         close()
         callback = onPick
         val screen = bounds()
-        val size = dp(72)
+        val size = dp(PIN_WIN_DP)
         val p = params(size, size,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS).apply {
             gravity = Gravity.TOP or Gravity.START
-            this.x = ((x ?: (screen.width() / 2)) - dp(36)).coerceIn(-dp(36), screen.width() - dp(36) - 1)
-            this.y = ((y ?: (screen.height() / 2)) - dp(54)).coerceIn(-dp(54), screen.height() - dp(54) - 1)
+            this.x = ((x ?: (screen.width() / 2)) - dp(TIP_X_DP)).coerceIn(-dp(TIP_X_DP), screen.width() - dp(TIP_X_DP) - 1)
+            this.y = ((y ?: (screen.height() / 2)) - dp(TIP_Y_DP)).coerceIn(-dp(TIP_Y_DP), screen.height() - dp(TIP_Y_DP) - 1)
         }
         val view = Pin(ctx)
         view.contentDescription = "Kéo ghim, thả rồi chạm một lần để chọn tọa độ tại mũi ghim"
@@ -66,8 +66,8 @@ class PointPickerOverlay(
                     if (!dragging && (abs(dx) > slop || abs(dy) > slop)) { dragging = true; onDrag(true) }
                     if (dragging) {
                         val b = bounds()
-                        p.x = (startX + dx).toInt().coerceIn(-dp(36), b.width() - dp(36) - 1)
-                        p.y = (startY + dy).toInt().coerceIn(-dp(54), b.height() - dp(54) - 1)
+                        p.x = (startX + dx).toInt().coerceIn(-dp(TIP_X_DP), b.width() - dp(TIP_X_DP) - 1)
+                        p.y = (startY + dy).toInt().coerceIn(-dp(TIP_Y_DP), b.height() - dp(TIP_Y_DP) - 1)
                         runCatching { wm.updateViewLayout(view, p) }
                     }
                     true
@@ -79,8 +79,8 @@ class PointPickerOverlay(
                         val location = IntArray(2)
                         view.getLocationOnScreen(location)
                         val b = bounds()
-                        val px = (location[0] + dp(36)).coerceIn(0, b.width() - 1)
-                        val py = (location[1] + dp(54)).coerceIn(0, b.height() - 1)
+                        val px = (location[0] + dp(TIP_X_DP)).coerceIn(0, b.width() - 1)
+                        val py = (location[1] + dp(TIP_Y_DP)).coerceIn(0, b.height() - 1)
                         val cb = callback
                         close()
                         cb?.invoke(px, py)
@@ -97,7 +97,7 @@ class PointPickerOverlay(
         val cancel = TextView(ctx).apply {
             text = "✕  Hủy chọn điểm"
             contentDescription = "Hủy chọn điểm"
-            textSize = 13f
+            scaledTextSize(13f)
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             background = android.graphics.drawable.GradientDrawable().apply {
@@ -129,7 +129,7 @@ class PointPickerOverlay(
     }
 
     private class Pin(ctx: Context) : View(ctx) {
-        private val d = resources.displayMetrics.density
+        private val d = UiScale.density(resources)
         private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = 0xFF19D3FF.toInt(); style = Paint.Style.STROKE
             strokeWidth = 2.4f * d; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
@@ -145,13 +145,24 @@ class PointPickerOverlay(
         }
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
+            // Ghim nhỏ gọn: mũi ghim (12, 21.8 trong hệ 24x24) đặt đúng tại (TIP_X_DP, TIP_Y_DP) của cửa sổ.
             canvas.save()
-            canvas.translate(12f * d, 10f * d)
-            canvas.scale(2f * d, 2f * d)
-            stroke.strokeWidth = 1.2f
+            canvas.translate((TIP_X_DP - 12f * PIN_SCALE) * d, (TIP_Y_DP - 21.8f * PIN_SCALE) * d)
+            canvas.scale(PIN_SCALE * d, PIN_SCALE * d)
+            stroke.strokeWidth = 1.9f
             canvas.drawPath(path, stroke)
             canvas.drawCircle(12f, 10f, 3f, stroke)
             canvas.restore()
         }
+    }
+
+    private companion object {
+        /** Cửa sổ ghim (dp) — trước là 72, giờ nhỏ lại. */
+        const val PIN_WIN_DP = 44
+        /** Vị trí mũi ghim trong cửa sổ (dp): giữa ngang, gần đáy. Đây chính là toạ độ chọn. */
+        const val TIP_X_DP = 22
+        const val TIP_Y_DP = 36
+        /** Tỉ lệ vẽ ghim (trước là 2x) — 1.25x => ghim cao ~25dp. */
+        const val PIN_SCALE = 1.25f
     }
 }
