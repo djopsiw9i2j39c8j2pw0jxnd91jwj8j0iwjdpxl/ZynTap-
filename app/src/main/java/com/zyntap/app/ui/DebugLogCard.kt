@@ -113,11 +113,11 @@ fun DebugLogCard(vm: MainViewModel) {
                     (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                         .setPrimaryClip(ClipData.newPlainText("ZynTap debug log", text))
                 }.isSuccess
-                Toast.makeText(ctx, if (ok) "Đã sao chép log — dán cho mình nhé" else "Không sao chép được", Toast.LENGTH_SHORT).show()
+                Toast.makeText(ctx, if (ok) "Đã sao chép log — dán cho dev nhé" else "Không sao chép được", Toast.LENGTH_SHORT).show()
             }
             Spacer(Modifier.width(8.dp))
             LogChip(
-                if (clearArmed) "Chạm lại" else "Xóa",
+                if (clearArmed) "Chắc?" else "Xóa",
                 danger = true,
                 modifier = Modifier.weight(1f),
             ) {
@@ -166,7 +166,7 @@ fun DebugLogCard(vm: MainViewModel) {
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "Log vẫn còn sau khi menu nổi tắt. Bấm Sao chép rồi gửi mình để fix.",
+            text = "Log vẫn còn sau khi menu nổi tắt. Bấm Sao chép rồi gửi dev để fix.",
             color = Zyn.TextDim,
             fontSize = 12.sp,
         )
