@@ -12,9 +12,9 @@ App Android viết bằng Kotlin + Jetpack Compose. Build APK hoàn toàn trên 
 
 ## Đổi phiên bản (cập nhật không phải gỡ cài lại)
 
-Phiên bản mặc định: **1.00.14**. Có 3 cách đổi:
+Phiên bản mặc định: **1.00.17**. Có 3 cách đổi:
 
-- Sửa dòng `appVersion=1.00.14` trong `gradle.properties`, rồi đẩy code lên.
+- Sửa dòng `appVersion=1.00.17` trong `gradle.properties`, rồi đẩy code lên.
 - Vào Actions → **Run workflow** → gõ phiên bản (vd `1.00.02`).
 - Tạo tag `v1.00.02` → bản APK sẽ tự đăng ở mục **Releases**.
 
@@ -113,6 +113,18 @@ app/src/main/res/   icon launcher, logo trong suốt (drawable-nodpi/logo_transp
   - Android 12+ chặn chạm xuyên qua cửa sổ phủ đục hơn 0.8 nên nút chạm xuyên bị đặt độ đục cửa sổ 0.8 (nhìn mờ hơn một chút).
   - Lúc đang chỉnh nút (kéo vị trí) nút vẫn nhận chạm bình thường; chỉnh xong mới xuyên lại.
   - Chưa kiểm thử trên máy thật: bộ giải mã input_event nhị phân + ánh xạ toạ độ/xoay màn hình, luồng ADB + cửa sổ phủ cần thử trên thiết bị.
+
+## Thay đổi 1.00.17
+
+- **Tiêu đề tab Điểm nhấn / Cấu hình đứng yên khi vuốt**: trước đây tiêu đề nằm TRONG vùng cuộn nên trôi mất khi vuốt nội dung. Giờ `PointsTab.build()` / `ConfigTab.build()` trả về khung dọc: tiêu đề cố định ở trên, chỉ phần nội dung bên dưới là `ScrollView` (giống tab Nút chính).
+
+## Thay đổi 1.00.16
+
+- **Khung tiêu đề chung cho 3 tab**: file mới `overlay/TabHeader.kt` (`addTabHeader`) dựng phần đầu giống tab 1 (tên tab đậm + dòng phụ nhỏ, chừa chỗ cho nút mắt / - / X).
+  Cả "Nút chính", "Điểm nhấn", "Cấu hình" đều dùng nó nên nội dung các tab bắt đầu cùng độ cao, không còn đụng nhóm nút ở góc.
+- **Độ mờ nút main xuống được 0%** (`MainButton.MIN_ALPHA = 0`). Ở 0% và menu đóng: nút vô hình hoàn toàn (vẫn nhận chạm bình thường).
+  Khi menu mở, nút luôn được vẽ tối thiểu 20% (`MainButton.MENU_MIN_ALPHA`) để còn thấy mà kéo/chỉnh; menu thu lại là nút biến mất.
+  Bản xem trước trong bảng "Tạo nút mới" cũng luôn thấy được. Cơ chế: `MainButtonView.minPct` + `MainButtonOverlay.setMenuOpen()`, gọi từ `OverlayService`.
 
 ## Thay đổi 1.00.14 — click không làm mất ngón thật
 
