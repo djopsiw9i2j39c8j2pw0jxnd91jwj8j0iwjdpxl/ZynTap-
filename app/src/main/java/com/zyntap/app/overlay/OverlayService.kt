@@ -100,12 +100,17 @@ class OverlayService : Service() {
     private lateinit var configStore: ConfigStore
     private lateinit var pointPicker: PointPickerOverlay
     private lateinit var pointRunner: PointRunner
-    private lateinit var exitWatcher: AppExitWatcher
     private var inputActive = false
     private var editLock = false     // đang chỉnh nút: không cho đóng menu nhầm
     private var editDim = 0f         // 0..1: nền tối phía sau nhạt đi khi đang chỉnh nút
     private var editDimAnim: ValueAnimator? = null
     private val handler = Handler(Looper.getMainLooper())
+
+    // ---- tự đóng khi thoát app đã mở ----
+    private var targetPkg: String? = null     // app người dùng đã chọn/mở từ ZynTap
+    private var targetSeen = false            // đã thấy app đó ở trước màn hình ít nhất một lần
+    private var targetMisses = 0              // số lần kiểm tra liên tiếp thấy app không còn ở trước
+    private var usageTracker: UsageAccess.Tracker? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -142,7 +147,6 @@ class OverlayService : Service() {
             else pointRunner.cancelTouch(button.id)
         }
         circles.onCancel = { id -> pointRunner.cancelTouch(id) }
-        exitWatcher = AppExitWatcher(this) { autoClose() }
         startForegroundWithNotification()
     }
 
@@ -152,7 +156,6 @@ class OverlayService : Service() {
             ACTION_STOP -> {
                 // Người dùng chủ động tắt -> không tự khôi phục nữa
                 setWanted(this, false)
-                exitWatcher.stop()
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -162,18 +165,25 @@ class OverlayService : Service() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
+                // Ghi nhớ app đang được mở để biết lúc nào người dùng thoát khỏi nó
+                val pkg = intent?.getStringExtra(EXTRA_TARGET_PKG)
+                if (pkg != null) {
+                    if (pkg != targetPkg) { targetSeen = false; targetMisses = 0; usageTracker = null }
+                    targetPkg = pkg
+                    prefs.edit().putString(KEY_TARGET, pkg).apply()
+                } else if (targetPkg == null) {
+                    targetPkg = prefs.getString(KEY_TARGET, null)
+                }
                 ensureHandle()
                 circles.ensureAll()
                 startWatchdog()
                 AdbSession.ensureInBackground(this)
-                trackTargetApp(intent?.getStringExtra(EXTRA_TARGET))
             }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        exitWatcher.close()
         pointPicker.close()
         pointRunner.close()
         handler.removeCallbacksAndMessages(null)
@@ -183,33 +193,6 @@ class OverlayService : Service() {
         editDimAnim?.cancel()
         removeViews()
         super.onDestroy()
-    }
-
-    // ---- tự đóng khi thoát app đã mở qua ZynTap -----------------------------
-
-    /**
-     * [fresh] != null: vừa mở app mới từ ZynTap -> theo dõi app đó (tính lại từ đầu).
-     * null: service bật lại (MainActivity mở lại / hệ thống dựng lại sau khi bị kill / cập nhật app)
-     * -> giữ nguyên app đang theo dõi, hoặc nạp lại app đã lưu.
-     */
-    private fun trackTargetApp(fresh: String?) {
-        if (fresh != null) {
-            prefs.edit().putString(KEY_TARGET, fresh).apply()
-            exitWatcher.watch(fresh)
-            return
-        }
-        val saved = prefs.getString(KEY_TARGET, null) ?: return
-        // App đã chạy từ trước -> resume=true: không chờ "thấy app lên trên cùng" mới bắt đầu canh thoát
-        if (exitWatcher.target != saved || !exitWatcher.isRunning) exitWatcher.watch(saved, resume = true)
-    }
-
-    /** Người dùng đã thoát app (xem [ExitTracker]) -> đóng menu nổi như khi bấm X, nhưng không hỏi lại. */
-    private fun autoClose() {
-        if (closing) return
-        setWanted(this, false) // đồng thời xoá app đang theo dõi
-        val canAnimate = panelView != null && panelCard != null && !panelHidden &&
-            !panelAnimating && !panelGhost && !pointPicker.isShowing
-        if (canAnimate) playCloseAnimation() else stopSelf()
     }
 
     // ---- tự khôi phục khi menu nổi bị mất ----------------------------------
@@ -230,7 +213,7 @@ class OverlayService : Service() {
     private fun checkHealth() {
         // Tự nối lại ADB khi mất kết nối (sau cập nhật app, bật lại gỡ lỗi Wi-Fi, đổi mạng...)
         AdbSession.ensureInBackground(this)
-        if (!closing && wanted(this)) trackTargetApp(null) // vòng canh thoát app chết lặng lẽ -> dựng lại
+        checkTargetApp()
         val h = handleView
         if (h == null) {
             ensureHandle()
@@ -253,6 +236,39 @@ class OverlayService : Service() {
             if (h.visibility != View.VISIBLE) h.visibility = View.VISIBLE
         }
         circles.ensureAll()
+    }
+
+    // ---- tự đóng menu khi thoát khỏi app đã mở ----------------------------
+
+    /**
+     * Mỗi nhịp watchdog đọc các sự kiện mở/thoát activity MỚI (UsageStatsManager, chạy trong máy,
+     * không qua ADB, rất nhẹ) để biết app đã mở có còn ở trước màn hình không. Thấy không còn vài
+     * lần liên tiếp (tránh nhầm lúc chuyển cửa sổ thoáng qua) -> đóng menu như khi bấm dấu X.
+     * Chưa cấp quyền "Truy cập dữ liệu sử dụng" thì bỏ qua, không đóng nhầm.
+     */
+    private fun checkTargetApp() {
+        val pkg = targetPkg ?: return
+        if (closing || !wanted(this) || !UsageAccess.granted(this)) return
+        val tracker = usageTracker ?: UsageAccess.Tracker(applicationContext).also { usageTracker = it }
+        runCatching { tracker.poll() }.onFailure { return }
+        if (tracker.foreground == pkg) {
+            targetSeen = true
+            targetMisses = 0
+        } else if (targetSeen && ++targetMisses >= TARGET_MISS_LIMIT) {
+            autoClose()
+        }
+    }
+
+    /** Đóng như bấm X (có hiệu ứng nếu menu đang mở), hoặc tắt luôn nếu chỉ còn nút tab. */
+    private fun autoClose() {
+        if (closing) return
+        if (panelView != null && panelCard != null && !panelHidden) {
+            hideConfirm()
+            playCloseAnimation()
+        } else {
+            setWanted(this, false)
+            stopSelf()
+        }
     }
 
     // ---- lưu / đọc vị trí nút ----------------------------------------------
@@ -1503,7 +1519,6 @@ class OverlayService : Service() {
         const val ACTION_SHOW = "com.zyntap.app.overlay.SHOW"
         const val ACTION_HIDE = "com.zyntap.app.overlay.HIDE"
         const val ACTION_STOP = "com.zyntap.app.overlay.STOP"
-        const val EXTRA_TARGET = "target_pkg"
         private const val NOTIF_ID = 1001
         private const val GHOST_SHRINK = 0.06f
         private const val PANEL_MAX_W_FRAC = 0.94f
@@ -1527,10 +1542,12 @@ class OverlayService : Service() {
 
         private const val PREFS = "zyntap_overlay"
         private const val KEY_WANTED = "wanted"
+        private const val KEY_TARGET = "target_pkg"
+        const val EXTRA_TARGET_PKG = "target_pkg"
+        private const val TARGET_MISS_LIMIT = 2 // 2 nhịp watchdog liên tiếp (~4 giây)
         private const val KEY_Y_RATIO = "handle_y_ratio"
         private const val KEY_SOLID = "solid_mode"
         private const val KEY_TAB = "active_tab"
-        private const val KEY_TARGET = "target_pkg"
         // Độ đặc (0..255) của nền card và nền tối phía sau: mặc định (trong suốt) và khi tắt trong suốt
         private const val CARD_ALPHA = 0xF2
         private const val SCRIM_ALPHA = 0x66
@@ -1542,9 +1559,7 @@ class OverlayService : Service() {
         private const val ATTACH_GRACE_MS = 1500L
 
         private fun setWanted(context: Context, value: Boolean) {
-            val e = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_WANTED, value)
-            if (!value) e.remove(KEY_TARGET) // tắt menu -> thôi theo dõi app
-            e.apply()
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_WANTED, value).apply()
         }
 
         /** Người dùng đang muốn bật menu nổi (chưa bấm tắt). */
@@ -1558,11 +1573,10 @@ class OverlayService : Service() {
             }
         }
 
-        /** [target] = gói app vừa mở qua ZynTap; menu nổi sẽ tự đóng khi người dùng thoát app đó. */
-        fun start(context: Context, target: String? = null) {
+        fun start(context: Context, targetPackage: String? = null) {
             setWanted(context, true)
             val intent = Intent(context, OverlayService::class.java).setAction(ACTION_SHOW)
-            if (target != null) intent.putExtra(EXTRA_TARGET, target)
+            if (targetPackage != null) intent.putExtra(EXTRA_TARGET_PKG, targetPackage)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
