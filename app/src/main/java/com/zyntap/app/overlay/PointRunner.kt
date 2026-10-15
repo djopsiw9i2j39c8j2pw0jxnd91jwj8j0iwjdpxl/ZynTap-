@@ -34,6 +34,7 @@ class PointRunner(
     // Ngón thật: ghi input_event vào slot riêng của /dev/input/eventN -> không làm mất vuốt của người dùng.
     private val injector = RawTouchInjector()
     private var fallbackNoticeShown = false
+    private var okNoticeShown = false
 
     @Suppress("DEPRECATION")
     private fun rotation(): Int = runCatching { wm.defaultDisplay.rotation }.getOrDefault(Surface.ROTATION_0)
@@ -160,8 +161,22 @@ class PointRunner(
         currentCoroutineContext().ensureActive()
         when (val prep = injector.prepare(manager)) {
             RawTouchInjector.Prep.Ready -> {
-                injector.tap(point.x, point.y, rotation(), screen.width(), screen.height())
-                return
+                try {
+                    injector.tap(point.x, point.y, rotation(), screen.width(), screen.height())
+                    if (!okNoticeShown && injector.verified) {
+                        okNoticeShown = true
+                        withContext(Dispatchers.Main.immediate) { message("Chạm thật OK: ${injector.summary}") }
+                    }
+                    return
+                } catch (e: RawTouchInjector.Ignored) {
+                    if (!fallbackNoticeShown) {
+                        fallbackNoticeShown = true
+                        withContext(Dispatchers.Main.immediate) {
+                            message("Chạm thật không được (${e.message}; ${injector.summary}). Dùng input tap.")
+                        }
+                    }
+                    // rơi xuống legacyTap bên dưới cho bước này
+                }
             }
             is RawTouchInjector.Prep.Unsupported -> if (!fallbackNoticeShown) {
                 fallbackNoticeShown = true

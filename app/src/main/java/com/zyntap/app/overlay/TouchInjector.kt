@@ -165,6 +165,11 @@ class RawTouchInjector {
 
     private class Writer(val stream: AdbStream, val out: OutputStream)
 
+    /** Ghi thành công nhưng tấm cảm ứng không nhận ngón giả -> bên gọi lùi về `input tap` cho bước này. */
+    class Ignored(message: String) : Exception(message)
+
+    private class Probe(val stream: AdbStream) { @Volatile var seen = false }
+
     private sealed interface Open {
         class Ok(val writer: Writer) : Open
         data object Denied : Open
@@ -178,10 +183,18 @@ class RawTouchInjector {
     @Volatile private var recordSize = 0
     @Volatile private var unsupported: String? = null
     @Volatile private var btnSentDown = false
+    @Volatile private var mgr: ZynAdbConnectionManager? = null
+    @Volatile var verified = false
+        private set
     private var trackingCounter = 0
+
+    /** Mô tả ngắn để hiện toast chẩn đoán. */
+    val summary: String
+        get() = "${dev?.path ?: "?"} slot ${dev?.maxSlot ?: -1} rec $recordSize"
 
     /** Dò thiết bị + mở luồng ghi nếu chưa có. */
     suspend fun prepare(manager: ZynAdbConnectionManager): Prep = lock.withLock {
+        mgr = manager
         unsupported?.let { return Prep.Unsupported(it) }
         if (writer != null && dev != null && recordSize != 0) return Prep.Ready
 
@@ -242,13 +255,67 @@ class RawTouchInjector {
 
     /**
      * Một cú chạm thật tại ([x], [y]) pixel: xuống -> giữ [holdMs] -> nhả.
-     * Luôn nhả trong `finally` (kể cả khi bị huỷ) để ngón giả không bao giờ kẹt.
+     * Lần đầu của phiên có KIỂM TRA: đọc lại luồng /dev/input xem cảm ứng có thật sự nhận ngón giả không
+     * (thử cả 2 cỡ bản ghi 24/16 byte). Không nhận -> [Ignored] (chưa click) để bên gọi lùi về `input tap`.
      * @throws IOException khi luồng ghi chết -> bên gọi nối lại ADB rồi thử lại.
      */
     suspend fun tap(x: Int, y: Int, rotation: Int, w: Int, h: Int, holdMs: Long = HOLD_MS) {
         val d = dev ?: throw IOException("Injector chưa sẵn sàng")
-        val rec = recordSize
         val (rx, ry) = RawTouchEncoder.toRaw(x, y, d, rotation, w, h)
+        if (verified) { tapRaw(d, recordSize, rx, ry, holdMs); return }
+        if (!verifyFirst(d, rx, ry, holdMs)) {
+            unsupported = "ghi được nhưng cảm ứng không nhận ngón giả"
+            throw Ignored(unsupported!!)
+        }
+        verified = true
+    }
+
+    private suspend fun verifyFirst(d: TouchDevice, rx: Int, ry: Int, holdMs: Long): Boolean {
+        val probe = openProbe(d)
+        if (probe == null) {
+            // Không đọc lại được để kiểm tra -> tin tưởng, chạm bình thường.
+            tapRaw(d, recordSize, rx, ry, holdMs)
+            return true
+        }
+        try {
+            val first = recordSize
+            for (rec in intArrayOf(first, if (first == 24) 16 else 24)) {
+                probe.seen = false
+                tapRaw(d, rec, rx, ry, holdMs)
+                var waited = 0L
+                while (!probe.seen && waited < VERIFY_WAIT_MS) { delay(20); waited += 20 }
+                if (probe.seen) { recordSize = rec; return true }
+            }
+            return false
+        } finally {
+            withContext(NonCancellable) { runCatching { probe.stream.close() } }
+        }
+    }
+
+    /** Mở một luồng đọc `cat /dev/input/eventN`, đặt cờ [Probe.seen] khi thấy ngón ở slot của mình. */
+    private suspend fun openProbe(d: TouchDevice): Probe? = withContext(Dispatchers.IO) {
+        val m = mgr ?: return@withContext null
+        val s = try { m.openStream("exec:cat ${d.path}") } catch (_: Exception) { return@withContext null }
+        val probe = Probe(s)
+        scope.launch {
+            val parser = InputEventParser { slot, down, _, _ -> if (down && slot == d.maxSlot) probe.seen = true }
+            val framer = InputEventStream(parser)
+            try {
+                val input = s.openInputStream()
+                val buf = ByteArray(1024)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    framer.feed(buf, n)
+                }
+            } catch (_: Exception) {
+            }
+        }
+        delay(80) // cho `cat` kịp mở trước khi bơm
+        probe
+    }
+
+    private suspend fun tapRaw(d: TouchDevice, rec: Int, rx: Int, ry: Int, holdMs: Long) {
         val tid = nextTrackingId(d)
         // Chỉ đụng BTN_TOUCH khi chắc chắn không có ngón thật đang chạm (nếu có, nó đã bằng 1 rồi).
         val btn = !TouchRegistry.watching || !TouchRegistry.physicalDown
@@ -294,7 +361,7 @@ class RawTouchInjector {
     }
 
     /** Bỏ luồng ghi (ADB vừa nối lại / chết). Lần [prepare] sau sẽ mở luồng mới. */
-    suspend fun reset() = lock.withLock { invalidateLocked() }
+    suspend fun reset() = lock.withLock { invalidateLocked() }  // giữ nguyên `verified`: cùng máy, cùng node
 
     private fun invalidateLocked() {
         val w = writer
@@ -321,5 +388,6 @@ class RawTouchInjector {
         val NODE_RE = Regex("^/dev/input/event\\d{1,3}$")
         const val OPEN_TIMEOUT_MS = 3_000L
         const val HOLD_MS = 30L
+        const val VERIFY_WAIT_MS = 500L
     }
 }
