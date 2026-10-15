@@ -9,13 +9,13 @@ import kotlin.math.min
  *
  * Mọi chỗ đổi dp -> px và sp -> px của lớp phủ đều đi qua đây, nên đổi một chỗ là cả UI theo.
  * Chuẩn: cạnh NGẮN của màn hình = [REF_DP] dp thì hệ số = 1. Máy nhỏ/DPI cao (cạnh ngắn ít dp) thu nhỏ,
- * máy lớn/tablet phóng nhẹ, kẹp trong [[MIN], [MAX]] để không vỡ bố cục. Dùng cạnh ngắn nên xoay màn hình
+ * máy lớn/tablet KHÔNG phóng to (giữ 1.0), kẹp trong [[MIN], [MAX]] để không vỡ bố cục. Dùng cạnh ngắn nên xoay màn hình
  * không làm kích thước đổi qua lại. Đổi "Kích thước hiển thị"/DPI trong Cài đặt sẽ tính lại theo cấu hình mới.
  */
 object UiScale {
-    private const val REF_DP = 400f
-    private const val MIN = 0.8f
-    private const val MAX = 1.3f
+    private const val REF_DP = 420f
+    private const val MIN = 0.75f
+    private const val MAX = 1.0f
 
     fun factor(r: Resources): Float {
         val m = r.displayMetrics

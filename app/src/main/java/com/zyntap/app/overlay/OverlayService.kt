@@ -310,8 +310,8 @@ class OverlayService : Service() {
     private val travel get() = cardW + cardStart
 
     /** Menu 620x480dp, tự thu nhỏ nếu màn hình không đủ chỗ. */
-    private val cardW get() = minOf(dp(PANEL_W_DP), screenW - cardStart - dp(PANEL_MARGIN_DP))
-    private val cardH get() = minOf(dp(PANEL_H_DP), screenH - dp(PANEL_MARGIN_DP) * 2)
+    private val cardW get() = minOf(dp(PANEL_W_DP), screenW - cardStart - dp(PANEL_MARGIN_DP), (screenW * PANEL_MAX_W_FRAC).toInt())
+    private val cardH get() = minOf(dp(PANEL_H_DP), screenH - dp(PANEL_MARGIN_DP) * 2, (screenH * PANEL_MAX_H_FRAC).toInt())
     private val cardMargin get() = dp(PANEL_MARGIN_DP)
 
     /** Quãng đường card phải trượt để ra khỏi màn hình hoàn toàn. */
@@ -1401,8 +1401,10 @@ class OverlayService : Service() {
         const val ACTION_STOP = "com.zyntap.app.overlay.STOP"
         private const val NOTIF_ID = 1001
         private const val GHOST_SHRINK = 0.06f
+        private const val PANEL_MAX_W_FRAC = 0.94f
+        private const val PANEL_MAX_H_FRAC = 0.80f
         private const val PANEL_W_DP = 620
-        private const val PANEL_H_DP = 480
+        private const val PANEL_H_DP = 440
         private const val PANEL_MARGIN_DP = 8
         private const val SIDEBAR_W_DP = 170
         private const val HANDLE_W_DP = 15
