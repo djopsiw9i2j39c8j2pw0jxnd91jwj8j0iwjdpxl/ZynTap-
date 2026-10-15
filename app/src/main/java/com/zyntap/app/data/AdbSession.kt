@@ -71,7 +71,10 @@ object AdbSession {
                     val total = attempts.coerceAtLeast(1)
                     for (i in 1..total) {
                         try {
-                            if (manager.connectTls(app, timeoutMs)) return@withLock Link.Connected
+                            if (manager.connectTls(app, timeoutMs)) {
+                                DebugLog.i("ADB", "Đã kết nối ADB (lần $i/$total)")
+                                return@withLock Link.Connected
+                            }
                             lastError = "Không tìm thấy dịch vụ Gỡ lỗi Wi-Fi. Hãy bật Gỡ lỗi không dây (cùng mạng Wi-Fi)."
                         } catch (e: AdbPairingRequiredException) {
                             rejected++
@@ -86,11 +89,18 @@ object AdbSession {
                         } catch (t: Throwable) {
                             lastError = t.message ?: t.javaClass.simpleName
                         }
+                        DebugLog.w("ADB", "Lần nối $i/$total thất bại: $lastError")
                         // Dọn trạng thái dở dang rồi thử lại sau một nhịp ngắn
                         runCatching { manager.disconnect() }
                         if (i < total) delay(700)
                     }
-                    if (rejected == total) Link.PairingLost else Link.Failed(lastError)
+                    if (rejected == total) {
+                        DebugLog.e("ADB", "Máy từ chối mọi lần nối ($total/$total) — thường là đã quên khoá ghép nối, cần ghép lại bằng mã 6 số")
+                        Link.PairingLost
+                    } else {
+                        DebugLog.e("ADB", "Không nối được ADB: $lastError")
+                        Link.Failed(lastError)
+                    }
                 } finally {
                     runCatching { lock?.release() }
                 }
@@ -99,6 +109,7 @@ object AdbSession {
 
     /** Ngắt kết nối cũ (đã chết) để lần sau nối mới. */
     fun drop(context: Context) {
+        DebugLog.w("ADB", "Ngắt kết nối cũ (đã chết) để nối lại")
         runCatching { ZynAdbConnectionManager.get(context.applicationContext).disconnect() }
     }
 
