@@ -73,8 +73,19 @@ object UsageAccess {
 
         /** Đã thật sự rời khỏi [pkg]: nó đã STOP và có app thật khác đang ở trước. */
         fun hasLeft(pkg: String): Boolean {
-            if (pkg in resumed || pkg !in stopped) return false
-            return resumed.any { it != pkg && it != context.packageName && !isTransient(it) }
+            if (pkg in resumed) return false
+            val others = resumed.filter { it != pkg && it != context.packageName && !isTransient(it) }
+            if (others.isEmpty()) return false
+            // Về màn hình chính: launcher lên trước là đủ kết luận ngay, không phải chờ sự kiện STOP
+            // (sự kiện này đến trễ cả giây). App thường khác thì vẫn cần app đích đã STOP.
+            return pkg in stopped || others.any { it in homePackages }
+        }
+
+        private val homePackages: Set<String> by lazy {
+            runCatching {
+                val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                context.packageManager.queryIntentActivities(i, 0).map { it.activityInfo.packageName }.toSet()
+            }.getOrDefault(emptySet())
         }
 
         private fun isTransient(pkg: String): Boolean =

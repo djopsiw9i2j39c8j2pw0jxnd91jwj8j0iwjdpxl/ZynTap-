@@ -232,13 +232,22 @@ class OverlayService : Service() {
     private fun startWatchdog() {
         handler.removeCallbacks(watchdog)
         handler.postDelayed(watchdog, WATCHDOG_MS)
+        handler.removeCallbacks(targetWatcher)
+        handler.postDelayed(targetWatcher, TARGET_POLL_MS)
+    }
+
+    /** Vòng kiểm tra nhanh riêng cho việc thoát app, để về màn hình chính là UI nổi tắt gần như ngay. */
+    private val targetWatcher = object : Runnable {
+        override fun run() {
+            runCatching { checkTargetApp() }.onFailure { DebugLog.e("Tự đóng", "checkTargetApp lỗi", it) }
+            handler.postDelayed(this, TARGET_POLL_MS)
+        }
     }
 
     /** Kiểm tra định kỳ: nút/menu bị hệ thống gỡ mất, hoặc nút kẹt trạng thái ẩn -> dựng lại. */
     private fun checkHealth() {
         // Tự nối lại ADB khi mất kết nối (sau cập nhật app, bật lại gỡ lỗi Wi-Fi, đổi mạng...)
         AdbSession.ensureInBackground(this)
-        checkTargetApp()
         crosshair.ensure()
         val h = handleView
         if (h == null) {
@@ -1634,7 +1643,8 @@ class OverlayService : Service() {
         private const val KEY_WANTED = "wanted"
         private const val KEY_TARGET = "target_pkg"
         const val EXTRA_TARGET_PKG = "target_pkg"
-        private const val TARGET_MISS_LIMIT = 2 // 2 nhịp watchdog liên tiếp (~4 giây)
+        private const val TARGET_MISS_LIMIT = 2 // 2 nhịp liên tiếp (~0,8 giây)
+        private const val TARGET_POLL_MS = 400L
         private const val KEY_Y_RATIO = "handle_y_ratio"
         private const val KEY_SOLID = "solid_mode"
         private const val KEY_TAB = "active_tab_v2" // v2: thêm tab "Cài tâm ảo" ở đầu nên chỉ số đã lệch
