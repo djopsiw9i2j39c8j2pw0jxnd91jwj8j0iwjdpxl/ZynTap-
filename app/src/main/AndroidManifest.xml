@@ -7,6 +7,11 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <!-- Nhận ra màn hình chính (launcher mặc định) để biết khi nào người dùng thoát app -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
     </queries>
 
     <uses-permission android:name="android.permission.INTERNET" />
@@ -39,6 +44,14 @@
         <receiver
             android:name=".PairReplyReceiver"
             android:exported="false" />
+
+        <receiver
+            android:name=".overlay.OverlayRestartReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".overlay.OverlayService"
