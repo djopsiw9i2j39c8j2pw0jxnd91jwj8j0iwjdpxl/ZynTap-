@@ -66,6 +66,8 @@ fun HomeScreen(vm: MainViewModel) {
             ActivateButton(onClick = vm::openActivate)
             Spacer(Modifier.height(18.dp))
             AppsCard(vm)
+            Spacer(Modifier.height(18.dp))
+            DebugLogCard(vm)
         }
         Text(
             text = "ZynTap  •  Phiên bản ${BuildConfig.VERSION_NAME}",
