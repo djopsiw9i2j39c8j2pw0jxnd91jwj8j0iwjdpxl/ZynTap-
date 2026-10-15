@@ -123,7 +123,7 @@ class OverlayService : Service() {
         )
         pointRunner = PointRunner(this, { Rect(realBounds) }, { x, y ->
             circles.containsPoint(x, y) || panelBlocksInput() || handleContainsPoint(x, y)
-        }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
+        }) { text -> DebugNotifier.post(this, "ZynTap", text, DebugNotifier.ID_MESSAGE) }
         pointRunner.fingers = circles.fingers
         pointPicker = PointPickerOverlay(this, wm, { realBounds },
             { w, h, f -> overlayParams(w, h, f) },

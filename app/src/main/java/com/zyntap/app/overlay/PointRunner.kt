@@ -28,6 +28,7 @@ class PointRunner(
     private val timer = Executors.newSingleThreadScheduledExecutor()
     private val injectionLock = Mutex()
     private var lastReport = 0L
+    private var lastDiag = 0L
 
     /** Bộ tiêm chạm riêng (clone thông số ngón gốc, không đè lên cử chỉ của ngón thật). */
     private val injector = TouchInjector(context)
@@ -170,6 +171,11 @@ class PointRunner(
             if (!announcedReady) {
                 announcedReady = true
                 scope.launch { message("Tiêm chạm riêng: BẬT (${injector.info})") }
+            }
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - lastDiag > 1500) {
+                lastDiag = now
+                DebugNotifier.post(context, "ZynTap chẩn đoán tiêm chạm", injector.diag, DebugNotifier.ID_DIAG)
             }
             return
         }

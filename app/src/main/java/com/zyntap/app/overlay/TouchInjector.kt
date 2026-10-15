@@ -49,6 +49,12 @@ class TouchInjector(context: Context) {
     @Volatile var everReady = false
         private set
 
+    /** Chẩn đoán lần tiêm gần nhất (hiện trong thông báo chẩn đoán). */
+    @Volatile var diag: String = ""
+        private set
+    @Volatile private var deviceInfo: String = ""
+    private var tapCount = 0
+
     val isUp get() = stream != null
 
     /** Khởi động sẵn (gọi ở nền) để lần chạm đầu không phải chờ JVM khởi động. */
@@ -79,6 +85,7 @@ class TouchInjector(context: Context) {
                 val id = freeId(before)
                 val downReply = request(buildCommand('D', x, y, id, finger, before), REPLY_TIMEOUT_MS)
                 if (downReply != "OK") return fail(downReply)
+                val t0 = SystemClock.elapsedRealtime()
                 downSent = true
                 try {
                     Thread.sleep(HOLD_MS)
@@ -90,6 +97,21 @@ class TouchInjector(context: Context) {
                 val upReply = request(buildCommand('U', x, y, id, finger, after), REPLY_TIMEOUT_MS)
                 if (upReply != "OK") return fail(upReply)
                 consecutiveErrors = 0
+                tapCount++
+                diag = buildString {
+                    append("Lần chạm #").append(tapCount).append(" tại ").append(x).append(',').append(y).append('\n')
+                    append(if (before.isEmpty()) "Kiểu: chạm đơn (không thấy ngón thật nào)" else "Kiểu: ngón thứ hai, ${before.size / 3} ngón thật")
+                    append("\nPointer-id ảo: ").append(id)
+                    if (before.isNotEmpty()) {
+                        append("\nNgón thật lúc DOWN: ").append(fmt(before))
+                        append("\nNgón thật lúc UP: ").append(fmt(after))
+                    }
+                    append("\nGiữ thực tế: ").append(SystemClock.elapsedRealtime() - t0).append("ms")
+                    append("\nTên cảm ứng app dò: ").append(source?.deviceName?.ifBlank { "(chưa dò được)" } ?: "(không có)")
+                    append("\nServer: ").append(deviceInfo.ifBlank { "(chưa nhận N)" })
+                    append("\nHồ sơ ngón: ").append(finger?.let { "p=%.2f size=%.2f maj=%.1f".format(Locale.US, it.pressure, it.size, it.touchMajor) } ?: "chưa có")
+                    append("\n").append(info)
+                }
                 return true
             } catch (e: IOException) {
                 // Tiến trình chết / ADB đứt: dọn rồi dựng lại. Đã gửi DOWN rồi thì KHÔNG tiêm lại (tránh chạm đúp);
@@ -106,6 +128,9 @@ class TouchInjector(context: Context) {
         return false
     }
 
+    private fun fmt(p: IntArray): String =
+        if (p.isEmpty()) "-" else (p.indices step 3).joinToString(" ") { "id${p[it]}@${p[it + 1]},${p[it + 2]}" }
+
     /** Server còn sống nhưng hệ thống từ chối: đếm lỗi, quá nhiều thì tạm nghỉ để dùng đường lui. */
     private fun fail(reply: String): Boolean {
         lastError = reply.removePrefix("ERR").trim().ifBlank { "tiêm chạm bị từ chối" }
@@ -120,7 +145,10 @@ class TouchInjector(context: Context) {
     private fun syncDevice(name: String) {
         if (name.isBlank() || name == sentDeviceName) return
         val reply = request("N " + name.replace('\n', ' '), REPLY_TIMEOUT_MS)
-        if (reply == "OK") sentDeviceName = name
+        if (reply.startsWith("OK")) {
+            sentDeviceName = name
+            deviceInfo = reply.removePrefix("OK").trim()
+        }
     }
 
     /** Pointer-id nhỏ nhất chưa có ngón thật nào dùng. [pointers] dạng phẳng [id, x, y, ...]. */
@@ -213,7 +241,7 @@ class TouchInjector(context: Context) {
         val out = writer ?: throw IOException("bộ tiêm chạm chưa mở")
         out.write((command + "\n").toByteArray(Charsets.UTF_8))
         out.flush()
-        return readLine(timeoutMs) { it == "OK" || it.startsWith("ERR") }
+        return readLine(timeoutMs) { it == "OK" || it.startsWith("OK ") || it.startsWith("ERR") }
     }
 
     /** Đọc đến dòng thoả [accept]; quá [timeoutMs] thì đóng luồng để gỡ chặn (ném IOException). */
