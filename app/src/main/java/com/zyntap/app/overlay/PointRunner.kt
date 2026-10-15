@@ -179,6 +179,16 @@ class PointRunner(
             }
             return
         }
+        // Bộ tiêm riêng đã từng chạy mà lần này bị từ chối: BỎ lần chạm này, KHÔNG lùi về `input tap`
+        // (chính `input tap` mới là thứ làm đứt ngón thật). Chỉ lùi về nó khi bộ tiêm chưa bao giờ khởi động được.
+        if (injector.everReady) {
+            val t = android.os.SystemClock.uptimeMillis()
+            if (t - lastDiag > 1500) {
+                lastDiag = t
+                DebugNotifier.post(context, "ZynTap: lần chạm bị từ chối (đã bỏ qua)", injector.diag, DebugNotifier.ID_DIAG)
+            }
+            return
+        }
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastFallbackNote > 60_000L) {
             lastFallbackNote = now

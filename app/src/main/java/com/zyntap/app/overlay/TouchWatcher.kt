@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Surface
 import android.view.WindowManager
 import com.zyntap.app.data.AdbSession
@@ -64,6 +65,9 @@ interface FingerSource {
 
     /** Tên tấm cảm ứng thật đã dò được ("" = chưa biết). */
     val deviceName: String
+
+    /** Tình trạng bộ theo dõi ngón thật (để chẩn đoán): chạy hay không, đã nhận bao nhiêu byte/ngón... */
+    val stats: String
 
     /** Các ngón thật đang chạm, phẳng hoá: [id0, x0, y0, id1, x1, y1, ...] (pixel màn hình hiện tại, id tăng dần). */
     fun activePointers(): IntArray
@@ -391,6 +395,18 @@ class TouchWatcher(
     override var deviceName: String = ""
         private set
 
+    @Volatile private var bytesTotal = 0L
+    @Volatile private var downsTotal = 0
+    @Volatile private var lastEventAt = 0L
+    @Volatile private var restarts = 0
+
+    override val stats: String
+        get() {
+            val age = if (lastEventAt == 0L) "chưa có" else "${SystemClock.uptimeMillis() - lastEventAt}ms trước"
+            return "chạy=$running byte=$bytesTotal ngón-chạm-xuống=$downsTotal sự-kiện-cuối=$age " +
+                "đang-chạm=${activePointers().size / 3} kết-nối-lại=$restarts"
+        }
+
     private fun lowestFree(): Int {
         var id = 0
         while (id < MAX_POINTER_ID && ((usedIds shr id) and 1) == 1) id++
@@ -488,17 +504,20 @@ class TouchWatcher(
                         val b = screen()
                         val (x, y) = InputEventParser.toScreen(rx, ry, d, rotation(), b.width(), b.height())
                         setPos(slot, x, y)
+                        lastEventAt = SystemClock.uptimeMillis()
                     }
                 },
             ) { slot, down, rx, ry ->
                 val d = device ?: return@InputEventParser
                 val b = screen()
                 val (x, y) = InputEventParser.toScreen(rx, ry, d, rotation(), b.width(), b.height())
-                if (down) { claimId(slot); setPos(slot, x, y) } else releaseId(slot)
+                if (down) { claimId(slot); setPos(slot, x, y); downsTotal++ } else releaseId(slot)
+                lastEventAt = SystemClock.uptimeMillis()
                 main.post { sink.onFinger(slot, down, x, y) }
             }
             val framer = InputEventStream(parser)
             var received = 0L
+            restarts++
             try {
                 val manager = ZynAdbConnectionManager.get(app)
                 if (!manager.isConnected) {
@@ -522,6 +541,7 @@ class TouchWatcher(
                     if (n < 0) break
                     if (n == 0) continue
                     received += n
+                    bytesTotal += n
                     framer.feed(chunk, n)
                 }
             } catch (e: CancellationException) {

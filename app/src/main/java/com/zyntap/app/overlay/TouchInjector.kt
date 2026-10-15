@@ -54,6 +54,19 @@ class TouchInjector(context: Context) {
         private set
     @Volatile private var deviceInfo: String = ""
     private var tapCount = 0
+    private var okSolo = 0
+    private var okJoined = 0
+    private var rejected = 0
+    private var lastReject = ""
+    private var lastNReply = "(chưa gửi N)"
+
+    /** Tóm tắt bộ đếm + lần bị từ chối gần nhất (đưa vào thông báo chẩn đoán kể cả khi lần chạm thất bại). */
+    fun summary(): String = buildString {
+        append("Thành công: đơn=").append(okSolo).append(" ngón-thứ-hai=").append(okJoined)
+        append(" | Bị từ chối=").append(rejected)
+        if (lastReject.isNotBlank()) append("\nTừ chối gần nhất: ").append(lastReject)
+        append("\nTrả lời lệnh N: ").append(lastNReply)
+    }
 
     val isUp get() = stream != null
 
@@ -84,7 +97,10 @@ class TouchInjector(context: Context) {
                 val before = source?.activePointers() ?: IntArray(0)
                 val id = freeId(before)
                 val downReply = request(buildCommand('D', x, y, id, finger, before), REPLY_TIMEOUT_MS)
-                if (downReply != "OK") return fail(downReply)
+                if (downReply != "OK") {
+                    noteReject("DOWN", downReply, x, y, id, before, source)
+                    return fail(downReply)
+                }
                 val t0 = SystemClock.elapsedRealtime()
                 downSent = true
                 try {
@@ -95,9 +111,13 @@ class TouchInjector(context: Context) {
                 // Toạ độ ngón thật lúc NHẢ phải lấy mới (ngón xoay cam đã di chuyển trong lúc giữ)
                 val after = if (before.isEmpty()) IntArray(0) else without(source?.activePointers() ?: IntArray(0), id)
                 val upReply = request(buildCommand('U', x, y, id, finger, after), REPLY_TIMEOUT_MS)
-                if (upReply != "OK") return fail(upReply)
+                if (upReply != "OK") {
+                    noteReject("UP", upReply, x, y, id, after, source)
+                    return fail(upReply)
+                }
                 consecutiveErrors = 0
                 tapCount++
+                if (before.isEmpty()) okSolo++ else okJoined++
                 diag = buildString {
                     append("Lần chạm #").append(tapCount).append(" tại ").append(x).append(',').append(y).append('\n')
                     append(if (before.isEmpty()) "Kiểu: chạm đơn (không thấy ngón thật nào)" else "Kiểu: ngón thứ hai, ${before.size / 3} ngón thật")
@@ -111,6 +131,8 @@ class TouchInjector(context: Context) {
                     append("\nServer: ").append(deviceInfo.ifBlank { "(chưa nhận N)" })
                     append("\nHồ sơ ngón: ").append(finger?.let { "p=%.2f size=%.2f maj=%.1f".format(Locale.US, it.pressure, it.size, it.touchMajor) } ?: "chưa có")
                     append("\n").append(info)
+                    append("\n").append(summary())
+                    append("\nWatcher: ").append(source?.stats ?: "(không có)")
                 }
                 return true
             } catch (e: IOException) {
@@ -131,13 +153,17 @@ class TouchInjector(context: Context) {
     private fun fmt(p: IntArray): String =
         if (p.isEmpty()) "-" else (p.indices step 3).joinToString(" ") { "id${p[it]}@${p[it + 1]},${p[it + 2]}" }
 
-    /** Server còn sống nhưng hệ thống từ chối: đếm lỗi, quá nhiều thì tạm nghỉ để dùng đường lui. */
+    /** Ghi lại chi tiết một lần bị hệ thống từ chối (để đọc trong thông báo chẩn đoán). */
+    private fun noteReject(stage: String, reply: String, x: Int, y: Int, id: Int, real: IntArray, source: FingerSource?) {
+        rejected++
+        lastReject = "$stage @$x,$y id=$id kiểu=${if (real.isEmpty()) "đơn" else "ngón thứ hai"} " +
+            "ngón thật=${fmt(real)} cảm ứng=${source?.deviceName.orEmpty()} | $reply"
+        diag = "Lần chạm bị TỪ CHỐI\n" + summary() + "\nWatcher: " + (source?.stats ?: "(không có)") + "\n" + info
+    }
+
+    /** Server còn sống nhưng hệ thống từ chối lần chạm này: chỉ ghi lỗi, KHÔNG tắt bộ tiêm (tránh rơi về click cũ). */
     private fun fail(reply: String): Boolean {
         lastError = reply.removePrefix("ERR").trim().ifBlank { "tiêm chạm bị từ chối" }
-        if (++consecutiveErrors >= MAX_ERRORS) {
-            shutdown()
-            retryAt = SystemClock.elapsedRealtime() + BACKOFF_MS
-        }
         return false
     }
 
@@ -145,6 +171,7 @@ class TouchInjector(context: Context) {
     private fun syncDevice(name: String) {
         if (name.isBlank() || name == sentDeviceName) return
         val reply = request("N " + name.replace('\n', ' '), REPLY_TIMEOUT_MS)
+        lastNReply = reply
         if (reply.startsWith("OK")) {
             sentDeviceName = name
             deviceInfo = reply.removePrefix("OK").trim()
