@@ -96,6 +96,8 @@ class OverlayService : Service() {
     private var promptLayer: TextPromptLayer? = null
     private var mainTab: MainButtonsTab? = null
     private var pointsTab: PointsTab? = null
+    private var configTab: ConfigTab? = null
+    private lateinit var configStore: ConfigStore
     private lateinit var pointPicker: PointPickerOverlay
     private lateinit var pointRunner: PointRunner
     private var inputActive = false
@@ -111,6 +113,7 @@ class OverlayService : Service() {
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         uiDensitySig = UiScale.density(resources)
         repo = MainButtonRepo(this)
+        configStore = ConfigStore(this)
         circles = MainButtonOverlay(
             ctx = this,
             wm = wm,
@@ -310,8 +313,42 @@ class OverlayService : Service() {
     private val travel get() = cardW + cardStart
 
     /** Menu 620x480dp, tự thu nhỏ nếu màn hình không đủ chỗ. */
-    private val cardW get() = minOf(dp(PANEL_W_DP), screenW - cardStart - dp(PANEL_MARGIN_DP), (screenW * PANEL_MAX_W_FRAC).toInt())
-    private val cardH get() = minOf(dp(PANEL_H_DP), screenH - dp(PANEL_MARGIN_DP) * 2, (screenH * PANEL_MAX_H_FRAC).toInt())
+    private val cardW get(): Int {
+        val avail = screenW - cardStart - dp(PANEL_MARGIN_DP)
+        val custom = prefs.getInt(KEY_PANEL_W, 0)
+        return if (custom > 0) minOf(dp(custom), avail)
+        else minOf(dp(PANEL_W_DP), avail, (screenW * PANEL_MAX_W_FRAC).toInt())
+    }
+    private val cardH get(): Int {
+        val avail = screenH - dp(PANEL_MARGIN_DP) * 2
+        val custom = prefs.getInt(KEY_PANEL_H, 0)
+        return if (custom > 0) minOf(dp(custom), avail)
+        else minOf(dp(PANEL_H_DP), avail, (screenH * PANEL_MAX_H_FRAC).toInt())
+    }
+
+    /** Kích thước menu hiện tại + giới hạn cho phép (đều theo dp của UI nổi) cho tab Cấu hình. */
+    private fun panelSizeInfo(): PanelSizeInfo {
+        val d = UiScale.density(resources)
+        val maxW = ((screenW - cardStart - dp(PANEL_MARGIN_DP)) / d).toInt()
+        val maxH = ((screenH - dp(PANEL_MARGIN_DP) * 2) / d).toInt()
+        return PanelSizeInfo(
+            curW = (cardW / d).toInt(), curH = (cardH / d).toInt(),
+            minW = minOf(PANEL_MIN_W_DP, maxW), minH = minOf(PANEL_MIN_H_DP, maxH),
+            maxW = maxW, maxH = maxH,
+        )
+    }
+
+    /** Dựng lại menu từ đầu (sau khi nạp cấu hình / đổi kích thước) và hiện ngay, không trượt lại. */
+    private fun rebuildPanel() {
+        if (closing) return
+        val tab = shownTabIdx
+        prefs.edit().putInt(KEY_TAB, tab).apply()
+        removePanel()
+        ensurePanel()
+        panelCard?.translationX = 0f
+        panelView?.alpha = 1f
+        handleView?.alpha = 0f
+    }
     private val cardMargin get() = dp(PANEL_MARGIN_DP)
 
     /** Quãng đường card phải trượt để ra khỏi màn hình hoàn toàn. */
@@ -592,11 +629,33 @@ class OverlayService : Service() {
         val tab2 = PointsTab(this, repo, host, pointPicker, { realBounds },
             { on -> setPanelFocusable(on) }, { pointRunner.stopAll(); circles.cancelTouches() })
         pointsTab = tab2
+        val tab3 = ConfigTab(
+            this, repo, configStore, host,
+            { on -> setPanelFocusable(on) },
+            { pointRunner.stopAll(); circles.cancelTouches() },
+            { name ->
+                // Nạp xong: dựng lại nút nổi + menu (các tab đọc lại dữ liệu mới), giữ nguyên tab đang mở
+                circles.removeAll(); circles.ensureAll()
+                handler.post { rebuildPanel() }
+                android.widget.Toast.makeText(this, "Đã nạp cấu hình \"$name\"", android.widget.Toast.LENGTH_SHORT).show()
+            },
+            { panelSizeInfo() },
+            { w, h ->
+                prefs.edit().putInt(KEY_PANEL_W, w).putInt(KEY_PANEL_H, h).apply()
+                handler.post { rebuildPanel() }
+                android.widget.Toast.makeText(
+                    this,
+                    if (w == 0) "Đã trả menu về kích thước mặc định" else "Đã đặt menu $w × $h dp",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+            },
+        )
+        configTab = tab3
 
         val tabViews = listOf(
             tab1.build(),
             tab2.build(),
-            placeholderTab(tabNames[2]),
+            tab3.build(),
         )
         // Mỗi lần đóng menu là cả cửa sổ bị gỡ và dựng lại -> phải nhớ tab đang chọn ở ngoài,
         // nếu không sẽ luôn quay về tab 1.
@@ -607,6 +666,7 @@ class OverlayService : Service() {
             if (i != startTab) { v.visibility = View.GONE; v.alpha = 0f }
         }
         if (startTab == 1) tab2.enter()
+        if (startTab == 2) tab3.enter()
         var shownTab = startTab
         shownTabIdx = startTab
         fun showTab(i: Int) {
@@ -616,9 +676,11 @@ class OverlayService : Service() {
             val next = tabViews[i]
             if (oldIdx == 0) tab1.exitEdit()   // rời tab 1 -> thoát trạng thái chỉnh nút
             if (oldIdx == 1) tab2.exit()
+            if (oldIdx == 2) tab3.exit()
             dd.dismissNow()
             pr.close()
             if (i == 1) tab2.enter()
+            if (i == 2) tab3.enter()
             old.animate().cancel(); next.animate().cancel()
             old.animate().alpha(0f).setDuration(140L)
                 .withEndAction { if (shownTab != oldIdx) old.visibility = View.GONE }.start()
@@ -1290,6 +1352,7 @@ class OverlayService : Service() {
         }
         mainTab?.exitEdit()
         pointsTab?.exit()
+        configTab?.exit()
         dropdownLayer?.dismissNow()
         promptLayer?.close()
         card.animate().cancel(); scrim.animate().cancel()
@@ -1308,6 +1371,7 @@ class OverlayService : Service() {
     /** Đặt lại trạng thái chỉnh nút / nhập liệu / bàn phím khi menu thu vào hoặc bị gỡ. */
     private fun resetPanelState() {
         pointsTab?.exit()
+        configTab?.exit()
         pointPicker.close()
         promptLayer?.close()
         dropdownLayer?.dismissNow()
@@ -1362,6 +1426,7 @@ class OverlayService : Service() {
         panelHidden = false
         resetGhost()
         pointsTab?.exit()
+        configTab?.exit()
         pointPicker.close()
         promptLayer?.close()
         inputActive = false
@@ -1376,6 +1441,7 @@ class OverlayService : Service() {
         promptLayer = null
         mainTab = null
         pointsTab = null
+        configTab = null
         panelView = null
         panelCard = null
         panelContent = null
@@ -1403,6 +1469,10 @@ class OverlayService : Service() {
         private const val GHOST_SHRINK = 0.06f
         private const val PANEL_MAX_W_FRAC = 0.94f
         private const val PANEL_MAX_H_FRAC = 0.80f
+        private const val KEY_PANEL_W = "panel_w_dp"
+        private const val KEY_PANEL_H = "panel_h_dp"
+        private const val PANEL_MIN_W_DP = 360
+        private const val PANEL_MIN_H_DP = 260
         private const val PANEL_W_DP = 620
         private const val PANEL_H_DP = 440
         private const val PANEL_MARGIN_DP = 8

@@ -74,6 +74,10 @@ class MainButtonRepo(context: Context) {
     }
 
     fun save() {
+        prefs.edit().putString(KEY, toArray().toString()).apply()
+    }
+
+    private fun toArray(): JSONArray {
         val arr = JSONArray()
         buttons.forEach { b ->
             arr.put(
@@ -89,13 +93,27 @@ class MainButtonRepo(context: Context) {
                     .put("passThrough", b.passThrough),
             )
         }
-        prefs.edit().putString(KEY, arr.toString()).apply()
+        return arr
     }
 
-    private fun load(): MutableList<MainButton> {
+    /** Toàn bộ danh sách nút main hiện tại dạng JSON (dùng để lưu thành cấu hình). */
+    fun exportJson(): String = toArray().toString()
+
+    /** Thay toàn bộ nút main bằng [json]; false (và giữ nguyên) nếu JSON hỏng. */
+    fun replaceFromJson(json: String): Boolean {
+        val list = parse(json) ?: return false
+        buttons.clear()
+        buttons.addAll(list)
+        save()
+        return true
+    }
+
+    private fun load(): MutableList<MainButton> = parse(prefs.getString(KEY, "[]") ?: "[]") ?: mutableListOf()
+
+    private fun parse(json: String): MutableList<MainButton>? {
         val out = mutableListOf<MainButton>()
-        runCatching {
-            val arr = JSONArray(prefs.getString(KEY, "[]"))
+        val ok = runCatching {
+            val arr = JSONArray(json)
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 val id = o.getInt("id")
@@ -116,7 +134,8 @@ class MainButtonRepo(context: Context) {
                     ),
                 )
             }
-        }
+        }.isSuccess
+        if (!ok) return null
         out.sortBy { it.id }
         return out
     }
