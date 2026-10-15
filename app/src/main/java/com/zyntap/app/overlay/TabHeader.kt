@@ -7,9 +7,9 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 /**
- * Khung tiêu đề DÙNG CHUNG cho cả 3 tab của menu nổi (Nút chính / Điểm nhấn / Cấu hình):
+ * Khung tiêu đề DÙNG CHUNG cho cả 4 tab của menu nổi (Tâm ảo / Nút chính / Điểm nhấn / Cấu hình):
  * dòng tên tab đậm + dòng phụ nhỏ bên dưới, chừa chỗ bên phải cho 3 nút mắt / - / X của menu.
- * Cùng một khuôn nên 3 tab có phần đầu giống hệt nhau và nội dung bắt đầu cùng một độ cao.
+ * Cùng một khuôn nên các tab có phần đầu giống hệt nhau và nội dung bắt đầu cùng một độ cao.
  *
  * @return TextView của dòng phụ (tab 1 dùng để cập nhật số nút).
  */

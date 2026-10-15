@@ -98,6 +98,8 @@ class OverlayService : Service() {
     private var pointsTab: PointsTab? = null
     private var configTab: ConfigTab? = null
     private lateinit var configStore: ConfigStore
+    private lateinit var crosshairSettings: CrosshairSettings
+    private lateinit var crosshair: CrosshairOverlay
     private lateinit var pointPicker: PointPickerOverlay
     private lateinit var pointRunner: PointRunner
     private var inputActive = false
@@ -127,6 +129,8 @@ class OverlayService : Service() {
             screenBounds = { realBounds },
             newParams = { w, h, f -> overlayParams(w, h, f) },
         )
+        crosshairSettings = CrosshairSettings(this)
+        crosshair = CrosshairOverlay(this, wm, crosshairSettings, { realBounds }) { w, h, f -> overlayParams(w, h, f) }
         pointRunner = PointRunner(this, { Rect(realBounds) }, { x, y ->
             circles.containsPoint(x, y) || panelBlocksInput() || handleContainsPoint(x, y)
         }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
@@ -176,6 +180,7 @@ class OverlayService : Service() {
                 }
                 ensureHandle()
                 circles.ensureAll()
+                crosshair.ensure()
                 startWatchdog()
                 AdbSession.ensureInBackground(this)
             }
@@ -214,6 +219,7 @@ class OverlayService : Service() {
         // Tự nối lại ADB khi mất kết nối (sau cập nhật app, bật lại gỡ lỗi Wi-Fi, đổi mạng...)
         AdbSession.ensureInBackground(this)
         checkTargetApp()
+        crosshair.ensure()
         val h = handleView
         if (h == null) {
             ensureHandle()
@@ -472,11 +478,13 @@ class OverlayService : Service() {
             circles.removeAll()
             ensureHandle()
             circles.ensureAll()
+            crosshair.remove() // dựng lại theo hệ số co giãn mới
         }
         handleView?.alpha = 1f
         relayoutHandle()
         circles.relayoutAll()
-        handleView?.postDelayed({ relayoutHandle(); circles.relayoutAll() }, 400)
+        crosshair.ensure()
+        handleView?.postDelayed({ relayoutHandle(); circles.relayoutAll(); crosshair.ensure() }, 400)
     }
 
     // ---- nút mở menu (tab bám mép trái) -----------------------------------
@@ -700,22 +708,25 @@ class OverlayService : Service() {
             },
         )
         configTab = tab3
+        val tab0 = CrosshairTab(this, crosshairSettings) { crosshair.ensure() }
 
+        // Thứ tự: 0 = Cài tâm ảo, 1 = Tạo nút chính, 2 = Chỉnh điểm nhấn, 3 = Cài cấu hình
         val tabViews = listOf(
+            tab0.build(),
             tab1.build(),
             tab2.build(),
             tab3.build(),
         )
         // Mỗi lần đóng menu là cả cửa sổ bị gỡ và dựng lại -> phải nhớ tab đang chọn ở ngoài,
         // nếu không sẽ luôn quay về tab 1.
-        val startTab = prefs.getInt(KEY_TAB, 0).coerceIn(0, tabViews.lastIndex)
+        val startTab = prefs.getInt(KEY_TAB, 1).coerceIn(0, tabViews.lastIndex)
         val tabContainer = FrameLayout(this)
         tabViews.forEachIndexed { i, v ->
             tabContainer.addView(v, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             if (i != startTab) { v.visibility = View.GONE; v.alpha = 0f }
         }
-        if (startTab == 1) tab2.enter()
-        if (startTab == 2) tab3.enter()
+        if (startTab == 2) tab2.enter()
+        if (startTab == 3) tab3.enter()
         var shownTab = startTab
         shownTabIdx = startTab
         fun showTab(i: Int) {
@@ -723,13 +734,13 @@ class OverlayService : Service() {
             val oldIdx = shownTab
             val old = tabViews[oldIdx]
             val next = tabViews[i]
-            if (oldIdx == 0) tab1.exitEdit()   // rời tab 1 -> thoát trạng thái chỉnh nút
-            if (oldIdx == 1) tab2.exit()
-            if (oldIdx == 2) tab3.exit()
+            if (oldIdx == 1) tab1.exitEdit()   // rời tab Tạo nút chính -> thoát trạng thái chỉnh nút
+            if (oldIdx == 2) tab2.exit()
+            if (oldIdx == 3) tab3.exit()
             dd.dismissNow()
             pr.close()
-            if (i == 1) tab2.enter()
-            if (i == 2) tab3.enter()
+            if (i == 2) tab2.enter()
+            if (i == 3) tab3.enter()
             old.animate().cancel(); next.animate().cancel()
             old.animate().alpha(0f).setDuration(140L)
                 .withEndAction { if (shownTab != oldIdx) old.visibility = View.GONE }.start()
@@ -803,7 +814,7 @@ class OverlayService : Service() {
         return row
     }
 
-    private val tabNames = listOf("Tạo nút chính", "Chỉnh điểm nhấn", "Cài cấu hình")
+    private val tabNames = listOf("Cài tâm ảo", "Tạo nút chính", "Chỉnh điểm nhấn", "Cài cấu hình")
 
     /** Cột bên trái: logo + tên app ở trên cùng, bên dưới là các tab xếp dọc. */
     private fun buildSidebar(initialTab: Int, onSelect: (Int) -> Unit): View {
@@ -1241,6 +1252,7 @@ class OverlayService : Service() {
         circles.setMenuOpen(false)
         circles.setEditing(null)
         circles.fadeAll(0f, 250L)   // các nút tròn mờ đi cùng lúc menu thu lại
+        crosshair.fadeOut(250L)
         card.animate().cancel(); scrim.animate().cancel()
 
         // 1) Nội dung + nút mờ đi, chỉ còn lại khung card
@@ -1298,6 +1310,7 @@ class OverlayService : Service() {
             // Trong lúc đang đóng, người dùng bật lại menu từ app -> dựng lại nút thay vì tắt
             removePanel()
             ensureHandle()
+            crosshair.restore()
             handleView?.alpha = 1f
             startWatchdog()
         } else {
@@ -1470,7 +1483,7 @@ class OverlayService : Service() {
         v.visibility = View.VISIBLE
         applySolid(solidAmount)
         startStatusTick()
-        if (shownTabIdx == 1) pointsTab?.enter()
+        if (shownTabIdx == 2) pointsTab?.enter()
     }
 
     private fun removePanel() {
@@ -1511,6 +1524,7 @@ class OverlayService : Service() {
         handleView = null
         removePanel()
         if (::circles.isInitialized) circles.removeAll()
+        if (::crosshair.isInitialized) crosshair.remove()
     }
 
     private fun dp(v: Int): Int = (v * UiScale.density(resources)).toInt()
@@ -1547,7 +1561,7 @@ class OverlayService : Service() {
         private const val TARGET_MISS_LIMIT = 2 // 2 nhịp watchdog liên tiếp (~4 giây)
         private const val KEY_Y_RATIO = "handle_y_ratio"
         private const val KEY_SOLID = "solid_mode"
-        private const val KEY_TAB = "active_tab"
+        private const val KEY_TAB = "active_tab_v2" // v2: thêm tab "Cài tâm ảo" ở đầu nên chỉ số đã lệch
         // Độ đặc (0..255) của nền card và nền tối phía sau: mặc định (trong suốt) và khi tắt trong suốt
         private const val CARD_ALPHA = 0xF2
         private const val SCRIM_ALPHA = 0x66
