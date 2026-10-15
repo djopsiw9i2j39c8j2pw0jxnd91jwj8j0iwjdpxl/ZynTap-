@@ -145,11 +145,15 @@ class ConfigTab(
     }
 
     fun build(): View {
+        // Khung tiêu đề CỐ ĐỊNH (không cuộn theo nội dung), phần dưới mới là vùng cuộn
+        val root = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), 0)
+        }
         val page = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), dp(12))
+            orientation = LinearLayout.VERTICAL; setPadding(0, 0, 0, dp(12))
             isFocusableInTouchMode = true
         }
-        addTabHeader(ctx, page, "Cấu hình", "Lưu macro và kích thước menu")
+        addTabHeader(ctx, root, "Cấu hình", "Lưu macro và kích thước menu")
 
         // ---- Lưu macro ----
         page.addView(label("LƯU MACRO", 10.5f), LinearLayout.LayoutParams(-1, dp(25)).apply { topMargin = dp(4) })
@@ -200,10 +204,12 @@ class ConfigTab(
         refreshDropdown()
         refreshSizeFields()
         showStatus("Lưu các cấu hình các macro của bạn", false)
-        return ScrollView(ctx).apply {
+        root.addView(ScrollView(ctx).apply {
             isFillViewport = true; isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
             addView(page, ViewGroup.LayoutParams(-1, -2))
-        }
+        }, LinearLayout.LayoutParams(-1, 0, 1f))
+        return root
     }
 
     // ---- cấu hình macro ----

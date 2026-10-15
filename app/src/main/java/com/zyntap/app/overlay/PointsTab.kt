@@ -72,11 +72,15 @@ class PointsTab(
     }
 
     fun build(): View {
+        // Khung tiêu đề CỐ ĐỊNH (không cuộn theo nội dung), phần dưới mới là vùng cuộn
+        val root = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), 0)
+        }
         val page = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), dp(12))
+            orientation = LinearLayout.VERTICAL; setPadding(0, 0, 0, dp(12))
             isFocusableInTouchMode = true
         }
-        addTabHeader(ctx, page, "Điểm nhấn", "Kịch bản click cho từng nút main")
+        addTabHeader(ctx, root, "Điểm nhấn", "Kịch bản click cho từng nút main")
         mainField = TextView(ctx).apply {
             scaledTextSize(14f); setTextColor(fg); gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), 0, dp(12), 0)
@@ -123,10 +127,12 @@ class PointsTab(
         page.addView(status, LinearLayout.LayoutParams(-1, dp(30)))
         buildInputs(page)
         page.addView(label("Chạm X/Y → kéo ghim → chạm ghim → Enter.\nDelay chờ tại dòng đó, trước điểm tiếp theo.", 10.5f), LinearLayout.LayoutParams(-1, dp(34)).apply { topMargin = dp(6) })
-        return ScrollView(ctx).apply {
+        root.addView(ScrollView(ctx).apply {
             isFillViewport = true; isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
             addView(page, ViewGroup.LayoutParams(-1, -2))
-        }
+        }, LinearLayout.LayoutParams(-1, 0, 1f))
+        return root
     }
 
     private fun buildInputs(page: LinearLayout) {
