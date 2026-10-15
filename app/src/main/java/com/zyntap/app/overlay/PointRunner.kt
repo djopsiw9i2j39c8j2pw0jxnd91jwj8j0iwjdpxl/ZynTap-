@@ -28,26 +28,6 @@ class PointRunner(
     private val timer = Executors.newSingleThreadScheduledExecutor()
     private val injectionLock = Mutex()
     private var lastReport = 0L
-    private var lastDiag = 0L
-
-    /** Bộ tiêm chạm riêng (clone thông số ngón gốc, không đè lên cử chỉ của ngón thật). */
-    private val injector = TouchInjector(context)
-
-    /** Nguồn "ngón gốc" (thông số + pointer-id trống); gán sau khi dựng. Null = dùng giá trị mặc định. */
-    var fingers: FingerSource? = null
-
-    private var announcedReady = false
-    private var lastFallbackNote = 0L
-
-    /** Khởi động sẵn tiến trình tiêm ở nền để lần nhấn đầu không bị trễ. Gọi thoải mái, tự bỏ qua nếu chưa cần. */
-    fun warmUp() {
-        if (injector.isUp) return
-        scope.launch(Dispatchers.IO) {
-            val manager = ZynAdbConnectionManager.get(context)
-            if (!manager.isConnected) return@launch
-            injector.warmUp(manager)
-        }
-    }
 
     private fun message(text: String) {
         val now = android.os.SystemClock.uptimeMillis()
@@ -164,43 +144,10 @@ class PointRunner(
 
     private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap) {
         currentCoroutineContext().ensureActive()
-        // Ưu tiên bộ tiêm riêng: device-id riêng + pointer-id trống + thông số clone từ ngón gốc,
-        // nên không làm đứt ngón thật đang vuốt. Không dùng được thì lùi về `input tap` như trước.
-        val source = fingers
-        if (injector.tap(manager, point.x, point.y, source)) {
-            if (!announcedReady) {
-                announcedReady = true
-                scope.launch { message("Tiêm chạm riêng: BẬT (${injector.info})") }
-            }
-            val now = android.os.SystemClock.uptimeMillis()
-            if (now - lastDiag > 1500) {
-                lastDiag = now
-                DebugNotifier.post(context, "ZynTap chẩn đoán tiêm chạm", injector.diag, DebugNotifier.ID_DIAG)
-            }
-            return
-        }
-        // Bộ tiêm riêng đã từng chạy mà lần này bị từ chối: BỎ lần chạm này, KHÔNG lùi về `input tap`
-        // (chính `input tap` mới là thứ làm đứt ngón thật). Chỉ lùi về nó khi bộ tiêm chưa bao giờ khởi động được.
-        if (injector.everReady) {
-            val t = android.os.SystemClock.uptimeMillis()
-            if (t - lastDiag > 1500) {
-                lastDiag = t
-                DebugNotifier.post(context, "ZynTap: lần chạm bị từ chối (đã bỏ qua)", injector.diag, DebugNotifier.ID_DIAG)
-            }
-            return
-        }
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastFallbackNote > 60_000L) {
-            lastFallbackNote = now
-            val why = injector.lastError.ifBlank { "không rõ lý do" }
-            scope.launch { message("Không bật được tiêm chạm riêng ($why). Đang dùng click cũ, có thể làm đứt ngón vuốt.") }
-        }
-        legacyTap(manager, run, point)
-    }
-
-    /** Đường lui: `input tap` (dùng chung device-id với ngón thật nên có thể làm đứt cử chỉ đang vuốt). */
-    private suspend fun legacyTap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap) {
-        currentCoroutineContext().ensureActive()
+        // Ưu tiên click qua helper: chèn vào CÙNG luồng chạm với ngón thật (helper đã grab cảm ứng),
+        // nhờ vậy ngón thật đang vuốt/giữ không bị mất. Helper luôn tự nhả (UP) dù coroutine bị huỷ giữa chừng.
+        if (TouchWatcher.current?.tap(point.x, point.y) == true) return
+        // Helper chưa sẵn sàng / ROM không cho grab -> cách cũ.
         // Only validated integer coordinates enter the command. Never execute editor text.
         val stream = manager.openStream("shell:input tap ${point.x} ${point.y}; echo ZYN_EXIT:\$?")
         run.stream = stream
@@ -236,6 +183,5 @@ class PointRunner(
         stopAll()
         scope.cancel()
         timer.shutdownNow()
-        injector.close()
     }
 }

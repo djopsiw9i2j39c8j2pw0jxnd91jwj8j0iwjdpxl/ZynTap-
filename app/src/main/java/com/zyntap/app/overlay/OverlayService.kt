@@ -123,8 +123,7 @@ class OverlayService : Service() {
         )
         pointRunner = PointRunner(this, { Rect(realBounds) }, { x, y ->
             circles.containsPoint(x, y) || panelBlocksInput() || handleContainsPoint(x, y)
-        }) { text -> DebugNotifier.post(this, "ZynTap", text, DebugNotifier.ID_MESSAGE) }
-        pointRunner.fingers = circles.fingers
+        }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
         pointPicker = PointPickerOverlay(this, wm, { realBounds },
             { w, h, f -> overlayParams(w, h, f) },
             { picking ->
@@ -199,7 +198,6 @@ class OverlayService : Service() {
     private fun checkHealth() {
         // Tự nối lại ADB khi mất kết nối (sau cập nhật app, bật lại gỡ lỗi Wi-Fi, đổi mạng...)
         AdbSession.ensureInBackground(this)
-        pointRunner.warmUp() // dựng sẵn tiến trình tiêm chạm để lần nhấn đầu không bị trễ
         val h = handleView
         if (h == null) {
             ensureHandle()

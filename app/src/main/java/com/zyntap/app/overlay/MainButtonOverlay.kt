@@ -236,9 +236,6 @@ class MainButtonOverlay(
         override fun onFinger(slot: Int, down: Boolean, x: Int, y: Int) = onWatchedFinger(slot, down, x, y)
         override fun onLost() = cancelWatched()
     })
-    /** "Ngón gốc" mà bộ tiêm chạm sao chép thông số (áp lực, vùng chạm, pointer-id còn trống). */
-    val fingers: FingerSource get() = watcher
-
     private val d = UiScale.density(ctx.resources)
     private fun dp(v: Int) = (v * d).toInt()
     private val ringPad get() = dp(RING_PAD_DP)
@@ -283,8 +280,8 @@ class MainButtonOverlay(
     }
 
     private fun refreshWatcher() {
-        // Có nút main là theo dõi ngón thật luôn (không chỉ khi có nút chạm xuyên): bộ tiêm chạm cần biết
-        // ngón nào đang chạm để chọn pointer-id trống và sao chép thông số của chúng.
+        // Có nút main là bật proxy: helper phải grab cảm ứng từ trước, vì lúc đang giữ ngón lên nút
+        // (chế độ Giữ) mới grab thì hệ thống đã kẹt ngón thật. Cũng cần cho chạm xuyên.
         val need = OverlayPermission.granted(ctx) && repo.buttons.isNotEmpty()
         if (need) watcher.start() else { watcher.stop(); cancelWatched() }
     }
