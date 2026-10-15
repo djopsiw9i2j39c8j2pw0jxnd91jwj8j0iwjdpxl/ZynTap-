@@ -20,6 +20,7 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
+import com.zyntap.app.data.DebugLog
 import kotlin.math.max
 import kotlin.math.min
 
@@ -279,6 +280,8 @@ class CrosshairOverlay(
         val cur = view
         val p = params
         if (cur == null || p == null) {
+            // Đang dựng mới: gỡ mọi cửa sổ tâm cũ còn sót (do dịch vụ trước tắt giữa chừng) để không bị chồng/kẹt
+            sweepOrphans()
             val size = windowSize(s)
             val np = newParams(
                 size, size,
@@ -291,7 +294,9 @@ class CrosshairOverlay(
             place(np)
             val nv = CrosshairView(ctx).apply { spec = s; isClickable = false; isFocusable = false }
             addedAt = SystemClock.uptimeMillis()
-            if (runCatching { wm.addView(nv, np) }.isSuccess) { view = nv; params = np }
+            runCatching { wm.addView(nv, np) }
+                .onSuccess { view = nv; params = np; live.add(wm to nv) }
+                .onFailure { DebugLog.e("Tâm ảo", "Không gắn được cửa sổ tâm ảo", it) }
         } else {
             cur.spec = s
             val size = windowSize(s)
@@ -306,9 +311,57 @@ class CrosshairOverlay(
 
     fun restore() { view?.animate()?.cancel(); view?.alpha = 1f }
 
+    /** Gỡ tâm khỏi màn hình cho chắc: thử removeViewImmediate, lỗi thì removeView, rồi quét cả cửa sổ cũ còn sót. */
     fun remove() {
-        view?.let { v -> v.animate().cancel(); runCatching { wm.removeView(v) } }
+        view?.let { detach(wm, it) }
         view = null; params = null
+        sweepOrphans()
+    }
+
+    /** Mô tả ngắn cho tab Debug log. */
+    fun state(): String {
+        val v = view
+        val s = settings.spec(d)
+        val cfg = "tâm ${if (s.dotOn) "bật" else "tắt"}, vòng ${if (s.ringOn) "bật" else "tắt"}"
+        val on = when {
+            v == null -> "không có cửa sổ"
+            v.isAttachedToWindow -> "đang hiện (alpha ${"%.1f".format(v.alpha)})"
+            else -> "cửa sổ chưa gắn"
+        }
+        return "$cfg · $on · cửa sổ tâm đang đăng ký: ${live.size}"
+    }
+
+    companion object {
+        /** Mọi cửa sổ tâm đã gắn vào màn hình (kèm WindowManager đã gắn nó) — để gỡ nốt nếu chủ của nó đã chết. */
+        private val live = java.util.Collections.synchronizedList(ArrayList<Pair<WindowManager, View>>())
+
+        private fun detach(wm: WindowManager, v: View): Boolean {
+            runCatching { v.animate().cancel() }
+            var err: Throwable? = null
+            var ok = runCatching { wm.removeViewImmediate(v) }.onFailure { err = it }.isSuccess
+            if (!ok) ok = runCatching { wm.removeView(v) }.onFailure { err = it }.isSuccess
+            // Lỗi "view not attached" nghĩa là nó đã không còn trên màn hình -> coi như xong
+            val gone = ok || !v.isAttachedToWindow
+            if (gone) live.removeAll { it.second === v }
+            else DebugLog.e("Tâm ảo", "Không gỡ được cửa sổ tâm khỏi màn hình (sẽ thử lại)", err)
+            return gone
+        }
+
+        /**
+         * Gỡ mọi cửa sổ tâm trừ [keep]. Gọi khi dựng mới / tắt tâm / tắt dịch vụ / mở app,
+         * nên tâm không thể kẹt lại trên màn hình dù lần tắt trước bị lỗi giữa chừng.
+         * @return số cửa sổ sót đã gỡ
+         */
+        fun sweepOrphans(keep: View? = null): Int {
+            val snapshot = synchronized(live) { live.toList() }
+            var n = 0
+            for ((w, v) in snapshot) {
+                if (v === keep) continue
+                if (detach(w, v)) n++
+            }
+            if (n > 0) DebugLog.w("Tâm ảo", "Đã gỡ $n cửa sổ tâm còn sót trên màn hình")
+            return n
+        }
     }
 }
 

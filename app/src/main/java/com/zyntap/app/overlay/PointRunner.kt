@@ -3,6 +3,7 @@ package com.zyntap.app.overlay
 import android.content.Context
 import android.graphics.Rect
 import com.zyntap.app.data.AdbSession
+import com.zyntap.app.data.DebugLog
 import com.zyntap.app.data.ZynAdbConnectionManager
 import io.github.muntashirakon.adb.AdbStream
 import kotlinx.coroutines.*
@@ -29,7 +30,13 @@ class PointRunner(
     private val injectionLock = Mutex()
     private var lastReport = 0L
 
-    private fun message(text: String) {
+    /** Ghi vào Debug log (luôn ghi) rồi báo Toast cho người dùng (giãn nhịp để không spam). */
+    private fun message(text: String, level: DebugLog.Level = DebugLog.Level.WARN, t: Throwable? = null) {
+        when (level) {
+            DebugLog.Level.INFO -> DebugLog.i("Click", text)
+            DebugLog.Level.WARN -> DebugLog.w("Click", text, t)
+            DebugLog.Level.ERROR -> DebugLog.e("Click", text, t)
+        }
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastReport > 1500) { lastReport = now; report(text) }
     }
@@ -83,15 +90,15 @@ class PointRunner(
                 val manager = withContext(Dispatchers.IO) { ZynAdbConnectionManager.get(context) }
                 if (!withContext(Dispatchers.IO) { manager.isConnected }) {
                     // Chưa có kết nối sống -> tự nối (không bắt người dùng mở app nối tay)
-                    message("Đang kết nối ADB...")
+                    message("Đang kết nối ADB...", DebugLog.Level.INFO)
                     when (val link = AdbSession.connect(context)) {
                         is AdbSession.Link.Connected -> Unit
                         is AdbSession.Link.PairingLost -> {
-                            message("Máy đã quên khoá ghép nối. Mở app ghép nối lại bằng mã 6 số.")
+                            message("Máy đã quên khoá ghép nối. Mở app ghép nối lại bằng mã 6 số.", DebugLog.Level.ERROR)
                             return@launch
                         }
                         is AdbSession.Link.Failed -> {
-                            message(link.message)
+                            message(link.message, DebugLog.Level.ERROR)
                             return@launch
                         }
                     }
@@ -112,10 +119,12 @@ class PointRunner(
                                         } catch (e: java.io.IOException) {
                                             // Bị huỷ chủ động (nhả ngón/xoay màn hình) thì không nối lại
                                             ensureActive()
+                                            DebugLog.w("Bơm", "Click (${step.x},${step.y}) lỗi IO, ADB có thể đã đứt -> nối lại rồi thử lại", e)
                                             // Kết nối chết giữa chừng -> nối lại 1 lần rồi thử lại bước này
                                             AdbSession.drop(context)
                                             val link = AdbSession.connect(context, attempts = 1)
                                             if (link !is AdbSession.Link.Connected) {
+                                                DebugLog.e("Bơm", "Nối lại ADB sau khi đứt thất bại: ${(link as? AdbSession.Link.Failed)?.message ?: link}")
                                                 throw IllegalStateException("ADB đã ngắt, đang nối lại. Thử lại sau giây lát.")
                                             }
                                             ensureActive()
@@ -132,7 +141,7 @@ class PointRunner(
             } catch (_: CancellationException) {
                 // UP / CANCEL / rotation / service teardown.
             } catch (e: Exception) {
-                message("Không click được: ${e.message ?: "ADB đã ngắt"}")
+                message("Không click được: ${e.message ?: "ADB đã ngắt"}", DebugLog.Level.ERROR, e)
             } finally {
                 val stream = run.stream
                 run.stream = null
@@ -148,6 +157,7 @@ class PointRunner(
         // nhờ vậy ngón thật đang vuốt/giữ không bị mất. Helper luôn tự nhả (UP) dù coroutine bị huỷ giữa chừng.
         if (TouchWatcher.current?.tap(point.x, point.y) == true) return
         // Helper chưa sẵn sàng / ROM không cho grab -> cách cũ.
+        DebugLog.w("Bơm", "Helper chưa bơm được (${if (TouchWatcher.current == null) "chưa chạy" else "chưa READY/không grab được"}) -> click bằng `input tap` (chậm hơn, không chung luồng với ngón thật)")
         // Only validated integer coordinates enter the command. Never execute editor text.
         val stream = manager.openStream("shell:input tap ${point.x} ${point.y}; echo ZYN_EXIT:\$?")
         run.stream = stream

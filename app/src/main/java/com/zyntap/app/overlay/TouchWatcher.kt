@@ -7,6 +7,7 @@ import android.os.Looper
 import android.view.Surface
 import android.view.WindowManager
 import com.zyntap.app.data.AdbSession
+import com.zyntap.app.data.DebugLog
 import com.zyntap.app.data.ZynAdbConnectionManager
 import io.github.muntashirakon.adb.AdbStream
 import kotlinx.coroutines.CancellationException
@@ -377,7 +378,10 @@ class TouchWatcher(
     suspend fun tap(x: Int, y: Int, holdMs: Long = TAP_HOLD_MS): Boolean {
         val l = link ?: return false
         if (!l.injecting) return false
-        check(l.tap(x, y, holdMs)) { "Helper chạm không phản hồi" }
+        check(l.tap(x, y, holdMs)) {
+            DebugLog.e("Bơm", "Helper không phản hồi click ($x,$y) trong ${holdMs + 3_000L}ms")
+            "Helper chạm không phản hồi"
+        }
         return true
     }
 
@@ -423,10 +427,17 @@ class TouchWatcher(
                 }
                 device = device ?: detect(manager)
                 val dev = device
-                if (dev == null) { delay(RETRY_MS * 3); continue }
+                if (dev == null) {
+                    DebugLog.e("Cảm ứng", "Không dò được thiết bị cảm ứng (getevent/wm size/proc đều không ra) -> chạm xuyên + bơm không hoạt động")
+                    delay(RETRY_MS * 3); continue
+                }
                 if (proxyFails < MAX_PROXY_FAILS) {
                     val ok = runProxy(manager, dev)
                     proxyFails = if (ok) 0 else proxyFails + 1
+                    if (!ok) {
+                        DebugLog.e("Bơm", "Helper bơm cảm ứng thoát mà chưa READY (lần $proxyFails/$MAX_PROXY_FAILS) trên ${dev.path} — ROM chặn app_process/grab hoặc sai node cảm ứng")
+                        if (proxyFails >= MAX_PROXY_FAILS) DebugLog.e("Bơm", "Bỏ helper, lùi về đọc thô `cat` + click bằng `input tap` (không bơm chung luồng được)")
+                    }
                     if (!ok) device = null // lần sau dò lại đường dẫn cảm ứng
                     delay(RETRY_MS)
                     continue
@@ -446,8 +457,9 @@ class TouchWatcher(
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // mất kết nối / luồng không phải input_event -> thử lại bên dưới
+                DebugLog.w("Cảm ứng", "Luồng đọc cảm ứng bị ngắt (nhận $received byte)", e)
             } finally {
                 parser.reset()
                 main.post { sink.onLost() } // huỷ các nút đang giữ, không để kẹt
@@ -512,18 +524,26 @@ class TouchWatcher(
                         when {
                             line.startsWith("F ") -> onFingerLine(line)
                             line.startsWith("OK ") -> l.finish(line.substring(3).trim().toIntOrNull() ?: -1, true)
-                            line.startsWith("ERR ") ->
+                            line.startsWith("ERR ") -> {
+                                DebugLog.e("Bơm", "Helper bơm click thất bại: ${line.trim()}")
                                 l.finish(line.substring(4).trim().substringBefore(' ').toIntOrNull() ?: -1, false)
-                            line.startsWith("READY") -> { sawReady = true; l.injecting = line.contains("inj=1") }
-                            line.startsWith("FAIL") -> break
+                            }
+                            line.startsWith("READY") -> {
+                                sawReady = true; l.injecting = line.contains("inj=1")
+                                if (l.injecting) DebugLog.i("Bơm", "Helper sẵn sàng: $line")
+                                else DebugLog.e("Bơm", "Helper chạy nhưng KHÔNG bơm được ($line) — grab cảm ứng thất bại hoặc không tạo được bộ phát")
+                            }
+                            line.startsWith("LOG ") -> DebugLog.w("Bơm", "Helper báo: ${line.substring(4).trim()}")
+                            line.startsWith("FAIL") -> { DebugLog.e("Bơm", "Helper báo lỗi: ${line.trim()}"); break }
                         }
                     }
                 }
             }
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             // ADB đứt -> helper tự thoát, kernel tự nhả grab
+            DebugLog.w("Bơm", "Luồng helper bị ngắt (ADB đứt?) — helper tự thoát và nhả cảm ứng", e)
         } finally {
             beat.cancel()
             l.injecting = false

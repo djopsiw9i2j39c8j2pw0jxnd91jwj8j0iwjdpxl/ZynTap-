@@ -46,6 +46,7 @@ import androidx.core.content.ContextCompat
 import com.zyntap.app.R
 import com.zyntap.app.data.AdbLinkStore
 import com.zyntap.app.data.AdbSession
+import com.zyntap.app.data.DebugLog
 import com.zyntap.app.data.WifiAdbMonitor
 import com.zyntap.app.data.ZynAdbConnectionManager
 import kotlin.math.abs
@@ -97,6 +98,7 @@ class OverlayService : Service() {
     private var mainTab: MainButtonsTab? = null
     private var pointsTab: PointsTab? = null
     private var configTab: ConfigTab? = null
+    private var debugTab: DebugTab? = null
     private lateinit var configStore: ConfigStore
     private lateinit var crosshairSettings: CrosshairSettings
     private lateinit var crosshair: CrosshairOverlay
@@ -113,12 +115,17 @@ class OverlayService : Service() {
     private var targetSeen = false            // đã thấy app đó ở trước màn hình ít nhất một lần
     private var targetMisses = 0              // số lần kiểm tra liên tiếp thấy app không còn ở trước
     private var usageTracker: UsageAccess.Tracker? = null
+    private var warnedNoUsage = false         // đã báo log thiếu quyền "Truy cập dữ liệu sử dụng"
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        DebugLog.init(this)
+        DebugLog.i("Dịch vụ", "Menu nổi bắt đầu chạy")
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        // Dọn tâm ảo còn sót lại từ lần chạy trước (nếu lần đó bị tắt giữa chừng)
+        runCatching { CrosshairOverlay.sweepOrphans() }
         uiDensitySig = UiScale.density(resources)
         repo = MainButtonRepo(this)
         configStore = ConfigStore(this)
@@ -189,22 +196,35 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
-        pointPicker.close()
-        pointRunner.close()
+        // Gỡ cửa sổ TRƯỚC và bọc riêng từng bước: một bước lỗi không được làm các cửa sổ còn lại
+        // (nhất là tâm ảo / vòng quanh tâm) bị bỏ sót trên màn hình sau khi dịch vụ đã tắt.
         handler.removeCallbacksAndMessages(null)
-        closeAnim?.let { it.removeAllListeners(); it.cancel() }
-        closeAnim = null
-        solidAnim?.cancel()
-        editDimAnim?.cancel()
-        removeViews()
+        safely("tâm ảo") { if (::crosshair.isInitialized) crosshair.remove() }
+        safely("nút main") { if (::circles.isInitialized) circles.removeAll() }
+        safely("ô chọn điểm") { if (::pointPicker.isInitialized) pointPicker.close() }
+        safely("bộ chạy điểm nhấn") { if (::pointRunner.isInitialized) pointRunner.close() }
+        safely("hiệu ứng") {
+            closeAnim?.let { it.removeAllListeners(); it.cancel() }
+            closeAnim = null
+            solidAnim?.cancel()
+            editDimAnim?.cancel()
+        }
+        safely("menu + tay nắm") { removeViews() }
+        // Lưới an toàn cuối: còn cửa sổ tâm nào sót thì gỡ nốt
+        safely("tâm ảo (quét lại)") { CrosshairOverlay.sweepOrphans() }
+        DebugLog.i("Dịch vụ", "Menu nổi đã tắt")
         super.onDestroy()
+    }
+
+    private inline fun safely(what: String, block: () -> Unit) {
+        try { block() } catch (t: Throwable) { DebugLog.e("Dọn dẹp", "Lỗi khi gỡ $what", t) }
     }
 
     // ---- tự khôi phục khi menu nổi bị mất ----------------------------------
 
     private val watchdog = object : Runnable {
         override fun run() {
-            runCatching { checkHealth() }
+            runCatching { checkHealth() }.onFailure { DebugLog.e("Watchdog", "checkHealth lỗi", it) }
             handler.postDelayed(this, WATCHDOG_MS)
         }
     }
@@ -254,13 +274,25 @@ class OverlayService : Service() {
      */
     private fun checkTargetApp() {
         val pkg = targetPkg ?: return
-        if (closing || !wanted(this) || !UsageAccess.granted(this)) return
+        if (closing || !wanted(this)) return
+        if (!UsageAccess.granted(this)) {
+            if (!warnedNoUsage) {
+                warnedNoUsage = true
+                DebugLog.w("Tự đóng", "Chưa cấp quyền \"Truy cập dữ liệu sử dụng\" nên menu + tâm ảo KHÔNG tự tắt khi bạn thoát app ($pkg). Cấp quyền trong Cài đặt rồi mở lại ZynTap.")
+            }
+            return
+        }
+        warnedNoUsage = false
         val tracker = usageTracker ?: UsageAccess.Tracker(applicationContext).also { usageTracker = it }
-        runCatching { tracker.poll() }.onFailure { return }
+        runCatching { tracker.poll() }.onFailure {
+            DebugLog.w("Tự đóng", "Không đọc được app đang ở trước màn hình", it)
+            return
+        }
         if (tracker.foreground == pkg) {
             targetSeen = true
             targetMisses = 0
         } else if (targetSeen && ++targetMisses >= TARGET_MISS_LIMIT) {
+            DebugLog.i("Tự đóng", "Đã thoát khỏi $pkg -> tự đóng menu, nút main và tâm ảo")
             autoClose()
         }
     }
@@ -332,7 +364,7 @@ class OverlayService : Service() {
             } else {
                 startForeground(NOTIF_ID, notification)
             }
-        }
+        }.onFailure { DebugLog.e("Dịch vụ", "Không chạy được dịch vụ nền (thông báo)", it) }
     }
 
     // ---- kích thước / helper ----------------------------------------------
@@ -590,6 +622,7 @@ class OverlayService : Service() {
         handleView = handle
         handleAddedAt = SystemClock.uptimeMillis()
         runCatching { wm.addView(handle, params) }.onFailure {
+            DebugLog.e("Giao diện", "Không gắn được nút mở menu (tay nắm)", it)
             // Gắn thất bại -> bỏ ghi nhận để watchdog thử dựng lại
             handleView = null
             handleParams = null
@@ -709,13 +742,16 @@ class OverlayService : Service() {
         )
         configTab = tab3
         val tab0 = CrosshairTab(this, crosshairSettings) { crosshair.ensure() }
+        val tab4 = DebugTab(this) { debugInfo() }
+        debugTab = tab4
 
-        // Thứ tự: 0 = Cài tâm ảo, 1 = Tạo nút chính, 2 = Chỉnh điểm nhấn, 3 = Cài cấu hình
+        // Thứ tự: 0 = Cài tâm ảo, 1 = Tạo nút chính, 2 = Chỉnh điểm nhấn, 3 = Cài cấu hình, 4 = Debug log
         val tabViews = listOf(
             tab0.build(),
             tab1.build(),
             tab2.build(),
             tab3.build(),
+            tab4.build(),
         )
         // Mỗi lần đóng menu là cả cửa sổ bị gỡ và dựng lại -> phải nhớ tab đang chọn ở ngoài,
         // nếu không sẽ luôn quay về tab 1.
@@ -727,6 +763,7 @@ class OverlayService : Service() {
         }
         if (startTab == 2) tab2.enter()
         if (startTab == 3) tab3.enter()
+        if (startTab == 4) tab4.enter()
         var shownTab = startTab
         shownTabIdx = startTab
         fun showTab(i: Int) {
@@ -737,10 +774,12 @@ class OverlayService : Service() {
             if (oldIdx == 1) tab1.exitEdit()   // rời tab Tạo nút chính -> thoát trạng thái chỉnh nút
             if (oldIdx == 2) tab2.exit()
             if (oldIdx == 3) tab3.exit()
+            if (oldIdx == 4) tab4.exit()
             dd.dismissNow()
             pr.close()
             if (i == 2) tab2.enter()
             if (i == 3) tab3.enter()
+            if (i == 4) tab4.enter()
             old.animate().cancel(); next.animate().cancel()
             old.animate().alpha(0f).setDuration(140L)
                 .withEndAction { if (shownTab != oldIdx) old.visibility = View.GONE }.start()
@@ -787,7 +826,10 @@ class OverlayService : Service() {
         panelAddedAt = SystemClock.uptimeMillis()
         applySolid(if (solid) 1f else 0f)
         circles.setMenuOpen(true)
-        runCatching { wm.addView(scrim, params) }.onFailure { removePanel() }
+        runCatching { wm.addView(scrim, params) }.onFailure {
+            DebugLog.e("Giao diện", "Không gắn được cửa sổ menu", it)
+            removePanel()
+        }
         startStatusTick()
     }
 
@@ -814,7 +856,7 @@ class OverlayService : Service() {
         return row
     }
 
-    private val tabNames = listOf("Cài tâm ảo", "Tạo nút chính", "Chỉnh điểm nhấn", "Cài cấu hình")
+    private val tabNames = listOf("Cài tâm ảo", "Tạo nút chính", "Chỉnh điểm nhấn", "Cài cấu hình", "Debug log")
 
     /** Cột bên trái: logo + tên app ở trên cùng, bên dưới là các tab xếp dọc. */
     private fun buildSidebar(initialTab: Int, onSelect: (Int) -> Unit): View {
@@ -1484,6 +1526,7 @@ class OverlayService : Service() {
         applySolid(solidAmount)
         startStatusTick()
         if (shownTabIdx == 2) pointsTab?.enter()
+        if (shownTabIdx == 4) debugTab?.enter()
     }
 
     private fun removePanel() {
@@ -1494,6 +1537,8 @@ class OverlayService : Service() {
         resetGhost()
         pointsTab?.exit()
         configTab?.exit()
+        debugTab?.dispose()
+        debugTab = null
         pointPicker.close()
         promptLayer?.close()
         inputActive = false
@@ -1517,6 +1562,24 @@ class OverlayService : Service() {
         confirmLayer = null
         confirmDialog = null
         eyeIcon = null
+    }
+
+    /** Vài dòng trạng thái hiện tại cho tab Debug log (nút "Kiểm tra" + đầu báo cáo khi sao chép). */
+    private fun debugInfo(): String {
+        val ver = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "?"
+        val wifiOn = runCatching { WifiAdbMonitor.isWifiAdbEnabled(this) }.getOrDefault(false)
+        val paired = runCatching { AdbLinkStore.isPaired(this) }.getOrDefault(false)
+        val linked = runCatching { ZynAdbConnectionManager.get(applicationContext).isConnected }.getOrDefault(false)
+        val w = TouchWatcher.current
+        fun yn(b: Boolean) = if (b) "có" else "không"
+        return buildString {
+            append("ZynTap $ver · Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) · ${Build.MANUFACTURER} ${Build.MODEL}\n")
+            append("Gỡ lỗi Wi-Fi bật: ${yn(wifiOn)} · Đã ghép nối: ${yn(paired)} · ADB đang nối: ${yn(linked)}\n")
+            append("Helper bơm cảm ứng: ${if (w == null) "chưa chạy" else if (w.proxyReady) "sẵn sàng (bơm được)" else "đang chạy nhưng chưa bơm được (dùng input tap)"}\n")
+            append("Quyền vẽ đè: ${yn(OverlayPermission.granted(this@OverlayService))} · Truy cập dữ liệu sử dụng: ${yn(UsageAccess.granted(this@OverlayService))}\n")
+            append("Tâm ảo: ${if (::crosshair.isInitialized) crosshair.state() else "?"}\n")
+            append("App đang theo dõi để tự đóng: ${targetPkg ?: "không có"}")
+        }
     }
 
     private fun removeViews() {
