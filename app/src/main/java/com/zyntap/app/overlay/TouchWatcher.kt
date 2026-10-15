@@ -26,6 +26,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.io.OutputStream
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -344,9 +345,15 @@ class TouchWatcher(
     @Volatile private var lastReinjectAt = 0L
     @Volatile private var reinjectGap = REINJECT_MIN_MS // giãn dần nếu bơm lại mà vẫn lỗi, về mức đầu khi bơm được
 
+    @Volatile private var stageAt = SystemClock.elapsedRealtime()
+
+    /** Dò cảm ứng / mở luồng ADB bị treo quá lâu (adbd không trả lời). */
+    private class AdbHangException(msg: String) : IOException(msg)
+
     private fun setStage(text: String, log: Boolean = true) {
         if (stage == text) return
         stage = text
+        stageAt = SystemClock.elapsedRealtime()
         if (log) DebugLog.i("Bơm", text)
     }
 
@@ -362,8 +369,29 @@ class TouchWatcher(
         reinjectGap = (reinjectGap * 2).coerceAtMost(REINJECT_MAX_MS)
         proxyFails = 0
         fastRetry = true
+        // Vòng theo dõi đang đứng im ở một bước (vd. dò getevent bị treo) mà không có luồng nào để đóng
+        // -> đóng luồng cũng vô ích. Huỷ hẳn vòng, ngắt ADB cũ rồi chạy lại từ đầu.
+        val stuckMs = now - stageAt
+        if (!proxyReady && running && stuckMs > STUCK_MS) {
+            DebugLog.w("Bơm", "Vòng theo dõi kẹt ở \"$stage\" ${stuckMs / 1000}s -> huỷ, ngắt ADB cũ và chạy lại")
+            restartLoop()
+            return
+        }
         val s = stream
         if (s != null) scope.launch { runCatching { s.close() } }
+    }
+
+    private fun restartLoop() {
+        job?.cancel()
+        val s = stream
+        stream = null
+        link = null
+        scope.launch {
+            if (s != null) runCatching { s.close() }
+            AdbSession.drop(app) // ngắt kết nối ADB nghi đã chết để lần sau nối mới
+        }
+        setStage("Khởi động lại vòng theo dõi cảm ứng")
+        job = scope.launch { loop() }
     }
 
     val running get() = job?.isActive == true
@@ -434,14 +462,25 @@ class TouchWatcher(
         job?.cancel()
         job = null
         val s = stream
+        val l = link
         stream = null
-        if (s != null) scope.launch { runCatching { s.close() } }
+        link = null
+        if (s != null) scope.launch {
+            // Bảo helper thoát gọn (nhả grab, huỷ ngón giả) rồi mới đóng luồng. Không chỉ dựa vào EOF:
+            // nếu helper còn sống sót sang lần mở app sau thì nó giữ grab cảm ứng làm lần sau lỗi.
+            if (l != null) {
+                runCatching { l.send("QUIT") }
+                delay(200)
+            }
+            runCatching { s.close() }
+        }
     }
 
     private suspend fun loop() {
         var device: TouchDevice? = null
         var useShell = false // false: exec:cat (thô, không pty); true: shell:stty raw; cat
         var failures = 0
+        var catStream: AdbStream? = null
         while (currentCoroutineContext().isActive) {
             val parser = InputEventParser { slot, down, rx, ry ->
                 val d = device ?: return@InputEventParser
@@ -462,9 +501,16 @@ class TouchWatcher(
                     continue
                 }
                 if (device == null) {
+                    device = loadCachedDevice()
+                    device?.let { DebugLog.i("Cảm ứng", "Dùng thiết bị cảm ứng đã nhớ: ${it.path} \"${it.name}\" (bỏ qua getevent)") }
+                }
+                if (device == null) {
                     setStage("Đang dò thiết bị cảm ứng (getevent)")
                     device = detect(manager)
-                    device?.let { DebugLog.i("Cảm ứng", "Thiết bị cảm ứng: ${it.path} \"${it.name}\" max=${it.maxX}x${it.maxY} áp lực=${it.maxPressure}") }
+                    device?.let {
+                        saveCachedDevice(it)
+                        DebugLog.i("Cảm ứng", "Thiết bị cảm ứng: ${it.path} \"${it.name}\" max=${it.maxX}x${it.maxY} áp lực=${it.maxPressure}")
+                    }
                 }
                 val dev = device
                 if (dev == null) {
@@ -472,6 +518,7 @@ class TouchWatcher(
                     delay(RETRY_MS * 3); continue
                 }
                 if (proxyFails < MAX_PROXY_FAILS) {
+                    killStaleHelpers(manager)
                     setStage("Đang chạy helper bơm trên ${dev.path} (chờ READY)")
                     val ok = runProxy(manager, dev)
                     proxyFails = if (ok) 0 else proxyFails + 1
@@ -483,7 +530,7 @@ class TouchWatcher(
                         DebugLog.e("Bơm", "Helper bơm cảm ứng thoát mà chưa READY (lần $proxyFails/$MAX_PROXY_FAILS) trên ${dev.path} — ROM chặn app_process/grab hoặc sai node cảm ứng")
                         if (proxyFails >= MAX_PROXY_FAILS) DebugLog.e("Bơm", "Bỏ helper, lùi về đọc thô `cat` + click bằng `input tap` (không bơm chung luồng được)")
                     }
-                    if (!ok) device = null // lần sau dò lại đường dẫn cảm ứng
+                    if (!ok) { device = null; clearCachedDevice() } // lần sau dò lại đường dẫn cảm ứng
                     delay(if (fastRetry) FAST_RETRY_MS else RETRY_MS)
                     fastRetry = false
                     continue
@@ -492,8 +539,9 @@ class TouchWatcher(
                 setStage("Đọc thô bằng cat (helper không bơm được) — sẽ thử bơm lại sau ${PROXY_RETRY_MS / 1000}s")
                 val cmd = if (useShell) "shell:stty raw -echo 2>/dev/null; exec cat ${dev.path}"
                 else "exec:cat ${dev.path}"
-                val s = manager.openStream(cmd)
+                val s = openTimed(manager, cmd)
                 stream = s
+                catStream = s
                 reaper = scope.launch {
                     delay(PROXY_RETRY_MS)
                     proxyFails = 0
@@ -511,6 +559,13 @@ class TouchWatcher(
                 }
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: AdbHangException) {
+                // adbd không trả lời (kết nối nửa sống nửa chết) -> bỏ kết nối này, nối lại
+                DebugLog.e("Bơm", "ADB treo: ${e.message} -> ngắt kết nối cũ để nối lại")
+                setStage("ADB treo, đang nối lại")
+                scope.launch { AdbSession.drop(app) }
+                delay(RETRY_MS)
+                continue
             } catch (e: Exception) {
                 // mất kết nối / luồng không phải input_event -> thử lại bên dưới
                 DebugLog.w("Cảm ứng", "Luồng đọc cảm ứng bị ngắt (nhận $received byte)", e)
@@ -518,9 +573,10 @@ class TouchWatcher(
                 reaper?.cancel()
                 parser.reset()
                 main.post { sink.onLost() } // huỷ các nút đang giữ, không để kẹt
-                val s = stream
-                stream = null
-                if (s != null) runCatching { s.close() }
+                // Chỉ đóng luồng CỦA MÌNH (vòng cũ bị huỷ thức dậy muộn không được đóng luồng của vòng mới)
+                val s = catStream
+                catStream = null
+                if (s != null) { if (stream === s) stream = null; runCatching { s.close() } }
             }
             // Chưa nhận được byte nào / sai định dạng: đổi kiểu mở luồng, rồi dò lại thiết bị
             if (received == 0L || framer.recordSize == 0) {
@@ -546,7 +602,7 @@ class TouchWatcher(
             "com.zyntap.app.shell.InputProxy dev=${dev.path} maxx=${dev.maxX} maxy=${dev.maxY} " +
             "maxp=${dev.maxPressure} maxmaj=${dev.maxMajor} w=${b.width()} h=${b.height()} rot=${rotation()} " +
             "name=${URLEncoder.encode(dev.name, "UTF-8")}"
-        val s = manager.openStream(cmd)
+        val s = openTimed(manager, cmd)
         stream = s
         val l = ProxyLink(s)
         link = l
@@ -615,10 +671,10 @@ class TouchWatcher(
             beat.cancel()
             readyGuard.cancel()
             l.injecting = false
-            link = null
+            if (link === l) link = null
             l.failAll()
             runCatching { s.close() }
-            stream = null
+            if (stream === s) stream = null
             main.post { sink.onLost() }
         }
         sawReady
@@ -635,28 +691,114 @@ class TouchWatcher(
         main.post { sink.onFinger(slot, down, x, y) }
     }
 
-    /** Chạy 1 lệnh shell (không pty), đọc hết đầu ra chữ. Rỗng nếu lỗi. */
-    private suspend fun runText(manager: ZynAdbConnectionManager, cmd: String): String = withContext(Dispatchers.IO) {
-        val sb = StringBuilder()
-        for (prefix in arrayOf("exec:", "shell:")) {
-            val s = try { manager.openStream(prefix + cmd) } catch (_: Exception) { continue }
+    /**
+     * Mở luồng ADB có thời hạn. `openStream` của libadb chờ adbd trả lời không giới hạn: nếu kết nối đã
+     * nửa chết thì treo vĩnh viễn (đây chính là chỗ kẹt "Đang dò thiết bị cảm ứng" ở lần mở app thứ 2).
+     */
+    private suspend fun openTimed(manager: ZynAdbConnectionManager, cmd: String): AdbStream {
+        val done = CompletableDeferred<AdbStream>()
+        scope.launch {
             try {
-                s.openInputStream().bufferedReader().use { r ->
-                    val cb = CharArray(4096)
-                    while (sb.length < 400_000) {
-                        val n = r.read(cb)
-                        if (n < 0) break
-                        sb.append(cb, 0, n)
-                    }
-                }
-            } catch (_: Exception) {
-            } finally {
-                runCatching { s.close() }
+                val s = manager.openStream(cmd)
+                if (!done.complete(s)) runCatching { s.close() } // đến muộn: không ai cần nữa
+            } catch (t: Throwable) {
+                done.completeExceptionally(t)
             }
-            if (sb.isNotBlank()) break
         }
-        sb.toString()
+        try {
+            val s = withTimeoutOrNull(OPEN_TIMEOUT_MS) { done.await() }
+            if (s != null) return s
+        } catch (e: CancellationException) {
+            done.completeExceptionally(e)
+            throw e
+        }
+        done.completeExceptionally(AdbHangException("mở luồng quá ${OPEN_TIMEOUT_MS / 1000}s"))
+        throw AdbHangException("mở luồng \"${cmd.take(40)}\" quá ${OPEN_TIMEOUT_MS / 1000}s")
     }
+
+    /**
+     * Chạy 1 lệnh shell (không pty), đọc hết đầu ra chữ. Rỗng nếu lỗi.
+     * @throws AdbHangException nếu lệnh không xong trong [CMD_TIMEOUT_MS] (adbd treo).
+     */
+    private suspend fun runText(manager: ZynAdbConnectionManager, cmd: String): String {
+        val opened = ArrayList<AdbStream>()
+        val work = CompletableDeferred<String>()
+        scope.launch {
+            val sb = StringBuilder()
+            try {
+                for (prefix in arrayOf("exec:", "shell:")) {
+                    val s = try { manager.openStream(prefix + cmd) } catch (_: Exception) { continue }
+                    synchronized(opened) { opened.add(s) }
+                    try {
+                        s.openInputStream().bufferedReader().use { r ->
+                            val cb = CharArray(4096)
+                            while (sb.length < 400_000) {
+                                val n = r.read(cb)
+                                if (n < 0) break
+                                sb.append(cb, 0, n)
+                            }
+                        }
+                    } catch (_: Exception) {
+                    } finally {
+                        runCatching { s.close() }
+                    }
+                    if (sb.isNotBlank()) break
+                }
+            } finally {
+                work.complete(sb.toString())
+            }
+        }
+        val r = try {
+            withTimeoutOrNull(CMD_TIMEOUT_MS) { work.await() }
+        } catch (e: CancellationException) {
+            closeAll(opened); throw e
+        }
+        if (r == null) {
+            closeAll(opened)
+            throw AdbHangException("lệnh \"${cmd.take(40)}\" không xong sau ${CMD_TIMEOUT_MS / 1000}s")
+        }
+        return r
+    }
+
+    private fun closeAll(list: MutableList<AdbStream>) {
+        val copy = synchronized(list) { ArrayList(list) }
+        scope.launch { copy.forEach { runCatching { it.close() } } }
+    }
+
+    /**
+     * Diệt helper cũ còn sống sót (app bị tắt/kill khi helper đang chạy, ADB đứt không báo...). Helper cũ
+     * giữ EVIOCGRAB nên helper mới không grab được -> click phải lùi về `input tap`. Mẫu `[c]om...` để
+     * lệnh `sh -c` của chính nó không tự khớp mẫu.
+     */
+    private suspend fun killStaleHelpers(manager: ZynAdbConnectionManager) {
+        val pat = "[c]om.zyntap.app.shell.InputProxy"
+        val out = runText(manager, "pkill -f '$pat'; sleep 0.3; pkill -9 -f '$pat'; echo ZYN_CLEAN_DONE")
+        if (!out.contains("ZYN_CLEAN_DONE")) DebugLog.w("Bơm", "Dọn helper cũ không xác nhận: ${out.take(120)}")
+    }
+
+    // ---- nhớ thiết bị cảm ứng để lần mở sau khỏi chạy getevent (bước từng bị treo) -------------
+
+    private val prefs get() = app.getSharedPreferences("zyntap_touch", Context.MODE_PRIVATE)
+
+    private fun saveCachedDevice(d: TouchDevice) {
+        runCatching {
+            prefs.edit().putString(
+                "dev",
+                listOf(d.path, d.maxX, d.maxY, URLEncoder.encode(d.name, "UTF-8"), d.maxPressure, d.maxMajor).joinToString("|"),
+            ).apply()
+        }
+    }
+
+    private fun clearCachedDevice() { runCatching { prefs.edit().remove("dev").apply() } }
+
+    private fun loadCachedDevice(): TouchDevice? = runCatching {
+        val t = (prefs.getString("dev", null) ?: return null).split('|')
+        if (t.size < 6 || !PATH_RE.matches(t[0])) return null
+        TouchDevice(
+            t[0], t[1].toIntOrNull() ?: return null, t[2].toIntOrNull() ?: return null,
+            URLDecoder.decode(t[3], "UTF-8"), t[4].toIntOrNull() ?: 0, t[5].toIntOrNull() ?: 0,
+        )
+    }.getOrNull()
 
     private suspend fun detect(manager: ZynAdbConnectionManager): TouchDevice? {
         TouchDeviceFinder.parseGetevent(runText(manager, "getevent -lp"))?.let { return it }
@@ -675,6 +817,10 @@ class TouchWatcher(
         private const val REINJECT_MAX_MS = 120_000L
         private const val PROXY_RETRY_MS = 30_000L
         private const val REINJECT_MIN_MS = 8_000L
+        /** Một bước (dò cảm ứng, mở luồng...) đứng im quá lâu thì coi là kẹt. */
+        private const val STUCK_MS = 15_000L
+        private const val OPEN_TIMEOUT_MS = 8_000L
+        private const val CMD_TIMEOUT_MS = 8_000L
         /** Thời gian giữ của một click (ms): đủ để game/app nhận trọn DOWN rồi UP. */
         const val TAP_HOLD_MS = 40L
         private val PATH_RE = Regex("^/dev/input/event\\d+$")
