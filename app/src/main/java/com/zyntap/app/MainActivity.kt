@@ -11,6 +11,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import com.zyntap.app.data.DebugLog
+import com.zyntap.app.overlay.CrosshairOverlay
 import com.zyntap.app.overlay.OverlayPermission
 import com.zyntap.app.overlay.OverlayService
 import com.zyntap.app.overlay.UsageAccess
@@ -35,6 +37,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        DebugLog.init(this)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
@@ -52,6 +55,8 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         // Menu nổi đang bật mà bị mất (bị kill, cập nhật app...) -> bật lại khi mở app
         OverlayService.restoreIfWanted(this)
+        // Menu đã tắt mà vẫn còn tâm ảo / vòng kẹt trên màn hình (lần tắt trước bị lỗi giữa chừng) -> gỡ ngay
+        if (!OverlayService.wanted(this)) runCatching { CrosshairOverlay.sweepOrphans() }
     }
 
     private fun requestNextPermission() {
