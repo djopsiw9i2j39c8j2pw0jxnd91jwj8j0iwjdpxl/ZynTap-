@@ -2,6 +2,8 @@ package com.zyntap.app.overlay
 
 import android.content.Context
 import android.graphics.Rect
+import android.view.Surface
+import android.view.WindowManager
 import com.zyntap.app.data.AdbSession
 import com.zyntap.app.data.ZynAdbConnectionManager
 import io.github.muntashirakon.adb.AdbStream
@@ -28,6 +30,13 @@ class PointRunner(
     private val timer = Executors.newSingleThreadScheduledExecutor()
     private val injectionLock = Mutex()
     private var lastReport = 0L
+    private val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    // Ngón thật: ghi input_event vào slot riêng của /dev/input/eventN -> không làm mất vuốt của người dùng.
+    private val injector = RawTouchInjector()
+    private var fallbackNoticeShown = false
+
+    @Suppress("DEPRECATION")
+    private fun rotation(): Int = runCatching { wm.defaultDisplay.rotation }.getOrDefault(Surface.ROTATION_0)
 
     private fun message(text: String) {
         val now = android.os.SystemClock.uptimeMillis()
@@ -108,18 +117,19 @@ class PointRunner(
                                     ensureActive()
                                     withContext(Dispatchers.IO) {
                                         try {
-                                            tap(manager, run, step)
+                                            tap(manager, run, step, screen)
                                         } catch (e: java.io.IOException) {
                                             // Bị huỷ chủ động (nhả ngón/xoay màn hình) thì không nối lại
                                             ensureActive()
                                             // Kết nối chết giữa chừng -> nối lại 1 lần rồi thử lại bước này
                                             AdbSession.drop(context)
+                                            injector.reset()
                                             val link = AdbSession.connect(context, attempts = 1)
                                             if (link !is AdbSession.Link.Connected) {
                                                 throw IllegalStateException("ADB đã ngắt, đang nối lại. Thử lại sau giây lát.")
                                             }
                                             ensureActive()
-                                            tap(manager, run, step)
+                                            tap(manager, run, step, screen)
                                         }
                                     }
                                 }
@@ -142,7 +152,29 @@ class PointRunner(
         }
     }
 
-    private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap) {
+    /**
+     * Ưu tiên chạm "ngón thật" (ghi thẳng vào tấm cảm ứng, slot riêng). Nếu máy không cho
+     * (không đa chạm kiểu B / shell không ghi được /dev/input) thì lùi về `input tap` như cũ.
+     */
+    private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap, screen: Rect) {
+        currentCoroutineContext().ensureActive()
+        when (val prep = injector.prepare(manager)) {
+            RawTouchInjector.Prep.Ready -> {
+                injector.tap(point.x, point.y, rotation(), screen.width(), screen.height())
+                return
+            }
+            is RawTouchInjector.Prep.Unsupported -> if (!fallbackNoticeShown) {
+                fallbackNoticeShown = true
+                withContext(Dispatchers.Main.immediate) {
+                    message("Không chạm thật được (${prep.reason}). Dùng input tap, có thể làm mất vuốt.")
+                }
+            }
+            is RawTouchInjector.Prep.Transient -> Unit // lần này lùi input tap, lần sau thử lại đường thật
+        }
+        legacyTap(manager, run, point)
+    }
+
+    private suspend fun legacyTap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap) {
         currentCoroutineContext().ensureActive()
         // Only validated integer coordinates enter the command. Never execute editor text.
         val stream = manager.openStream("shell:input tap ${point.x} ${point.y}; echo ZYN_EXIT:\$?")
@@ -177,6 +209,7 @@ class PointRunner(
 
     fun close() {
         stopAll()
+        injector.close()
         scope.cancel()
         timer.shutdownNow()
     }

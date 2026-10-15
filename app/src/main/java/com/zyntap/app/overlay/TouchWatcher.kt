@@ -31,7 +31,19 @@ interface TouchSink {
 }
 
 /** Thông số cảm ứng: node `/dev/input/eventN` + khoảng giá trị thô của trục X/Y. */
-data class TouchDevice(val path: String, val maxX: Int, val maxY: Int)
+data class TouchDevice(
+    val path: String,
+    val maxX: Int,
+    val maxY: Int,
+    /** ABS_MT_SLOT max (số slot - 1); -1 = không biết / không có slot (giao thức A). */
+    val maxSlot: Int = -1,
+    /** ABS_MT_TRACKING_ID max (thường 65535). */
+    val maxTrackingId: Int = 65535,
+    /** ABS_MT_TOUCH_MAJOR max; -1 = máy không có trục này. */
+    val touchMajorMax: Int = -1,
+    /** ABS_MT_PRESSURE max; -1 = máy không có trục này. */
+    val pressureMax: Int = -1,
+)
 
 /**
  * Máy trạng thái đa chạm kiểu B, ăn thẳng các `struct input_event` ĐÃ GIẢI MÃ NHỊ PHÂN
@@ -213,6 +225,10 @@ object TouchDeviceFinder {
         var direct = false
         var mx = -1
         var my = -1
+        var slotMax = -1
+        var trackMax = -1
+        var majorMax = -1
+        var pressMax = -1
         fun score(): Int {
             var s = 0
             if (direct) s += 4
@@ -245,10 +261,24 @@ object TouchDeviceFinder {
                     c.mx = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
                 line.contains("ABS_MT_POSITION_Y") ->
                     c.my = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+                line.contains("ABS_MT_SLOT") ->
+                    c.slotMax = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+                line.contains("ABS_MT_TRACKING_ID") ->
+                    c.trackMax = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+                line.contains("ABS_MT_TOUCH_MAJOR") ->
+                    c.majorMax = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+                line.contains("ABS_MT_PRESSURE") ->
+                    c.pressMax = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
             }
         }
         val best = all.filter { it.mx > 0 && it.my > 0 }.maxByOrNull { it.score() } ?: return null
-        return TouchDevice(best.path, best.mx, best.my)
+        return TouchDevice(
+            best.path, best.mx, best.my,
+            maxSlot = best.slotMax,
+            maxTrackingId = if (best.trackMax > 0) best.trackMax else 65535,
+            touchMajorMax = best.majorMax,
+            pressureMax = best.pressMax,
+        )
     }
 
     /**
@@ -328,6 +358,10 @@ class TouchWatcher(
         while (currentCoroutineContext().isActive) {
             val parser = InputEventParser { slot, down, rx, ry ->
                 val d = device ?: return@InputEventParser
+                // Ngón do chính app bơm vào (slot riêng): không phải ngón của người dùng -> bỏ qua,
+                // để không kích hoạt nút main và không tính vào "đang có ngón thật chạm".
+                if (TouchRegistry.isInjectedSlot(slot)) return@InputEventParser
+                TouchRegistry.onPhysical(slot, down)
                 val b = screen()
                 val (x, y) = InputEventParser.toScreen(rx, ry, d, rotation(), b.width(), b.height())
                 main.post { sink.onFinger(slot, down, x, y) }
@@ -342,14 +376,16 @@ class TouchWatcher(
                     delay(RETRY_MS)
                     continue
                 }
-                device = device ?: detect(manager)
+                device = device ?: TouchRegistry.detect(manager)
                 val dev = device
                 if (dev == null) { delay(RETRY_MS * 3); continue }
+                TouchRegistry.device = dev
                 val cmd = if (useShell) "shell:stty raw -echo 2>/dev/null; exec cat ${dev.path}"
                 else "exec:cat ${dev.path}"
                 val s = manager.openStream(cmd)
                 stream = s
                 val input = s.openInputStream()
+                TouchRegistry.watching = true
                 val chunk = ByteArray(4096)
                 while (true) {
                     val n = input.read(chunk)
@@ -357,6 +393,7 @@ class TouchWatcher(
                     if (n == 0) continue
                     received += n
                     framer.feed(chunk, n)
+                    if (framer.recordSize != 0) TouchRegistry.recordSize = framer.recordSize
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -364,6 +401,8 @@ class TouchWatcher(
                 // mất kết nối / luồng không phải input_event -> thử lại bên dưới
             } finally {
                 parser.reset()
+                TouchRegistry.watching = false
+                TouchRegistry.clearPhysical()
                 main.post { sink.onLost() } // huỷ các nút đang giữ, không để kẹt
                 val s = stream
                 stream = null
@@ -379,35 +418,6 @@ class TouchWatcher(
             }
             delay(RETRY_MS)
         }
-    }
-
-    /** Chạy 1 lệnh shell (không pty), đọc hết đầu ra chữ. Rỗng nếu lỗi. */
-    private suspend fun runText(manager: ZynAdbConnectionManager, cmd: String): String = withContext(Dispatchers.IO) {
-        val sb = StringBuilder()
-        for (prefix in arrayOf("exec:", "shell:")) {
-            val s = try { manager.openStream(prefix + cmd) } catch (_: Exception) { continue }
-            try {
-                s.openInputStream().bufferedReader().use { r ->
-                    val cb = CharArray(4096)
-                    while (sb.length < 400_000) {
-                        val n = r.read(cb)
-                        if (n < 0) break
-                        sb.append(cb, 0, n)
-                    }
-                }
-            } catch (_: Exception) {
-            } finally {
-                runCatching { s.close() }
-            }
-            if (sb.isNotBlank()) break
-        }
-        sb.toString()
-    }
-
-    private suspend fun detect(manager: ZynAdbConnectionManager): TouchDevice? {
-        TouchDeviceFinder.parseGetevent(runText(manager, "getevent -lp"))?.let { return it }
-        val size = TouchDeviceFinder.parseWmSize(runText(manager, "wm size")) ?: return null
-        return TouchDeviceFinder.parseProc(runText(manager, "cat /proc/bus/input/devices"), size.first, size.second)
     }
 
     private companion object {
