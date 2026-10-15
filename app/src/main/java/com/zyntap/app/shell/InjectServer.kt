@@ -24,9 +24,13 @@ import java.lang.reflect.InvocationTargetException
  *  - pressure / size / touchMajor / touchMinor sao chép từ ngón thật gần nhất.
  *
  * Giao thức (mỗi dòng một lệnh, mỗi lệnh đúng một dòng trả lời):
- *   PING                                     -> OK
- *   T x y holdMs pointerId pressure size major minor orientation -> OK | ERR <lý do>
- *   Q                                        -> (thoát)
+ *   PING                                                   -> OK
+ *   N <tên tấm cảm ứng>                                    -> OK  (dùng đúng device-id của tấm cảm ứng thật)
+ *   D x y id pressure size major minor orient n [id x y]*n -> OK | ERR <lý do>   (ngón ảo chạm xuống)
+ *   U x y id pressure size major minor orient n [id x y]*n -> OK | ERR <lý do>   (ngón ảo nhả)
+ *   Q                                                      -> (thoát, tự nhả ngón ảo đang giữ)
+ * `n` + các bộ [id x y] = các ngón THẬT đang chạm (toạ độ mới nhất). Có ngón thật -> ngón ảo đi như ngón
+ * thứ hai của cùng cử chỉ (POINTER_DOWN/UP kèm đủ các ngón), không thì chạm đơn (DOWN/UP).
  * Dòng đầu tiên server in ra: ZYN_READY <thông tin> hoặc ZYN_FAIL <lý do>.
  */
 object InjectServer {
@@ -58,6 +62,7 @@ object InjectServer {
             out.println(reply)
             out.flush()
         }
+        injector.release()
         System.exit(0)
     }
 
@@ -65,21 +70,30 @@ object InjectServer {
         val p = line.split(' ')
         return when (p[0]) {
             "PING" -> "OK"
-            "T" -> {
-                if (p.size < 10) return "ERR lệnh T thiếu tham số"
+            "N" -> {
+                val name = line.removePrefix("N").trim()
+                injector.useDevice(name) // không thấy tên thì giữ id tự dò
+                "OK"
+            }
+            "D", "U" -> {
+                if (p.size < 10) return "ERR lệnh ${p[0]} thiếu tham số"
                 val x = p[1].toFloat()
                 val y = p[2].toFloat()
-                val hold = p[3].toLong().coerceIn(0L, 2_000L)
-                val id = p[4].toInt().coerceIn(0, 31)
+                val id = p[3].toInt().coerceIn(0, 31)
                 val finger = Finger(
-                    pressure = p[5].toFloat().coerceIn(0f, 1f),
-                    size = p[6].toFloat().coerceIn(0f, 1f),
-                    major = p[7].toFloat().coerceAtLeast(0f),
-                    minor = p[8].toFloat().coerceAtLeast(0f),
-                    orientation = p[9].toFloat(),
+                    pressure = p[4].toFloat().coerceIn(0f, 1f),
+                    size = p[5].toFloat().coerceIn(0f, 1f),
+                    major = p[6].toFloat().coerceAtLeast(0f),
+                    minor = p[7].toFloat().coerceAtLeast(0f),
+                    orientation = p[8].toFloat(),
                 )
+                val n = p[9].toInt().coerceIn(0, 10)
+                if (p.size < 10 + n * 3) return "ERR lệnh ${p[0]} thiếu ngón thật"
+                val others = List(n) { i ->
+                    Ptr(p[10 + i * 3].toInt().coerceIn(0, 31), p[11 + i * 3].toFloat(), p[12 + i * 3].toFloat())
+                }.filter { it.id != id }
                 if (x < 0f || y < 0f || x > 20_000f || y > 20_000f) return "ERR toạ độ không hợp lệ"
-                injector.tap(x, y, hold, id, finger)
+                if (p[0] == "D") injector.down(x, y, id, finger, others) else injector.up(x, y, id, finger, others)
                 "OK"
             }
             else -> "ERR lệnh lạ: ${p[0]}"
@@ -100,11 +114,18 @@ object InjectServer {
         val orientation: Float,
     )
 
+    /** Một ngón thật đang chạm (id + toạ độ pixel). */
+    private class Ptr(val id: Int, val x: Float, val y: Float)
+
     private class Injector {
         private val send: (InputEvent) -> Boolean
         private val route: String
-        private val deviceId: Int
-        private val touchName: String
+        private var deviceId: Int
+        private var touchName: String
+
+        /** Lần chạm ảo đang mở (đã DOWN, chưa UP). */
+        private class Open(val downTime: Long, val id: Int, val joined: Boolean, val f: Finger, val x: Float, val y: Float)
+        private var openTap: Open? = null
 
         init {
             val resolved = resolveInject()
@@ -112,48 +133,98 @@ object InjectServer {
             route = resolved.second
             val touch = findTouchDevice()
             touchName = touch?.let { "${it.name}#${it.id}" } ?: "?"
-            deviceId = pickDeviceId(touch)
+            // CÙNG device-id với tấm cảm ứng thật: lần chạm ảo là ngón thêm trong cùng cử chỉ, không cắt ngón thật
+            deviceId = touch?.id ?: -1
         }
 
-        fun info(): String = "sdk=${Build.VERSION.SDK_INT} route=$route touch=$touchName fakeDevice=$deviceId"
+        fun info(): String = "sdk=${Build.VERSION.SDK_INT} route=$route touch=$touchName device=$deviceId"
 
-        fun tap(x: Float, y: Float, holdMs: Long, pointerId: Int, f: Finger) {
+        /** Chọn tấm cảm ứng theo tên app đã dò từ /dev/input (chính xác hơn đoán theo tên). */
+        fun useDevice(name: String): Boolean {
+            if (name.isBlank()) return false
+            return runCatching {
+                for (id in InputDevice.getDeviceIds()) {
+                    val d = InputDevice.getDevice(id) ?: continue
+                    if (d.isVirtual || d.name != name) continue
+                    if ((d.sources and InputDevice.SOURCE_TOUCHSCREEN) != InputDevice.SOURCE_TOUCHSCREEN) continue
+                    deviceId = id
+                    touchName = "${d.name}#$id"
+                    return@runCatching true
+                }
+                false
+            }.getOrDefault(false)
+        }
+
+        /** Ngón ảo chạm xuống. [others] = các ngón thật đang chạm (rỗng = chạm đơn). */
+        fun down(x: Float, y: Float, id: Int, f: Finger, others: List<Ptr>) {
+            release() // phòng khi lần trước chưa kịp nhả
+            val joined = others.isNotEmpty()
             val downTime = SystemClock.uptimeMillis()
-            if (!inject(MotionEvent.ACTION_DOWN, x, y, downTime, downTime, pointerId, f, f.pressure)) {
+            val all = (others + Ptr(id, x, y)).sortedBy { it.id }
+            val index = all.indexOfFirst { it.id == id }
+            val action = if (joined) MotionEvent.ACTION_POINTER_DOWN or (index shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+            else MotionEvent.ACTION_DOWN
+            openTap = Open(downTime, id, joined, f, x, y)
+            if (!inject(action, all, downTime, downTime, f, id)) {
+                openTap = null
                 throw IllegalStateException("hệ thống từ chối DOWN")
             }
-            var upOk = false
-            try {
-                if (holdMs > 0) Thread.sleep(holdMs)
-            } finally {
-                // Luôn nhả, kể cả khi bị ngắt giữa chừng -> không bao giờ kẹt một ngón ảo
-                upOk = inject(MotionEvent.ACTION_UP, x, y, downTime, SystemClock.uptimeMillis(), pointerId, f, 0f)
-            }
-            if (!upOk) throw IllegalStateException("hệ thống từ chối UP")
         }
 
-        private fun inject(
-            action: Int, x: Float, y: Float, downTime: Long, eventTime: Long,
-            pointerId: Int, f: Finger, pressure: Float,
-        ): Boolean {
-            val props = MotionEvent.PointerProperties().apply {
-                id = pointerId
-                toolType = MotionEvent.TOOL_TYPE_FINGER
+        /** Ngón ảo nhả. [others] = các ngón thật còn chạm lúc này, toạ độ MỚI NHẤT. */
+        fun up(x: Float, y: Float, id: Int, f: Finger, others: List<Ptr>) {
+            val o = openTap ?: return
+            openTap = null
+            val joined = o.joined && others.isNotEmpty() // ngón thật đã nhả hết -> cử chỉ đã kết thúc, chỉ còn UP đơn
+            val all = (if (joined) others + Ptr(id, x, y) else listOf(Ptr(id, x, y))).sortedBy { it.id }
+            val index = all.indexOfFirst { it.id == id }
+            val action = if (joined) MotionEvent.ACTION_POINTER_UP or (index shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+            else MotionEvent.ACTION_UP
+            if (!inject(action, all, o.downTime, SystemClock.uptimeMillis(), f, id)) {
+                throw IllegalStateException("hệ thống từ chối UP")
             }
-            val coords = MotionEvent.PointerCoords().apply {
-                this.x = x
-                this.y = y
-                this.pressure = pressure
-                size = f.size
-                touchMajor = f.major
-                touchMinor = f.minor
-                toolMajor = f.major
-                toolMinor = f.minor
-                orientation = f.orientation
+        }
+
+        /** Nhả ngón ảo đang giữ (nếu có): gọi khi thoát / khi có DOWN mới / khi luồng ADB đứt. */
+        fun release() {
+            val o = openTap ?: return
+            openTap = null
+            val action = if (o.joined) {
+                MotionEvent.ACTION_POINTER_UP
+            } else MotionEvent.ACTION_UP
+            runCatching { inject(action, listOf(Ptr(o.id, o.x, o.y)), o.downTime, SystemClock.uptimeMillis(), o.f, o.id) }
+        }
+
+        /** Tiêm một MotionEvent gồm [pointers] (đã sắp theo id); [activeId] là ngón ảo (dùng thông số ngón gốc [f]). */
+        private fun inject(
+            action: Int, pointers: List<Ptr>, downTime: Long, eventTime: Long, f: Finger, activeId: Int,
+        ): Boolean {
+            val props = Array(pointers.size) { i ->
+                MotionEvent.PointerProperties().apply {
+                    id = pointers[i].id
+                    toolType = MotionEvent.TOOL_TYPE_FINGER
+                }
+            }
+            val isUp = (action and MotionEvent.ACTION_MASK).let {
+                it == MotionEvent.ACTION_UP || it == MotionEvent.ACTION_POINTER_UP
+            }
+            val coords = Array(pointers.size) { i ->
+                MotionEvent.PointerCoords().apply {
+                    x = pointers[i].x
+                    y = pointers[i].y
+                    // Lúc nhả, áp lực của chính ngón ảo = 0 như ngón thật khi nhấc lên
+                    pressure = if (isUp && pointers[i].id == activeId) 0f else f.pressure
+                    size = f.size
+                    touchMajor = f.major
+                    touchMinor = f.minor
+                    toolMajor = f.major
+                    toolMinor = f.minor
+                    orientation = f.orientation
+                }
             }
             val event = MotionEvent.obtain(
-                downTime, eventTime, action, 1,
-                arrayOf(props), arrayOf(coords),
+                downTime, eventTime, action, pointers.size,
+                props, coords,
                 0, 0, 1f, 1f, deviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, 0,
             )
             return try {
@@ -180,16 +251,6 @@ object InjectServer {
             }
             best
         }.getOrNull()
-
-        /** device-id giả: -1 (thiết bị ảo của hệ thống); nếu lỡ trùng tấm cảm ứng thì lùi dần. */
-        private fun pickDeviceId(touch: Dev?): Int {
-            var id = -1
-            val taken = runCatching { InputDevice.getDeviceIds().toSet() }.getOrDefault(emptySet())
-                .filter { InputDevice.getDevice(it)?.isVirtual == false }
-                .toSet()
-            while (id == touch?.id || id in taken) id--
-            return id
-        }
 
         private companion object {
             const val MODE_ASYNC = 0
