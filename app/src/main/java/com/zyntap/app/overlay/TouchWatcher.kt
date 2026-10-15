@@ -30,20 +30,36 @@ interface TouchSink {
     fun onLost()
 }
 
-/** Thông số cảm ứng: node `/dev/input/eventN` + khoảng giá trị thô của trục X/Y. */
+/**
+ * Thông số cảm ứng: node `/dev/input/eventN` + khoảng giá trị thô của trục X/Y,
+ * và (nếu máy có) giá trị lớn nhất của áp lực / vùng chạm để đổi ngón thật sang đơn vị MotionEvent.
+ */
 data class TouchDevice(
     val path: String,
     val maxX: Int,
     val maxY: Int,
-    /** ABS_MT_SLOT max (số slot - 1); -1 = không biết / không có slot (giao thức A). */
-    val maxSlot: Int = -1,
-    /** ABS_MT_TRACKING_ID max (thường 65535). */
-    val maxTrackingId: Int = 65535,
-    /** ABS_MT_TOUCH_MAJOR max; -1 = máy không có trục này. */
-    val touchMajorMax: Int = -1,
-    /** ABS_MT_PRESSURE max; -1 = máy không có trục này. */
-    val pressureMax: Int = -1,
+    val maxPressure: Int = 0,
+    val maxMajor: Int = 0,
+    val maxMinor: Int = 0,
 )
+
+/** Thông số của ngón thật gần nhất, đã đổi sang đơn vị MotionEvent (pressure/size 0..1, vùng chạm theo pixel). */
+data class FingerProfile(
+    val pressure: Float,
+    val size: Float,
+    val touchMajor: Float,
+    val touchMinor: Float,
+    val orientation: Float,
+)
+
+/** Nguồn "ngón gốc" cho bộ tiêm chạm: thông số để sao chép và pointer-id còn trống. */
+interface FingerSource {
+    /** Thông số ngón thật gần nhất; null nếu chưa thấy ngón nào / máy không báo. */
+    val profile: FingerProfile?
+
+    /** Pointer-id nhỏ nhất chưa có ngón thật nào dùng (Android cũng cấp id theo kiểu "nhỏ nhất còn trống"). */
+    fun freePointerId(): Int
+}
 
 /**
  * Máy trạng thái đa chạm kiểu B, ăn thẳng các `struct input_event` ĐÃ GIẢI MÃ NHỊ PHÂN
@@ -51,8 +67,15 @@ data class TouchDevice(
  * Thuần Kotlin, không phụ thuộc Android -> test được.
  * Chỉ báo "ngón chạm xuống" và "ngón nhả" (toạ độ thô); không báo di chuyển.
  */
-class InputEventParser(private val emit: (slot: Int, down: Boolean, rawX: Int, rawY: Int) -> Unit) {
+class InputEventParser(
+    /** Gọi ngay trước khi báo "ngón chạm xuống": giá trị thô áp lực / trục lớn / trục nhỏ (-1 = máy không báo). */
+    private val onDownProfile: (pressure: Int, major: Int, minor: Int) -> Unit = { _, _, _ -> },
+    private val emit: (slot: Int, down: Boolean, rawX: Int, rawY: Int) -> Unit,
+) {
     private class Slot {
+        var pressure = -1
+        var major = -1
+        var minor = -1
         var active = false
         var wantDown = false
         var wantUp = false
@@ -81,8 +104,14 @@ class InputEventParser(private val emit: (slot: Int, down: Boolean, rawX: Int, r
                         s.wantUp = false
                         s.hasX = false
                         s.hasY = false
+                        s.pressure = -1
+                        s.major = -1
+                        s.minor = -1
                     }
                 }
+                ABS_MT_PRESSURE -> slot().pressure = value
+                ABS_MT_TOUCH_MAJOR -> slot().major = value
+                ABS_MT_TOUCH_MINOR -> slot().minor = value
                 ABS_MT_POSITION_X -> slot().apply { x = value; hasX = true }
                 ABS_MT_POSITION_Y -> slot().apply { y = value; hasY = true }
             }
@@ -103,6 +132,7 @@ class InputEventParser(private val emit: (slot: Int, down: Boolean, rawX: Int, r
             if (s.wantDown && s.hasX && s.hasY) {
                 s.wantDown = false
                 s.active = true
+                onDownProfile(s.pressure, s.major, s.minor)
                 emit(id, true, s.x, s.y)
             }
             if (s.wantUp) {
@@ -125,6 +155,9 @@ class InputEventParser(private val emit: (slot: Int, down: Boolean, rawX: Int, r
         const val SYN_REPORT = 0x00
         const val BTN_TOUCH = 0x14a
         const val ABS_MT_SLOT = 0x2f
+        const val ABS_MT_TOUCH_MAJOR = 0x30
+        const val ABS_MT_TOUCH_MINOR = 0x31
+        const val ABS_MT_PRESSURE = 0x3a
         const val ABS_MT_POSITION_X = 0x35
         const val ABS_MT_POSITION_Y = 0x36
         const val ABS_MT_TRACKING_ID = 0x39
@@ -225,10 +258,9 @@ object TouchDeviceFinder {
         var direct = false
         var mx = -1
         var my = -1
-        var slotMax = -1
-        var trackMax = -1
-        var majorMax = -1
-        var pressMax = -1
+        var pmax = 0
+        var majmax = 0
+        var minmax = 0
         fun score(): Int {
             var s = 0
             if (direct) s += 4
@@ -261,24 +293,16 @@ object TouchDeviceFinder {
                     c.mx = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
                 line.contains("ABS_MT_POSITION_Y") ->
                     c.my = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
-                line.contains("ABS_MT_SLOT") ->
-                    c.slotMax = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
-                line.contains("ABS_MT_TRACKING_ID") ->
-                    c.trackMax = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
-                line.contains("ABS_MT_TOUCH_MAJOR") ->
-                    c.majorMax = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
                 line.contains("ABS_MT_PRESSURE") ->
-                    c.pressMax = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+                    c.pmax = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                line.contains("ABS_MT_TOUCH_MAJOR") ->
+                    c.majmax = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                line.contains("ABS_MT_TOUCH_MINOR") ->
+                    c.minmax = MAX_RE.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             }
         }
         val best = all.filter { it.mx > 0 && it.my > 0 }.maxByOrNull { it.score() } ?: return null
-        return TouchDevice(
-            best.path, best.mx, best.my,
-            maxSlot = best.slotMax,
-            maxTrackingId = if (best.trackMax > 0) best.trackMax else 65535,
-            touchMajorMax = best.majorMax,
-            pressureMax = best.pressMax,
-        )
+        return TouchDevice(best.path, best.mx, best.my, best.pmax, best.majmax, best.minmax)
     }
 
     /**
@@ -325,7 +349,7 @@ class TouchWatcher(
     context: Context,
     private val screen: () -> Rect,
     private val sink: TouchSink,
-) {
+) : FingerSource {
     private val app = context.applicationContext
     private val wm = app.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val main = Handler(Looper.getMainLooper())
@@ -334,6 +358,65 @@ class TouchWatcher(
     @Volatile private var stream: AdbStream? = null
 
     val running get() = job?.isActive == true
+
+    // ---- "ngón gốc": thông số + pointer-id đang dùng (cho bộ tiêm chạm) ----------------------
+
+    @Volatile
+    override var profile: FingerProfile? = null
+        private set
+
+    private val idLock = Any()
+    private val slotIds = HashMap<Int, Int>()
+    private var usedIds = 0 // bit n = pointer-id n đang có ngón thật
+
+    private fun lowestFree(): Int {
+        var id = 0
+        while (id < MAX_POINTER_ID && ((usedIds shr id) and 1) == 1) id++
+        return id
+    }
+
+    private fun claimId(slot: Int) {
+        synchronized(idLock) {
+            if (slotIds.containsKey(slot)) return
+            val id = lowestFree()
+            usedIds = usedIds or (1 shl id)
+            slotIds[slot] = id
+        }
+    }
+
+    private fun releaseId(slot: Int) {
+        synchronized(idLock) {
+            val id = slotIds.remove(slot) ?: return
+            usedIds = usedIds and (1 shl id).inv()
+        }
+    }
+
+    private fun clearIds() {
+        synchronized(idLock) { slotIds.clear(); usedIds = 0 }
+    }
+
+    override fun freePointerId(): Int = synchronized(idLock) { lowestFree() }
+
+    /** Đổi giá trị thô của ngón vừa chạm xuống sang đơn vị MotionEvent rồi nhớ lại làm "ngón gốc". */
+    private fun noteProfile(dev: TouchDevice, rawPressure: Int, rawMajor: Int, rawMinor: Int) {
+        val hasPressure = dev.maxPressure > 0 && rawPressure > 0
+        val hasMajor = dev.maxMajor > 0 && rawMajor > 0
+        if (!hasPressure && !hasMajor) return // máy không báo gì -> giữ mặc định của bộ tiêm
+        val w = screen().width().coerceAtLeast(1)
+        val px = w.toFloat() / (dev.maxX + 1).coerceAtLeast(1) // trục lớn/nhỏ cùng đơn vị với trục X
+        val major = if (hasMajor) (rawMajor * px).coerceAtLeast(1f) else 0f
+        val minor = when {
+            dev.maxMinor > 0 && rawMinor > 0 -> (rawMinor * px).coerceAtLeast(1f)
+            else -> major
+        }
+        profile = FingerProfile(
+            pressure = if (hasPressure) (rawPressure.toFloat() / dev.maxPressure).coerceIn(0.05f, 1f) else 1f,
+            size = if (hasMajor) (rawMajor.toFloat() / dev.maxMajor).coerceIn(0f, 1f) else 1f,
+            touchMajor = major,
+            touchMinor = minor,
+            orientation = 0f,
+        )
+    }
 
     @Suppress("DEPRECATION")
     private fun rotation(): Int = runCatching { wm.defaultDisplay.rotation }.getOrDefault(Surface.ROTATION_0)
@@ -356,12 +439,11 @@ class TouchWatcher(
         var useShell = false // false: exec:cat (thô, không pty); true: shell:stty raw; cat
         var failures = 0
         while (currentCoroutineContext().isActive) {
-            val parser = InputEventParser { slot, down, rx, ry ->
+            val parser = InputEventParser(onDownProfile = { p, maj, min ->
+                device?.let { noteProfile(it, p, maj, min) }
+            }) { slot, down, rx, ry ->
                 val d = device ?: return@InputEventParser
-                // Ngón do chính app bơm vào (slot riêng): không phải ngón của người dùng -> bỏ qua,
-                // để không kích hoạt nút main và không tính vào "đang có ngón thật chạm".
-                if (TouchRegistry.isInjectedSlot(slot)) return@InputEventParser
-                TouchRegistry.onPhysical(slot, down)
+                if (down) claimId(slot) else releaseId(slot)
                 val b = screen()
                 val (x, y) = InputEventParser.toScreen(rx, ry, d, rotation(), b.width(), b.height())
                 main.post { sink.onFinger(slot, down, x, y) }
@@ -376,16 +458,14 @@ class TouchWatcher(
                     delay(RETRY_MS)
                     continue
                 }
-                device = device ?: TouchRegistry.detect(manager)
+                device = device ?: detect(manager)
                 val dev = device
                 if (dev == null) { delay(RETRY_MS * 3); continue }
-                TouchRegistry.device = dev
                 val cmd = if (useShell) "shell:stty raw -echo 2>/dev/null; exec cat ${dev.path}"
                 else "exec:cat ${dev.path}"
                 val s = manager.openStream(cmd)
                 stream = s
                 val input = s.openInputStream()
-                TouchRegistry.watching = true
                 val chunk = ByteArray(4096)
                 while (true) {
                     val n = input.read(chunk)
@@ -393,7 +473,6 @@ class TouchWatcher(
                     if (n == 0) continue
                     received += n
                     framer.feed(chunk, n)
-                    if (framer.recordSize != 0) TouchRegistry.recordSize = framer.recordSize
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -401,8 +480,7 @@ class TouchWatcher(
                 // mất kết nối / luồng không phải input_event -> thử lại bên dưới
             } finally {
                 parser.reset()
-                TouchRegistry.watching = false
-                TouchRegistry.clearPhysical()
+                clearIds()
                 main.post { sink.onLost() } // huỷ các nút đang giữ, không để kẹt
                 val s = stream
                 stream = null
@@ -420,7 +498,37 @@ class TouchWatcher(
         }
     }
 
+    /** Chạy 1 lệnh shell (không pty), đọc hết đầu ra chữ. Rỗng nếu lỗi. */
+    private suspend fun runText(manager: ZynAdbConnectionManager, cmd: String): String = withContext(Dispatchers.IO) {
+        val sb = StringBuilder()
+        for (prefix in arrayOf("exec:", "shell:")) {
+            val s = try { manager.openStream(prefix + cmd) } catch (_: Exception) { continue }
+            try {
+                s.openInputStream().bufferedReader().use { r ->
+                    val cb = CharArray(4096)
+                    while (sb.length < 400_000) {
+                        val n = r.read(cb)
+                        if (n < 0) break
+                        sb.append(cb, 0, n)
+                    }
+                }
+            } catch (_: Exception) {
+            } finally {
+                runCatching { s.close() }
+            }
+            if (sb.isNotBlank()) break
+        }
+        sb.toString()
+    }
+
+    private suspend fun detect(manager: ZynAdbConnectionManager): TouchDevice? {
+        TouchDeviceFinder.parseGetevent(runText(manager, "getevent -lp"))?.let { return it }
+        val size = TouchDeviceFinder.parseWmSize(runText(manager, "wm size")) ?: return null
+        return TouchDeviceFinder.parseProc(runText(manager, "cat /proc/bus/input/devices"), size.first, size.second)
+    }
+
     private companion object {
         const val RETRY_MS = 3_000L
+        const val MAX_POINTER_ID = 30
     }
 }

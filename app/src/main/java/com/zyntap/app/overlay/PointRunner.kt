@@ -2,8 +2,6 @@ package com.zyntap.app.overlay
 
 import android.content.Context
 import android.graphics.Rect
-import android.view.Surface
-import android.view.WindowManager
 import com.zyntap.app.data.AdbSession
 import com.zyntap.app.data.ZynAdbConnectionManager
 import io.github.muntashirakon.adb.AdbStream
@@ -30,14 +28,25 @@ class PointRunner(
     private val timer = Executors.newSingleThreadScheduledExecutor()
     private val injectionLock = Mutex()
     private var lastReport = 0L
-    private val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    // Ngón thật: ghi input_event vào slot riêng của /dev/input/eventN -> không làm mất vuốt của người dùng.
-    private val injector = RawTouchInjector()
-    private var fallbackNoticeShown = false
-    private var okNoticeShown = false
 
-    @Suppress("DEPRECATION")
-    private fun rotation(): Int = runCatching { wm.defaultDisplay.rotation }.getOrDefault(Surface.ROTATION_0)
+    /** Bộ tiêm chạm riêng (clone thông số ngón gốc, không đè lên cử chỉ của ngón thật). */
+    private val injector = TouchInjector(context)
+
+    /** Nguồn "ngón gốc" (thông số + pointer-id trống); gán sau khi dựng. Null = dùng giá trị mặc định. */
+    var fingers: FingerSource? = null
+
+    private var announcedReady = false
+    private var lastFallbackNote = 0L
+
+    /** Khởi động sẵn tiến trình tiêm ở nền để lần nhấn đầu không bị trễ. Gọi thoải mái, tự bỏ qua nếu chưa cần. */
+    fun warmUp() {
+        if (injector.isUp) return
+        scope.launch(Dispatchers.IO) {
+            val manager = ZynAdbConnectionManager.get(context)
+            if (!manager.isConnected) return@launch
+            injector.warmUp(manager)
+        }
+    }
 
     private fun message(text: String) {
         val now = android.os.SystemClock.uptimeMillis()
@@ -118,19 +127,18 @@ class PointRunner(
                                     ensureActive()
                                     withContext(Dispatchers.IO) {
                                         try {
-                                            tap(manager, run, step, screen)
+                                            tap(manager, run, step)
                                         } catch (e: java.io.IOException) {
                                             // Bị huỷ chủ động (nhả ngón/xoay màn hình) thì không nối lại
                                             ensureActive()
                                             // Kết nối chết giữa chừng -> nối lại 1 lần rồi thử lại bước này
                                             AdbSession.drop(context)
-                                            injector.reset()
                                             val link = AdbSession.connect(context, attempts = 1)
                                             if (link !is AdbSession.Link.Connected) {
                                                 throw IllegalStateException("ADB đã ngắt, đang nối lại. Thử lại sau giây lát.")
                                             }
                                             ensureActive()
-                                            tap(manager, run, step, screen)
+                                            tap(manager, run, step)
                                         }
                                     }
                                 }
@@ -153,42 +161,28 @@ class PointRunner(
         }
     }
 
-    /**
-     * Ưu tiên chạm "ngón thật" (ghi thẳng vào tấm cảm ứng, slot riêng). Nếu máy không cho
-     * (không đa chạm kiểu B / shell không ghi được /dev/input) thì lùi về `input tap` như cũ.
-     */
-    private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap, screen: Rect) {
+    private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap) {
         currentCoroutineContext().ensureActive()
-        when (val prep = injector.prepare(manager)) {
-            RawTouchInjector.Prep.Ready -> {
-                try {
-                    injector.tap(point.x, point.y, rotation(), screen.width(), screen.height())
-                    if (!okNoticeShown && injector.verified) {
-                        okNoticeShown = true
-                        withContext(Dispatchers.Main.immediate) { message("Chạm thật OK: ${injector.summary}") }
-                    }
-                    return
-                } catch (e: RawTouchInjector.Ignored) {
-                    if (!fallbackNoticeShown) {
-                        fallbackNoticeShown = true
-                        withContext(Dispatchers.Main.immediate) {
-                            message("Chạm thật không được (${e.message}; ${injector.summary}). Dùng input tap.")
-                        }
-                    }
-                    // rơi xuống legacyTap bên dưới cho bước này
-                }
+        // Ưu tiên bộ tiêm riêng: device-id riêng + pointer-id trống + thông số clone từ ngón gốc,
+        // nên không làm đứt ngón thật đang vuốt. Không dùng được thì lùi về `input tap` như trước.
+        val source = fingers
+        if (injector.tap(manager, point.x, point.y, source?.freePointerId() ?: 0, source?.profile)) {
+            if (!announcedReady) {
+                announcedReady = true
+                scope.launch { message("Tiêm chạm riêng: BẬT (${injector.info})") }
             }
-            is RawTouchInjector.Prep.Unsupported -> if (!fallbackNoticeShown) {
-                fallbackNoticeShown = true
-                withContext(Dispatchers.Main.immediate) {
-                    message("Không chạm thật được (${prep.reason}). Dùng input tap, có thể làm mất vuốt.")
-                }
-            }
-            is RawTouchInjector.Prep.Transient -> Unit // lần này lùi input tap, lần sau thử lại đường thật
+            return
+        }
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastFallbackNote > 60_000L) {
+            lastFallbackNote = now
+            val why = injector.lastError.ifBlank { "không rõ lý do" }
+            scope.launch { message("Không bật được tiêm chạm riêng ($why). Đang dùng click cũ, có thể làm đứt ngón vuốt.") }
         }
         legacyTap(manager, run, point)
     }
 
+    /** Đường lui: `input tap` (dùng chung device-id với ngón thật nên có thể làm đứt cử chỉ đang vuốt). */
     private suspend fun legacyTap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap) {
         currentCoroutineContext().ensureActive()
         // Only validated integer coordinates enter the command. Never execute editor text.
@@ -224,8 +218,8 @@ class PointRunner(
 
     fun close() {
         stopAll()
-        injector.close()
         scope.cancel()
         timer.shutdownNow()
+        injector.close()
     }
 }
