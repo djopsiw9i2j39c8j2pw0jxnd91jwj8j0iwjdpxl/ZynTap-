@@ -10,6 +10,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import com.zyntap.app.data.AdbSession
 import com.zyntap.app.data.ZynAdbConnectionManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -27,7 +28,11 @@ enum class Foreground {
     TARGET,
     /** Màn hình chính (launcher mặc định), không phải màn hình đa nhiệm. */
     HOME,
-    /** App / cửa sổ khác (tin nhắn, bong bóng chat, cài đặt, ZynTap...) -> KHÔNG coi là thoát. */
+    /** Màn hình đa nhiệm / System UI: người dùng đang chuyển app -> chưa kết luận gì. */
+    RECENTS,
+    /** Chính ZynTap (đang chỉnh menu...) -> KHÔNG coi là thoát. */
+    OWN,
+    /** App khác đang ở trên cùng. Giữ đủ lâu thì coi là đã rời app. */
     OTHER,
     /** Không đọc được / không hiểu kết quả -> tạm dừng, KHÔNG đoán. */
     UNKNOWN,
@@ -67,12 +72,34 @@ object ForegroundParser {
         return out.toList()
     }
 
-    fun classify(items: List<ResumedComponent>, target: String, homePkgs: Set<String>): Foreground {
+    private val windowRecord =
+        Regex("Window\\{\\S+\\s+u-?\\d+\\s+([\\w.]+)/([\\w.\\$]+)")
+
+    /** Dự phòng thứ 2: `dumpsys window | grep mCurrentFocus` ("mCurrentFocus=Window{.. u0 pkg/cls}"). */
+    fun parseCurrentFocus(text: String): List<ResumedComponent> {
+        val out = LinkedHashSet<ResumedComponent>()
+        for (line in text.lineSequence()) {
+            if (!line.contains("mCurrentFocus", ignoreCase = true)) continue
+            val m = windowRecord.find(line) ?: continue
+            out += ResumedComponent(m.groupValues[1], m.groupValues[2])
+        }
+        return out.toList()
+    }
+
+    fun classify(
+        items: List<ResumedComponent>,
+        target: String,
+        homePkgs: Set<String>,
+        own: String = "",
+    ): Foreground {
         if (items.isEmpty()) return Foreground.UNKNOWN
         if (items.any { it.pkg == target }) return Foreground.TARGET
         // Màn hình đa nhiệm cũng do launcher vẽ (RecentsActivity) -> không tính là "về màn hình chính"
-        val homeOnly = items.all { it.pkg in homePkgs && !it.cls.contains("recents", ignoreCase = true) }
-        return if (homeOnly) Foreground.HOME else Foreground.OTHER
+        if (items.any { it.cls.contains("recents", ignoreCase = true) }) return Foreground.RECENTS
+        if (own.isNotEmpty() && items.any { it.pkg == own }) return Foreground.OWN
+        if (items.all { it.pkg in homePkgs }) return Foreground.HOME
+        if (items.all { it.pkg == "com.android.systemui" }) return Foreground.RECENTS
+        return Foreground.OTHER
     }
 
     /** Ghép 2 phép đo "pidof" và "ps" thành 1 kết luận; chỉ NO khi cả hai cùng khẳng định không còn. */
@@ -95,33 +122,39 @@ object ForegroundParser {
 /**
  * Máy trạng thái quyết định khi nào coi là "đã thoát app". Thuần Kotlin, thời gian truyền vào -> test được.
  *
- * Nguyên tắc: thà đóng chậm còn hơn đóng nhầm. Chỉ đóng khi:
- *  1. Đã từng thấy app ở trên cùng (armed) rồi người dùng về MÀN HÌNH CHÍNH liên tục [Limits.homeMs], hoặc
- *  2. Đã armed và tiến trình app biến mất liên tục [Limits.deadMs] (vuốt tắt / bị kill / force stop), hoặc
- *  3. Mở app mà mãi không thấy app lên (mở lỗi) sau [Limits.launchMs].
+ * Chỉ đóng khi (đã từng thấy app ở trên cùng = armed):
+ *  1. Về MÀN HÌNH CHÍNH liên tục [Limits.homeMs], hoặc
+ *  2. Một app KHÁC (không phải ZynTap) ở trên cùng liên tục [Limits.otherMs], hoặc
+ *  3. Tiến trình app biến mất liên tục [Limits.deadMs] (vuốt tắt / bị kill / force stop), hoặc
+ *  4. Mở app mà mãi không thấy app lên (mở lỗi) sau [Limits.launchMs].
  *
- * Không coi là thoát: đang load game (app chưa lên trên cùng), kéo thanh thông báo, tin nhắn / bong bóng chat /
- * cửa sổ app khác, bàn phím, màn hình đa nhiệm, tắt màn hình / khoá máy, mất kết nối ADB, đọc lỗi.
+ * Không coi là thoát: đang load game (app chưa lên trên cùng), kéo thanh thông báo, bàn phím, màn hình đa nhiệm,
+ * chính ZynTap, tắt màn hình / khoá máy, mất kết nối ADB, đọc lỗi.
  */
 class ExitTracker(
     private val startedAt: Long,
     private val limits: Limits = Limits(),
+    startArmed: Boolean = false,
 ) {
     data class Limits(
-        val homeMs: Long = 6_000,
-        val deadMs: Long = 10_000,
+        val homeMs: Long = 1_500,
+        val otherMs: Long = 5_000,
+        val deadMs: Long = 3_000,
         val launchMs: Long = 45_000,
         val launchAliveMs: Long = 180_000,
     )
 
-    var armed = false
+    /** startArmed: theo dõi lại app đã chạy từ trước (service bị dựng lại) -> không cần chờ thấy app lên trên cùng. */
+    var armed = startArmed
         private set
     private var homeSince = NONE
+    private var otherSince = NONE
     private var deadSince = NONE
 
     /** Không đo được tin cậy (tắt màn hình, mất ADB...): xoá đồng hồ đếm, KHÔNG tính là thoát. */
     fun pause() {
         homeSince = NONE
+        otherSince = NONE
         deadSince = NONE
     }
 
@@ -131,6 +164,7 @@ class ExitTracker(
             Foreground.TARGET -> {
                 armed = true
                 homeSince = NONE
+                otherSince = NONE
                 deadSince = NONE
                 return false
             }
@@ -139,13 +173,23 @@ class ExitTracker(
                 return false
             }
             Foreground.HOME -> {
+                otherSince = NONE
                 if (!armed) homeSince = NONE
                 else if (homeSince == NONE) homeSince = now
             }
-            Foreground.OTHER -> homeSince = NONE
+            Foreground.OTHER -> {
+                homeSince = NONE
+                if (!armed) otherSince = NONE
+                else if (otherSince == NONE) otherSince = now
+            }
+            Foreground.RECENTS, Foreground.OWN -> {
+                homeSince = NONE
+                otherSince = NONE
+            }
         }
         if (armed) {
             if (homeSince != NONE && now - homeSince >= limits.homeMs) return true
+            if (otherSince != NONE && now - otherSince >= limits.otherMs) return true
             if (alive == Alive.NO) {
                 if (deadSince == NONE) deadSince = now
                 if (now - deadSince >= limits.deadMs) return true
@@ -182,8 +226,14 @@ class AppExitWatcher(context: Context, private val onExit: () -> Unit) {
     var target: String? = null
         private set
 
-    /** Bắt đầu (hoặc bắt đầu lại, cho thêm thời gian mở app) theo dõi [pkg]. Gọi từ luồng chính. */
-    fun watch(pkg: String) {
+    /** Vòng theo dõi còn chạy không (để service tự dựng lại nếu nó chết lặng lẽ). */
+    val isRunning: Boolean get() = job?.isActive == true
+
+    /**
+     * Bắt đầu (hoặc bắt đầu lại, cho thêm thời gian mở app) theo dõi [pkg]. Gọi từ luồng chính.
+     * [resume] = true: app đã chạy từ trước (service bị dựng lại) -> coi như đã thấy app, không chờ nó lên trên cùng.
+     */
+    fun watch(pkg: String, resume: Boolean = false) {
         job?.cancel()
         job = null
         if (!PKG.matches(pkg)) { // chỉ nhận tên gói hợp lệ vì tên này đi vào lệnh shell
@@ -192,7 +242,7 @@ class AppExitWatcher(context: Context, private val onExit: () -> Unit) {
         }
         target = pkg
         val myGen = ++gen
-        job = scope.launch { loop(pkg, myGen) }
+        job = scope.launch { loop(pkg, myGen, resume) }
     }
 
     fun stop() {
@@ -207,27 +257,26 @@ class AppExitWatcher(context: Context, private val onExit: () -> Unit) {
         scope.cancel()
     }
 
-    private suspend fun loop(pkg: String, myGen: Int) {
-        val tracker = ExitTracker(SystemClock.elapsedRealtime())
+    private suspend fun loop(pkg: String, myGen: Int, resume: Boolean) {
+        val tracker = ExitTracker(SystemClock.elapsedRealtime(), startArmed = resume)
         var homePkgs = homePackages()
         var homeCheckedAt = SystemClock.elapsedRealtime()
         while (currentCoroutineContext().isActive) {
             delay(POLL_MS)
-            val t0 = SystemClock.elapsedRealtime()
-            if (t0 - homeCheckedAt > HOME_REFRESH_MS) { // người dùng có thể đổi launcher
-                homePkgs = homePackages()
-                homeCheckedAt = t0
+            val exit = try {
+                val t0 = SystemClock.elapsedRealtime()
+                if (t0 - homeCheckedAt > HOME_REFRESH_MS) { // người dùng có thể đổi launcher
+                    homePkgs = homePackages()
+                    homeCheckedAt = t0
+                }
+                sample(tracker, pkg, homePkgs)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                tracker.pause() // lỗi bất ngờ: bỏ qua nhịp này, KHÔNG để vòng theo dõi chết
+                false
             }
-            if (!screenUsable()) { tracker.pause(); continue }
-            val manager = ZynAdbConnectionManager.get(app)
-            if (!manager.isConnected) {
-                AdbSession.ensureInBackground(app)
-                tracker.pause()
-                continue
-            }
-            val fg = foreground(manager, pkg, homePkgs)
-            val alive = if (fg == Foreground.TARGET) Alive.YES else processAlive(manager, pkg)
-            if (tracker.onSample(SystemClock.elapsedRealtime(), fg, alive)) {
+            if (exit) {
                 main.post {
                     if (gen == myGen && target == pkg) {
                         target = null
@@ -237,6 +286,20 @@ class AppExitWatcher(context: Context, private val onExit: () -> Unit) {
                 return
             }
         }
+    }
+
+    /** Một nhịp đo. @return true = nên đóng menu nổi. */
+    private suspend fun sample(tracker: ExitTracker, pkg: String, homePkgs: Set<String>): Boolean {
+        if (!screenUsable()) { tracker.pause(); return false }
+        val manager = ZynAdbConnectionManager.get(app)
+        if (!manager.isConnected) {
+            AdbSession.ensureInBackground(app)
+            tracker.pause()
+            return false
+        }
+        val fg = foreground(manager, pkg, homePkgs)
+        val alive = if (fg == Foreground.TARGET) Alive.YES else processAlive(manager, pkg)
+        return tracker.onSample(SystemClock.elapsedRealtime(), fg, alive)
     }
 
     private fun screenUsable(): Boolean {
@@ -262,13 +325,20 @@ class AppExitWatcher(context: Context, private val onExit: () -> Unit) {
     }
 
     private suspend fun foreground(manager: ZynAdbConnectionManager, pkg: String, home: Set<String>): Foreground {
-        val a = runShell(manager, "dumpsys activity activities | grep -i resumedactivity") ?: return Foreground.UNKNOWN
-        var items = ForegroundParser.parseResumed(a)
-        if (items.isEmpty()) {
-            val w = runShell(manager, "dumpsys window | grep -i mfocusedapp") ?: return Foreground.UNKNOWN
-            items = ForegroundParser.parseFocusedApp(w)
+        var answered = false
+        var items = emptyList<ResumedComponent>()
+        runShell(manager, "dumpsys activity activities | grep -i resumedactivity")?.let {
+            answered = true
+            items = ForegroundParser.parseResumed(it)
         }
-        return ForegroundParser.classify(items, pkg, home)
+        if (items.isEmpty()) {
+            runShell(manager, "dumpsys window | grep -iE 'mfocusedapp|mcurrentfocus'")?.let {
+                answered = true
+                items = ForegroundParser.parseFocusedApp(it) + ForegroundParser.parseCurrentFocus(it)
+            }
+        }
+        if (!answered) return Foreground.UNKNOWN
+        return ForegroundParser.classify(items, pkg, home, app.packageName)
     }
 
     private suspend fun processAlive(manager: ZynAdbConnectionManager, pkg: String): Alive {
@@ -323,7 +393,7 @@ class AppExitWatcher(context: Context, private val onExit: () -> Unit) {
     private companion object {
         val PKG = Regex("^[A-Za-z0-9_.]+$")
         const val END = "ZYN_END_5c1e"
-        const val POLL_MS = 1_500L
+        const val POLL_MS = 1_000L
         const val HOME_REFRESH_MS = 30_000L
         const val CMD_TIMEOUT_MS = 5_000L
         const val MAX_CHARS = 400_000

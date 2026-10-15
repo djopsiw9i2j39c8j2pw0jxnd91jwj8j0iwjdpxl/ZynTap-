@@ -199,7 +199,8 @@ class OverlayService : Service() {
             return
         }
         val saved = prefs.getString(KEY_TARGET, null) ?: return
-        if (exitWatcher.target != saved) exitWatcher.watch(saved)
+        // App đã chạy từ trước -> resume=true: không chờ "thấy app lên trên cùng" mới bắt đầu canh thoát
+        if (exitWatcher.target != saved || !exitWatcher.isRunning) exitWatcher.watch(saved, resume = true)
     }
 
     /** Người dùng đã thoát app (xem [ExitTracker]) -> đóng menu nổi như khi bấm X, nhưng không hỏi lại. */
@@ -229,6 +230,7 @@ class OverlayService : Service() {
     private fun checkHealth() {
         // Tự nối lại ADB khi mất kết nối (sau cập nhật app, bật lại gỡ lỗi Wi-Fi, đổi mạng...)
         AdbSession.ensureInBackground(this)
+        if (!closing && wanted(this)) trackTargetApp(null) // vòng canh thoát app chết lặng lẽ -> dựng lại
         val h = handleView
         if (h == null) {
             ensureHandle()
