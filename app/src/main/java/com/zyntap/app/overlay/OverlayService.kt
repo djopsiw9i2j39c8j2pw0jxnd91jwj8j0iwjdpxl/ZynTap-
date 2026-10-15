@@ -106,6 +106,15 @@ class OverlayService : Service() {
     private var editDimAnim: ValueAnimator? = null
     private val handler = Handler(Looper.getMainLooper())
 
+    // ---- tự ẩn / hiện theo app đã chọn ----
+    private lateinit var fgWatcher: ForegroundWatcher
+    private var targetPkg: String? = null  // app đã chọn (null = không tự ẩn/hiện như bản cũ)
+    private var seenTarget = false         // đã thấy app đã chọn hiện lên phía trước chưa
+    private var targetSince = 0L           // lúc bắt đầu theo dõi (để có thời gian chờ app mở)
+    private var offCount = 0               // số lần dò liên tiếp thấy KHÔNG phải app đã chọn
+    private var autoHidden = false         // đang ẩn hẳn vì người dùng đã thoát app đã chọn
+    private var destroyed = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -141,6 +150,7 @@ class OverlayService : Service() {
             else pointRunner.cancelTouch(button.id)
         }
         circles.onCancel = { id -> pointRunner.cancelTouch(id) }
+        fgWatcher = ForegroundWatcher(this) { resumed -> onResumedApps(resumed) }
         startForegroundWithNotification()
     }
 
@@ -159,9 +169,26 @@ class OverlayService : Service() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
-                ensureHandle()
-                circles.ensureAll()
+                val newTarget = intent?.getStringExtra(EXTRA_TARGET)
+                if (newTarget != null) {
+                    // Người dùng vừa mở app từ ZynTap: chờ app lên trước rồi mới theo dõi chuyện thoát
+                    targetPkg = newTarget
+                    prefs.edit().putString(KEY_TARGET, newTarget).apply()
+                    seenTarget = false
+                    targetSince = SystemClock.uptimeMillis()
+                    offCount = 0
+                    autoHidden = false
+                } else if (targetPkg == null) {
+                    // Service dựng lại (bị kill / cập nhật app / mở lại ZynTap): lấy app đã lưu
+                    targetPkg = prefs.getString(KEY_TARGET, null)
+                    seenTarget = true
+                }
+                if (!autoHidden) {
+                    ensureHandle()
+                    circles.ensureAll()
+                }
                 startWatchdog()
+                if (targetPkg != null) fgWatcher.start()
                 AdbSession.ensureInBackground(this)
             }
         }
@@ -169,6 +196,8 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        destroyed = true
+        fgWatcher.stop()
         pointPicker.close()
         pointRunner.close()
         handler.removeCallbacksAndMessages(null)
@@ -178,6 +207,47 @@ class OverlayService : Service() {
         editDimAnim?.cancel()
         removeViews()
         super.onDestroy()
+    }
+
+    // ---- tự ẩn khi thoát app đã chọn, tự hiện lại khi vào lại ----------------
+
+    /** Dò thấy các app đang resumed (chạy trên luồng chính). */
+    private fun onResumedApps(resumed: Set<String>) {
+        if (destroyed || closing) return
+        val target = targetPkg ?: return
+        if (target in resumed) {
+            seenTarget = true
+            offCount = 0
+            if (autoHidden) showAfterAutoHide()
+            return
+        }
+        // Hộp thoại hệ thống / thanh trạng thái thoáng qua: không coi là đã thoát app
+        if ((resumed - TRANSIENT_PKGS).isEmpty()) return
+        // Vừa bấm mở app từ ZynTap: cho app thời gian lên màn hình, đừng ẩn vội
+        if (!seenTarget && SystemClock.uptimeMillis() - targetSince < LAUNCH_GRACE_MS) return
+        if (autoHidden) return
+        if (++offCount >= LEAVE_CONFIRM) hideForLeave()
+    }
+
+    /** Thoát app đã chọn -> gỡ toàn bộ UI nổi (nút tab, menu, các nút main), dừng mọi tác vụ đang chạy. */
+    private fun hideForLeave() {
+        autoHidden = true
+        pointRunner.stopAll()
+        circles.cancelTouches()
+        solidAnim?.cancel()
+        editDimAnim?.cancel()
+        panelAnimating = false
+        handleDragging = false
+        removeViews()
+    }
+
+    /** Vào lại app đã chọn (không cần qua ZynTap) -> dựng lại UI nổi. */
+    private fun showAfterAutoHide() {
+        autoHidden = false
+        ensureHandle()
+        handleView?.alpha = 1f
+        circles.ensureAll()
+        startWatchdog()
     }
 
     // ---- tự khôi phục khi menu nổi bị mất ----------------------------------
@@ -198,6 +268,7 @@ class OverlayService : Service() {
     private fun checkHealth() {
         // Tự nối lại ADB khi mất kết nối (sau cập nhật app, bật lại gỡ lỗi Wi-Fi, đổi mạng...)
         AdbSession.ensureInBackground(this)
+        if (autoHidden) return // đang ẩn vì đã thoát app đã chọn: không dựng lại
         val h = handleView
         if (h == null) {
             ensureHandle()
@@ -1470,6 +1541,7 @@ class OverlayService : Service() {
         const val ACTION_SHOW = "com.zyntap.app.overlay.SHOW"
         const val ACTION_HIDE = "com.zyntap.app.overlay.HIDE"
         const val ACTION_STOP = "com.zyntap.app.overlay.STOP"
+        const val EXTRA_TARGET = "target_package"
         private const val NOTIF_ID = 1001
         private const val GHOST_SHRINK = 0.06f
         private const val PANEL_MAX_W_FRAC = 0.94f
@@ -1496,6 +1568,7 @@ class OverlayService : Service() {
         private const val KEY_Y_RATIO = "handle_y_ratio"
         private const val KEY_SOLID = "solid_mode"
         private const val KEY_TAB = "active_tab"
+        private const val KEY_TARGET = "target_pkg"
         // Độ đặc (0..255) của nền card và nền tối phía sau: mặc định (trong suốt) và khi tắt trong suốt
         private const val CARD_ALPHA = 0xF2
         private const val SCRIM_ALPHA = 0x66
@@ -1505,6 +1578,15 @@ class OverlayService : Service() {
         private const val STATUS_MS = 1500L
         private const val WATCHDOG_MS = 2000L
         private const val ATTACH_GRACE_MS = 1500L
+
+        private const val LAUNCH_GRACE_MS = 8_000L // chờ app đã chọn mở lên trước khi tính là "đã thoát"
+        private const val LEAVE_CONFIRM = 2        // cần 2 lần dò liên tiếp mới ẩn (tránh nhấp nháy)
+        private val TRANSIENT_PKGS = setOf(
+            "android",
+            "com.android.systemui",
+            "com.android.permissioncontroller",
+            "com.google.android.permissioncontroller",
+        )
 
         private fun setWanted(context: Context, value: Boolean) {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_WANTED, value).apply()
@@ -1521,9 +1603,14 @@ class OverlayService : Service() {
             }
         }
 
-        fun start(context: Context) {
+        /**
+         * @param targetPackage app người dùng vừa chọn: menu nổi chỉ hiện khi app này ở phía trước.
+         *   Null = giữ nguyên app đã chọn trước đó (dùng khi khôi phục).
+         */
+        fun start(context: Context, targetPackage: String? = null) {
             setWanted(context, true)
             val intent = Intent(context, OverlayService::class.java).setAction(ACTION_SHOW)
+            if (targetPackage != null) intent.putExtra(EXTRA_TARGET, targetPackage)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
