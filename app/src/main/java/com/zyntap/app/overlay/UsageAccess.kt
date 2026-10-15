@@ -31,6 +31,10 @@ object UsageAccess {
     fun settingsIntent(context: Context): Intent =
         Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
+    fun openSettings(context: Context) {
+        runCatching { context.startActivity(settingsIntent(context)) }
+    }
+
     /** Bộ theo dõi app ở trước màn hình: mỗi lần gọi chỉ đọc các sự kiện MỚI từ lần trước (rất nhẹ). */
     class Tracker(private val context: Context) {
         private val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
