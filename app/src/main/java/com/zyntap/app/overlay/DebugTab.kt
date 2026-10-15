@@ -24,7 +24,7 @@ import com.zyntap.app.data.DebugLog
 
 /**
  * Tab 5 — Debug log: ô in log các lỗi của app (bơm/click, ADB, helper cảm ứng, tâm ảo, crash...).
- * Bấm "Sao chép" rồi dán cho mình để fix: báo cáo đã kèm sẵn thông tin máy + trạng thái ADB.
+ * Bấm "Sao chép" rồi dán cho dev để fix: báo cáo đã kèm sẵn thông tin máy + trạng thái ADB.
  *
  * @param info trả về vài dòng trạng thái hiện tại (ADB, helper, quyền...) — dùng cho nút "Kiểm tra" và báo cáo.
  */
@@ -71,7 +71,7 @@ class DebugTab(
         val page = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), dp(14))
         }
-        addTabHeader(ctx, page, "Debug log", "Lỗi của app — Sao chép rồi gửi cho mình để fix")
+        addTabHeader(ctx, page, "Debug log", "Lỗi của app — Sao chép rồi gửi cho dev để fix")
 
         // ---- hàng nút ----
         val bar = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -144,7 +144,7 @@ class DebugTab(
         clearArmed = on
         handler.removeCallbacks(disarm)
         if (!::clearBtn.isInitialized) return
-        clearBtn.text = if (on) "Chạm lại để xóa" else "Xóa"
+        clearBtn.text = if (on) "Chắc?" else "Xóa"
         clearBtn.scaledTextSize(if (on) 11f else 12.5f)
         if (on) handler.postDelayed(disarm, 2500L)
     }
@@ -204,7 +204,7 @@ class DebugTab(
             val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("ZynTap debug log", text))
         }.isSuccess
-        Toast.makeText(ctx, if (ok) "Đã sao chép log — dán cho mình nhé" else "Không sao chép được", Toast.LENGTH_SHORT).show()
+        Toast.makeText(ctx, if (ok) "Đã sao chép log — dán cho dev nhé" else "Không sao chép được", Toast.LENGTH_SHORT).show()
     }
 
     /** Ghi một dòng trạng thái hiện tại vào log (ADB, helper bơm, quyền...). */
