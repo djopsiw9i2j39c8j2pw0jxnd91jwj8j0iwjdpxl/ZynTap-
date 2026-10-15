@@ -192,7 +192,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         // Mở app đã chọn -> vẽ menu nổi (icon + tên app) lên trên app đó
         if (OverlayPermission.granted(ctx)) {
-            OverlayService.start(ctx)
+            OverlayService.start(ctx, entry.packageName)
         } else {
             show("Cấp quyền hiển thị trên ứng dụng khác để dùng menu nổi")
         }
