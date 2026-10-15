@@ -154,7 +154,7 @@ class ConfigTab(
         }, LinearLayout.LayoutParams(-1, dp(30)).apply { marginEnd = dp(126) })
 
         // ---- Lưu macro ----
-        page.addView(label("LƯU MACRO (tab 1 + tab 2)", 10.5f), LinearLayout.LayoutParams(-1, dp(25)).apply { topMargin = dp(4) })
+        page.addView(label("LƯU MACRO", 10.5f), LinearLayout.LayoutParams(-1, dp(25)).apply { topMargin = dp(4) })
         nameInput = input("Tên cấu hình mới", number = false, maxLen = MAX_NAME).apply {
             setOnEditorActionListener { _, action, event ->
                 if (isEnter(action, event)) { leaveInput(); create(); true } else false
@@ -184,7 +184,7 @@ class ConfigTab(
         // ---- Kích thước menu ----
         page.addView(View(ctx).apply { setBackgroundColor(0xFF1E2B44.toInt()) },
             LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(6); bottomMargin = dp(8) })
-        page.addView(label("KÍCH THƯỚC MENU (dp)", 10.5f), LinearLayout.LayoutParams(-1, dp(25)))
+        page.addView(label("KÍCH THƯỚC MENU", 10.5f), LinearLayout.LayoutParams(-1, dp(25)))
         wInput = input("Rộng", number = true, maxLen = 4)
         hInput = input("Cao", number = true, maxLen = 4)
         val sizeRow = row()
@@ -201,7 +201,7 @@ class ConfigTab(
 
         refreshDropdown()
         refreshSizeFields()
-        showStatus("Lưu cả nút main + kịch bản để dùng lại", false)
+        showStatus("Lưu các cấu hình các macro của bạn", false)
         return ScrollView(ctx).apply {
             isFillViewport = true; isVerticalScrollBarEnabled = false
             addView(page, ViewGroup.LayoutParams(-1, -2))
@@ -212,7 +212,7 @@ class ConfigTab(
 
     private fun openDropdown() {
         val names = store.names()
-        if (names.isEmpty()) { showStatus("Chưa có cấu hình nào — nhập tên rồi bấm Tạo", true); return }
+        if (names.isEmpty()) { showStatus("Nhập tên config rồi bấm Tạo hoặc Enter", true); return }
         val items = names.map { "$it  ·  ${store.count(it)} main" }
         host.dropdown.show(dropdownField, items, names.indexOf(selected)) { i ->
             selected = names[i]
@@ -294,7 +294,7 @@ class ConfigTab(
         val s = sizeInfo()
         wInput.setText(s.curW.toString())
         hInput.setText(s.curH.toString())
-        sizeHint.text = "Rộng ${s.minW}–${s.maxW} · Cao ${s.minH}–${s.maxH} (tối đa theo màn hình)"
+        sizeHint.text = "Rộng ${s.minW}–${s.maxW} · Cao ${s.minH}–${s.maxH} [Kích thước tối đa]"
         sizeHint.setTextColor(muted)
     }
 
