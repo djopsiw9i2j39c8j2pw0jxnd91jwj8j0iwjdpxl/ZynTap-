@@ -17,8 +17,6 @@ class PointRunner(
     private val context: Context,
     private val bounds: () -> Rect,
     private val targetBlocked: (Int, Int) -> Boolean,
-    /** Làm các cửa sổ nổi đè lên điểm nhấn tạm xuyên chạm (points != null) / trả lại (null). true = có cửa sổ vừa đổi. */
-    private val ghost: (Int, List<Pair<Int, Int>>?) -> Boolean,
     private val report: (String) -> Unit,
 ) {
     private class Run {
@@ -82,7 +80,7 @@ class PointRunner(
         }
         val taps = script.steps.filterIsInstance<PointStep.Tap>()
         if (taps.any { targetBlocked(it.x, it.y) }) {
-            message("Menu đang mở và che điểm nhấn. Hãy thu menu lại rồi bấm nút.")
+            message("Điểm nhấn đang nằm dưới menu đang mở hoặc nút mở menu. Hãy thu menu hoặc dời nút mở menu.")
             return
         }
         // Click 1 lần: giữ lâu hơn. Chạm xuyên: chờ ngón thật nhả đủ lâu rồi mới click (tránh game nuốt click đầu).
@@ -92,8 +90,6 @@ class PointRunner(
         runs[button.id] = run
         run.job = scope.launch {
             try {
-                // Nút/tay nắm nổi đè lên điểm nhấn: cho chạm lọt xuống app bên dưới suốt lượt chạy này
-                if (ghost(button.id, taps.map { it.x to it.y })) delay(GHOST_SETTLE_MS)
                 val manager = withContext(Dispatchers.IO) { ZynAdbConnectionManager.get(context) }
                 if (!withContext(Dispatchers.IO) { manager.isConnected }) {
                     // Chưa có kết nối sống -> tự nối (không bắt người dùng mở app nối tay)
@@ -150,7 +146,6 @@ class PointRunner(
             } catch (e: Exception) {
                 message("Không click được: ${e.message ?: "ADB đã ngắt"}", DebugLog.Level.ERROR, e)
             } finally {
-                ghost(button.id, null)
                 val stream = run.stream
                 run.stream = null
                 if (stream != null) withContext(NonCancellable + Dispatchers.IO) { runCatching { stream.close() } }
@@ -196,11 +191,6 @@ class PointRunner(
             runCatching { stream.close() }
             if (run.stream === stream) run.stream = null
         }
-    }
-
-    private companion object {
-        /** Chờ hệ thống áp vùng chạm mới của cửa sổ vừa đổi cờ trước khi bơm click đầu tiên. */
-        const val GHOST_SETTLE_MS = 60L
     }
 
     fun close() {

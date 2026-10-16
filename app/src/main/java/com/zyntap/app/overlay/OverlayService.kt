@@ -138,11 +138,9 @@ class OverlayService : Service() {
         )
         crosshairSettings = CrosshairSettings(this)
         crosshair = CrosshairOverlay(this, wm, crosshairSettings, { realBounds }) { w, h, f -> overlayParams(w, h, f) }
-        pointRunner = PointRunner(this, { Rect(realBounds) }, { _, _ ->
-            // Nút main / tay nắm đè lên điểm nhấn không còn chặn: chúng tự xuyên chạm lúc click (ghost bên dưới).
-            // Chỉ menu đang mở (nền mờ phủ cả màn hình) mới chặn.
-            panelBlocksInput()
-        }, { owner, points -> ghostOverlays(owner, points) }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
+        pointRunner = PointRunner(this, { Rect(realBounds) }, { x, y ->
+            panelBlocksInput() || handleContainsPoint(x, y) // nút main đè lên điểm nhấn tự chạm xuyên nên không chặn
+        }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
         pointPicker = PointPickerOverlay(this, wm, { realBounds },
             { w, h, f -> overlayParams(w, h, f) },
             { picking ->
@@ -565,7 +563,6 @@ class OverlayService : Service() {
             y = placeHandleY(savedHandleY())
         }
         handleParams = params
-        handleGhosted = false
 
         val r = dp(14).toFloat()
         val iconSize = minOf(dp(18), (visW * 0.9f).toInt()).coerceAtLeast(dp(10))
@@ -1165,34 +1162,6 @@ class OverlayService : Service() {
 
     /** The panel includes a full-screen touchable scrim, not only its visible card. */
     private fun panelBlocksInput(): Boolean = panelView != null && !panelHidden
-
-    private val handleGhostOwners = HashMap<Int, Boolean>()
-    private var handleGhosted = false
-
-    /** Cho các cửa sổ nổi (nút main + tay nắm) đè lên điểm nhấn tạm xuyên chạm trong lúc [owner] chạy. */
-    private fun ghostOverlays(owner: Int, points: List<Pair<Int, Int>>?): Boolean {
-        var changed = if (points == null) circles.unghost(owner) else circles.ghostFor(owner, points)
-        if (points == null) handleGhostOwners.remove(owner)
-        else handleGhostOwners[owner] = !handleDragging && points.any { (x, y) -> handleContainsPoint(x, y) }
-        val want = handleGhostOwners.values.any { it }
-        if (want != handleGhosted) {
-            val p = handleParams
-            val v = handleView
-            if (p != null && v != null) {
-                if (want) {
-                    p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                    p.alpha = 0.8f // Android 12+: chạm chỉ lọt qua cửa sổ phủ có alpha <= 0.8
-                } else {
-                    p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-                    p.alpha = 1f
-                }
-                runCatching { wm.updateViewLayout(v, p) }
-                handleGhosted = want
-                changed = true
-            }
-        }
-        return changed
-    }
 
     private fun handleContainsPoint(x: Int, y: Int): Boolean {
         val handle = handleView ?: return false
