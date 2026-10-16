@@ -914,15 +914,12 @@ class OverlayService : Service() {
     private fun buildSidebar(initialTab: Int, onSelect: (Int) -> Unit): View {
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val p = dp(12)
-            setPadding(p, dp(14), p, p)
+            // Lề trái nhỏ hơn lề phải để cụm tab dịch sang trái một chút
+            setPadding(dp(6), dp(14), dp(12), dp(12))
         }
         col.addView(buildHeader())
-        // Đường kẻ gradient dưới logo, thẳng hàng với đường kẻ dưới tiêu đề tab bên phải
-        col.addView(accentDivider(this), LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, maxOf(1, dp(1)),
-        ))
-        col.addView(View(this), LinearLayout.LayoutParams(1, dp(11)))
+        // Không còn đường kẻ dưới logo; chừa khoảng trống bằng đúng chiều cao cũ (1dp kẻ + 11dp)
+        col.addView(View(this), LinearLayout.LayoutParams(1, dp(12)))
 
         val tabH = dp(42)
         val tabGap = dp(6)

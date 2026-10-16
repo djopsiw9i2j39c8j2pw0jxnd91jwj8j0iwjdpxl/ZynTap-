@@ -40,11 +40,11 @@ internal fun addTabHeader(ctx: Context, page: LinearLayout, title: String, subti
         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (HEADER_H_DP * d).toInt())
             .apply { marginEnd = (128 * d).toInt() },
     )
-    wrap.addView(accentDivider(ctx), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, (1 * d).toInt())))
+    // Không còn đường kẻ dưới tiêu đề; bù 1dp vào lề dưới để nội dung giữ nguyên độ cao
     page.addView(
         wrap,
         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            .apply { bottomMargin = (10 * d).toInt() },
+            .apply { bottomMargin = (11 * d).toInt() },
     )
     return sub
 }
