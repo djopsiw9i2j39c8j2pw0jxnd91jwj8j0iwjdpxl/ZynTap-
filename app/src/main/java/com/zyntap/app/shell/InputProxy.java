@@ -16,6 +16,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -62,7 +64,9 @@ public final class InputProxy {
     private static final int REAL_SLOTS = 16;          // ngón thật: pointer id 0..15
     private static final int SYNTH_BASE = 16;          // click của app: pointer id 16..23
     private static final int SYNTH_COUNT = 8;
-    private static final long WATCHDOG_MS = 5000;
+    private static final long WATCHDOG_MS = 3000;
+    /** Số lần phát sự kiện thất bại liên tiếp thì coi bộ phát đã hỏng và nhả grab NGAY (tránh liệt cảm ứng toàn máy). */
+    private static final int MAX_INJECT_FAILS = 4;
 
     // ---- cấu hình (từ tham số dòng lệnh) ----------------------------------------------------
     private static String devPath = "";
@@ -73,6 +77,34 @@ public final class InputProxy {
     // ---- trạng thái ------------------------------------------------------------------------
     private static final Object LOCK = new Object();
     private static final PrintStream OUT = new PrintStream(System.out, true);
+    /**
+     * Mọi dòng báo về app đi qua hàng đợi + luồng ghi riêng. TUYỆT ĐỐI không ghi stdout trực tiếp trong
+     * đường phát cảm ứng: nếu kết nối ADB nghẽn (Wi-Fi chập chờn, app đứng hình) thì println bị chặn
+     * khi đang giữ LOCK -> ngón thật không được phát lại nữa trong khi grab vẫn còn = liệt cảm ứng cả máy.
+     */
+    private static final BlockingQueue<String> OUTQ = new ArrayBlockingQueue<>(512);
+    private static volatile boolean outThreadOn = false;
+    private static volatile boolean urgentRelease = false;
+    private static int injectFails = 0;   // chỉ đụng dưới LOCK
+
+    private static void out(String line) {
+        if (!outThreadOn) { OUT.println(line); return; }
+        OUTQ.offer(line); // đầy thì bỏ dòng, không bao giờ chờ
+    }
+
+    private static void startOutThread() {
+        Thread t = new Thread(() -> {
+            try {
+                while (true) {
+                    String l = OUTQ.take();
+                    OUT.println(l);
+                }
+            } catch (Throwable ignored) { }
+        }, "zyn-out");
+        t.setDaemon(true);
+        outThreadOn = true;
+        t.start();
+    }
 
     // Ngón thật (thô, theo slot) — chỉ đụng dưới LOCK
     private static final int[] tid = new int[REAL_SLOTS];
@@ -147,6 +179,8 @@ public final class InputProxy {
 
     private static void run() throws Exception {
         for (int i = 0; i < REAL_SLOTS; i++) tid[i] = -1;
+        // SIGTERM / SIGHUP (adb đóng, bị kill mềm): vẫn huỷ ngón giả + nhả grab. SIGKILL thì kernel tự nhả grab.
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> { urgentRelease = true; shutdown(); }, "zyn-hook"));
         devIn = new FileInputStream(devPath);
         deviceId = findDeviceId(devName);
 
@@ -160,6 +194,7 @@ public final class InputProxy {
         }
         OUT.println("READY grab=" + (grabbed ? 1 : 0) + " inj=" + (injecting ? 1 : 0) + " dev=" + deviceId);
 
+        startOutThread();
         Thread reader = new Thread(InputProxy::readLoop, "zyn-reader");
         reader.setDaemon(true);
         reader.start();
@@ -210,6 +245,7 @@ public final class InputProxy {
         while (!stopping) {
             if (SystemClock.uptimeMillis() - lastPing > WATCHDOG_MS) {
                 log("watchdog");
+                urgentRelease = true; // mất nhịp tim: nhả grab ngay, không chờ ngón thật nhấc lên
                 shutdown();
                 return;
             }
@@ -233,7 +269,7 @@ public final class InputProxy {
                 if (recSize == 0) {
                     if (n < 48) continue;
                     recSize = valid(acc, 24) ? 24 : valid(acc, 16) ? 16 : -1;
-                    if (recSize < 0) { OUT.println("FAIL not input_event"); shutdown(); return; }
+                    if (recSize < 0) { out("FAIL not input_event"); shutdown(); return; }
                 }
                 int off = 0;
                 while (n - off >= recSize) {
@@ -371,13 +407,13 @@ public final class InputProxy {
                 if (!reported[s]) {
                     reported[s] = true;
                     lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
-                    OUT.println("F " + s + " 1 " + lastRepX[s] + " " + lastRepY[s]);
+                    out("F " + s + " 1 " + lastRepX[s] + " " + lastRepY[s]);
                 } else {
                     lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
                 }
             } else if (reported[s] && !rawActive[s]) {
                 reported[s] = false;
-                OUT.println("F " + s + " 0 " + lastRepX[s] + " " + lastRepY[s]);
+                out("F " + s + " 0 " + lastRepX[s] + " " + lastRepY[s]);
             }
         }
         if (!injecting) return; // chế độ thụ động: hệ thống vẫn tự nhận ngón thật
@@ -438,8 +474,16 @@ public final class InputProxy {
                 0, 0, 1f, 1f, deviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
         try {
             injector.inject(ev);
+            injectFails = 0;
         } catch (Throwable t) {
             log("inject fail: " + t);
+            if (++injectFails >= MAX_INJECT_FAILS && injecting) {
+                // Bộ phát hỏng mà grab vẫn còn = cảm ứng chết cả máy. Nhả grab ngay (đóng fd), huỷ ngón kẹt.
+                injecting = false;
+                urgentRelease = true;
+                log("inject hỏng liên tiếp -> nhả cảm ứng ngay");
+                new Thread(InputProxy::shutdown, "zyn-bail").start();
+            }
         } finally {
             ev.recycle();
         }
@@ -450,11 +494,11 @@ public final class InputProxy {
         int sid = -1;
         try {
             synchronized (LOCK) {
-                if (!injecting) { OUT.println("ERR " + id + " passive"); return; }
+                if (!injecting) { out("ERR " + id + " passive"); return; }
                 for (int i = 0; i < SYNTH_COUNT; i++) {
                     if (!synth.containsKey(SYNTH_BASE + i)) { sid = SYNTH_BASE + i; break; }
                 }
-                if (sid < 0) { OUT.println("ERR " + id + " busy"); return; }
+                if (sid < 0) { out("ERR " + id + " busy"); return; }
                 P p = lastReal != null ? lastReal.copy() : defaultPointer();
                 p.x = clampX(x); p.y = clampY(y);
                 synth.put(sid, p);
@@ -465,10 +509,10 @@ public final class InputProxy {
                 synth.remove(sid);
                 sync();
             }
-            OUT.println("OK " + id);
+            out("OK " + id);
         } catch (Throwable t) {
             synchronized (LOCK) { if (sid >= 0) { synth.remove(sid); sync(); } }
-            OUT.println("ERR " + id + " " + t);
+            out("ERR " + id + " " + t);
         }
     }
 
@@ -499,7 +543,7 @@ public final class InputProxy {
         try {
             // Nhả grab khi đã không còn ngón thật chạm (tối đa ~1.5s) để hệ thống không bị kẹt ngón "ma".
             long end = SystemClock.uptimeMillis() + 1500;
-            while (SystemClock.uptimeMillis() < end) {
+            while (!urgentRelease && SystemClock.uptimeMillis() < end) {
                 boolean any = false;
                 synchronized (LOCK) { for (int i = 0; i < REAL_SLOTS; i++) any |= rawActive[i]; }
                 if (!any) break;
@@ -515,7 +559,7 @@ public final class InputProxy {
         } catch (Throwable ignored) {
         }
         try { if (devIn != null) devIn.close(); } catch (Throwable ignored) { } // đóng fd = nhả grab
-        OUT.println("LOG bye");
+        try { OUT.println("LOG bye"); } catch (Throwable ignored) { }
         Runtime.getRuntime().halt(0);
     }
 
@@ -562,7 +606,7 @@ public final class InputProxy {
         return 0;
     }
 
-    private static void log(String s) { OUT.println("LOG " + s.replace('\n', ' ')); }
+    private static void log(String s) { out("LOG " + s.replace('\n', ' ')); }
 
     // ---- bộ phát sự kiện vào hệ thống --------------------------------------------------------------
     private static Injector injector;
@@ -623,8 +667,8 @@ public final class InputProxy {
                 try { setDisplay.invoke(ev, 0); } catch (Throwable ignored) { }
             }
             // mode 0 = ASYNC, uid -1 = INVALID_UID
-            if (withUid) method.invoke(target, ev, 0, -1);
-            else method.invoke(target, ev, 0);
+            Object r = withUid ? method.invoke(target, ev, 0, -1) : method.invoke(target, ev, 0);
+            if (r instanceof Boolean && !((Boolean) r)) throw new IllegalStateException("hệ thống từ chối sự kiện");
         }
     }
 }
