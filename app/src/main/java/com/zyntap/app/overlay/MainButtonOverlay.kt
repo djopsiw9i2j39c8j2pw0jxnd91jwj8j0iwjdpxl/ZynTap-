@@ -270,7 +270,88 @@ class MainButtonOverlay(
     // ---- chạm xuyên ---------------------------------------------------------
 
     /** Nút đang ở chế độ chạm xuyên (và không phải đang kéo chỉnh vị trí). */
-    private fun isPassThrough(b: MainButton) = b.passThrough && editingId != b.id
+    private fun isPassThrough(b: MainButton) = (b.passThrough || coversOwnPoint(b)) && editingId != b.id
+
+    /**
+     * Nút đang nằm đè lên chính điểm nhấn của nó -> tự chạm xuyên, nếu không click bơm vào sẽ trúng
+     * chính nút này thay vì app bên dưới. Cache theo (script, vị trí, kích thước) vì hàm này gọi mỗi lần chạm.
+     */
+    private val ownPointCache = HashMap<Int, Pair<String, Boolean>>()
+
+    private fun coversOwnPoint(b: MainButton): Boolean {
+        if (b.pointScript.isBlank()) return false
+        val e = entries[b.id] ?: return false
+        val key = "${e.params.x},${e.params.y},${e.params.width}|${b.pointScript}"
+        ownPointCache[b.id]?.let { if (it.first == key) return it.second }
+        val s = screenBounds()
+        val hit = PointScriptParser.parse(b.pointScript, s.width(), s.height()).steps
+            .filterIsInstance<PointStep.Tap>()
+            .any { inWindow(e.params, it.x, it.y) }
+        ownPointCache[b.id] = key to hit
+        return hit
+    }
+
+    private fun inWindow(p: WindowManager.LayoutParams, x: Int, y: Int) =
+        x >= p.x && x < p.x + p.width && y >= p.y && y < p.y + p.height
+
+    /** Áp lại cờ chạm xuyên cho mọi nút (sau khi sửa script / đổi chỗ nút). */
+    fun refreshTouchable() {
+        entries.forEach { (id, e) ->
+            val b = repo.find(id) ?: return@forEach
+            if (ghostedIds.contains(id)) return@forEach
+            val was = (e.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
+            applyTouchable(b, e.params)
+            if (was != isPassThrough(b)) runCatching { wm.updateViewLayout(e.view, e.params) }
+        }
+    }
+
+    // ---- nút nổi tạm trong suốt với chạm lúc bơm click ----------------------
+
+    /** Chủ chạy (id nút main) -> các nút đang bị làm "xuyên" vì nằm đè lên điểm nhấn của lượt chạy đó. */
+    private val ghostOwners = HashMap<Int, Set<Int>>()
+    private val ghostedIds = HashSet<Int>()
+
+    /**
+     * Click bơm vào toạ độ nằm dưới một nút main khác sẽ trúng nút đó chứ không tới app bên dưới.
+     * Trong lúc [owner] chạy, các nút (trừ nút đang bị ngón thật giữ) đè lên [points] được đặt
+     * NOT_TOUCHABLE + alpha 0.8 (mức tối đa Android 12+ cho chạm lọt qua cửa sổ phủ).
+     * @return true nếu có cửa sổ vừa đổi (bên gọi nên chờ một nhịp cho hệ thống cập nhật vùng chạm).
+     */
+    fun ghostFor(owner: Int, points: List<Pair<Int, Int>>): Boolean {
+        val ids = entries.filter { (id, e) ->
+            id != owner && !e.view.pressedVisual && !watched.containsValue(id) &&
+                points.any { (x, y) -> inWindow(e.params, x, y) }
+        }.keys
+        ghostOwners[owner] = ids.toSet()
+        return syncGhosts()
+    }
+
+    fun unghost(owner: Int): Boolean {
+        if (ghostOwners.remove(owner) == null) return false
+        return syncGhosts()
+    }
+
+    private fun syncGhosts(): Boolean {
+        val want = ghostOwners.values.flatten().toSet()
+        var changed = false
+        for (id in want - ghostedIds) {
+            val e = entries[id] ?: continue
+            e.params.flags = e.params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            e.params.alpha = PASS_THROUGH_ALPHA
+            ghostedIds += id
+            runCatching { wm.updateViewLayout(e.view, e.params) }
+            changed = true
+        }
+        for (id in (ghostedIds - want).toList()) {
+            ghostedIds -= id
+            val e = entries[id] ?: continue
+            val b = repo.find(id) ?: continue
+            applyTouchable(b, e.params)
+            runCatching { wm.updateViewLayout(e.view, e.params) }
+            changed = true
+        }
+        return changed
+    }
 
     /**
      * Cờ cửa sổ cho nút chạm xuyên: không nhận chạm (chạm lọt xuống app dưới).
@@ -342,15 +423,15 @@ class MainButtonOverlay(
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
         ).apply { gravity = Gravity.TOP or Gravity.START }
-        applyTouchable(b, p)
         place(b, p)
         val v = MainButtonView(ctx)
         bind(v, b)
         v.editing = b.id == editingId
         attachTouch(b.id, v, p)
-        runCatching { wm.addView(v, p) }.onSuccess {
-            entries[b.id] = Entry(v, p, SystemClock.uptimeMillis())
-        }
+        // Đăng ký entry trước khi áp cờ chạm xuyên để coversOwnPoint đọc được vị trí
+        entries[b.id] = Entry(v, p, SystemClock.uptimeMillis())
+        applyTouchable(b, p)
+        if (runCatching { wm.addView(v, p) }.isFailure) entries.remove(b.id)
     }
 
     /** Menu đang mở? Mở thì nút có độ mờ 0% vẫn hiện ở 20% để còn nhìn thấy mà chỉnh. */
@@ -359,6 +440,7 @@ class MainButtonOverlay(
     fun setMenuOpen(open: Boolean) {
         menuOpen = open
         entries.values.forEach { it.view.minPct = if (open) MainButton.MENU_MIN_ALPHA else 0 }
+        if (!open) refreshTouchable() // script điểm nhấn có thể vừa đổi -> nút đè lên điểm thì tự chạm xuyên
     }
 
     private fun bind(v: MainButtonView, b: MainButton) {
@@ -372,6 +454,8 @@ class MainButtonOverlay(
         onCancel?.invoke(id)
         watched.entries.removeAll { it.value == id }
         val e = entries.remove(id) ?: return
+        ownPointCache.remove(id)
+        ghostedIds.remove(id)
         e.view.animate().cancel()
         runCatching { wm.removeViewImmediate(e.view) }
     }
@@ -468,49 +552,11 @@ class MainButtonOverlay(
     /** Báo khi bắt đầu/thả kéo một nút main (để menu ẩn lúc kéo, hiện lại khi thả). */
     var onDrag: ((Boolean) -> Unit)? = null
 
-    fun containsPoint(x: Int, y: Int): Boolean = entries.values.any { entryContains(it, x, y) }
-
-    private fun entryContains(e: Entry, x: Int, y: Int): Boolean {
+    fun containsPoint(x: Int, y: Int): Boolean = entries.values.any { e ->
         val location = IntArray(2)
         e.view.getLocationOnScreen(location)
-        return x >= location[0] && x < location[0] + e.view.width &&
+        x >= location[0] && x < location[0] + e.view.width &&
             y >= location[1] && y < location[1] + e.view.height
-    }
-
-    /** Các nút main đang được làm "trong suốt với chạm" tạm thời để macro click xuyên qua. */
-    private val shielded = HashSet<Int>()
-
-    /**
-     * Cho các nút main nằm trên những điểm [points] tạm thời không nhận chạm (FLAG_NOT_TOUCHABLE),
-     * để click do macro bơm vào rơi xuống app phía dưới thay vì dính vào chính nút main.
-     * Ngón đang giữ nút vẫn được giao cho nút như cũ (cử chỉ đã bắt đầu từ trước).
-     * @return true nếu có cửa sổ vừa bị đổi cờ (bên gọi nên chờ hệ thống cập nhật vùng chạm).
-     */
-    fun shield(points: List<Pair<Int, Int>>): Boolean {
-        var changed = false
-        entries.forEach { (id, e) ->
-            if (id in shielded) return@forEach
-            if (points.none { entryContains(e, it.first, it.second) }) return@forEach
-            shielded.add(id)
-            e.params.flags = e.params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            runCatching { wm.updateViewLayout(e.view, e.params) }
-            changed = true
-        }
-        return changed
-    }
-
-    /** Trả cờ chạm của các nút đã [shield] về đúng trạng thái theo cấu hình hiện tại. */
-    fun unshield() {
-        if (shielded.isEmpty()) return
-        shielded.toList().forEach { id ->
-            val e = entries[id]
-            val b = repo.find(id)
-            if (e != null && b != null) {
-                applyTouchable(b, e.params)
-                runCatching { wm.updateViewLayout(e.view, e.params) }
-            }
-        }
-        shielded.clear()
     }
 
     fun cancelTouches() {

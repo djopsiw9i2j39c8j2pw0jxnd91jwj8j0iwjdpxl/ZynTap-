@@ -17,9 +17,8 @@ class PointRunner(
     private val context: Context,
     private val bounds: () -> Rect,
     private val targetBlocked: (Int, Int) -> Boolean,
-    /** Làm nút main/tay cầm trên các điểm này không nhận chạm; true nếu vừa đổi (cần chờ hệ thống cập nhật). */
-    private val shield: (List<Pair<Int, Int>>) -> Boolean,
-    private val unshield: () -> Unit,
+    /** Làm các cửa sổ nổi đè lên điểm nhấn tạm xuyên chạm (points != null) / trả lại (null). true = có cửa sổ vừa đổi. */
+    private val ghost: (Int, List<Pair<Int, Int>>?) -> Boolean,
     private val report: (String) -> Unit,
 ) {
     private class Run {
@@ -32,7 +31,6 @@ class PointRunner(
     private val timer = Executors.newSingleThreadScheduledExecutor()
     private val injectionLock = Mutex()
     private var lastReport = 0L
-    private var shieldUsers = 0 // số macro đang chạy cần cửa sổ ZynTap trong suốt với chạm
 
     /** Ghi vào Debug log (luôn ghi) rồi báo Toast cho người dùng (giãn nhịp để không spam). */
     private fun message(text: String, level: DebugLog.Level = DebugLog.Level.WARN, t: Throwable? = null) {
@@ -84,7 +82,7 @@ class PointRunner(
         }
         val taps = script.steps.filterIsInstance<PointStep.Tap>()
         if (taps.any { targetBlocked(it.x, it.y) }) {
-            message("Menu đang mở che cả màn hình. Hãy thu menu rồi chạy macro.")
+            message("Menu đang mở và che điểm nhấn. Hãy thu menu lại rồi bấm nút.")
             return
         }
         // Click 1 lần: giữ lâu hơn. Chạm xuyên: chờ ngón thật nhả đủ lâu rồi mới click (tránh game nuốt click đầu).
@@ -93,8 +91,9 @@ class PointRunner(
         val run = Run()
         runs[button.id] = run
         run.job = scope.launch {
-            var shielded = false
             try {
+                // Nút/tay nắm nổi đè lên điểm nhấn: cho chạm lọt xuống app bên dưới suốt lượt chạy này
+                if (ghost(button.id, taps.map { it.x to it.y })) delay(GHOST_SETTLE_MS)
                 val manager = withContext(Dispatchers.IO) { ZynAdbConnectionManager.get(context) }
                 if (!withContext(Dispatchers.IO) { manager.isConnected }) {
                     // Chưa có kết nối sống -> tự nối (không bắt người dùng mở app nối tay)
@@ -111,11 +110,6 @@ class PointRunner(
                         }
                     }
                 }
-                // Điểm nhấn trùng nút main/tay cầm: cho các cửa sổ đó tạm "trong suốt với chạm" suốt lúc macro chạy,
-                // để click rơi xuống app phía dưới và không bao giờ dính vào nút main.
-                shielded = true
-                shieldUsers++
-                if (shield(taps.map { it.x to it.y })) delay(SHIELD_SETTLE_MS)
                 do {
                     for (step in script.steps) {
                         ensureActive()
@@ -123,7 +117,7 @@ class PointRunner(
                         when (step) {
                             is PointStep.Wait -> delay(step.millis)
                             is PointStep.Tap -> {
-                                if (targetBlocked(step.x, step.y)) error("Menu ZynTap đang che điểm nhấn")
+                                if (targetBlocked(step.x, step.y)) error("Điểm nhấn trùng cửa sổ ZynTap")
                                 injectionLock.withLock {
                                     ensureActive()
                                     withContext(Dispatchers.IO) {
@@ -156,7 +150,7 @@ class PointRunner(
             } catch (e: Exception) {
                 message("Không click được: ${e.message ?: "ADB đã ngắt"}", DebugLog.Level.ERROR, e)
             } finally {
-                if (shielded && --shieldUsers == 0) unshield()
+                ghost(button.id, null)
                 val stream = run.stream
                 run.stream = null
                 if (stream != null) withContext(NonCancellable + Dispatchers.IO) { runCatching { stream.close() } }
@@ -205,8 +199,8 @@ class PointRunner(
     }
 
     private companion object {
-        /** Chờ hệ thống áp vùng chạm mới của cửa sổ vừa đổi cờ trước khi bơm click. */
-        const val SHIELD_SETTLE_MS = 60L
+        /** Chờ hệ thống áp vùng chạm mới của cửa sổ vừa đổi cờ trước khi bơm click đầu tiên. */
+        const val GHOST_SETTLE_MS = 60L
     }
 
     fun close() {
