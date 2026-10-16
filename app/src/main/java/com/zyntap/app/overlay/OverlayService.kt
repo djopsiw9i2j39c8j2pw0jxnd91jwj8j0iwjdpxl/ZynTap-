@@ -138,9 +138,8 @@ class OverlayService : Service() {
         )
         crosshairSettings = CrosshairSettings(this)
         crosshair = CrosshairOverlay(this, wm, crosshairSettings, { realBounds }) { w, h, f -> overlayParams(w, h, f) }
-        pointRunner = PointRunner(this, { Rect(realBounds) }, { x, y ->
-            circles.containsPoint(x, y) || panelBlocksInput() || handleContainsPoint(x, y)
-        }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
+        pointRunner = PointRunner(this, { Rect(realBounds) }, { _, _ -> panelBlocksInput() },
+            { points -> shieldTargets(points) }, { unshieldTargets() }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
         pointPicker = PointPickerOverlay(this, wm, { realBounds },
             { w, h, f -> overlayParams(w, h, f) },
             { picking ->
@@ -1162,6 +1161,32 @@ class OverlayService : Service() {
 
     /** The panel includes a full-screen touchable scrim, not only its visible card. */
     private fun panelBlocksInput(): Boolean = panelView != null && !panelHidden
+
+    private var handleShielded = false
+
+    /** Nút main / tay cầm nằm dưới điểm click thì tạm không nhận chạm để click xuyên xuống app. */
+    private fun shieldTargets(points: List<Pair<Int, Int>>): Boolean {
+        var changed = circles.shield(points)
+        val v = handleView
+        val p = handleParams
+        if (v != null && p != null && points.any { handleContainsPoint(it.first, it.second) }) {
+            handleShielded = true
+            p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            runCatching { wm.updateViewLayout(v, p) }
+            changed = true
+        }
+        return changed
+    }
+
+    private fun unshieldTargets() {
+        circles.unshield()
+        if (!handleShielded) return
+        handleShielded = false
+        val v = handleView ?: return
+        val p = handleParams ?: return
+        p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        runCatching { wm.updateViewLayout(v, p) }
+    }
 
     private fun handleContainsPoint(x: Int, y: Int): Boolean {
         val handle = handleView ?: return false

@@ -468,11 +468,49 @@ class MainButtonOverlay(
     /** Báo khi bắt đầu/thả kéo một nút main (để menu ẩn lúc kéo, hiện lại khi thả). */
     var onDrag: ((Boolean) -> Unit)? = null
 
-    fun containsPoint(x: Int, y: Int): Boolean = entries.values.any { e ->
+    fun containsPoint(x: Int, y: Int): Boolean = entries.values.any { entryContains(it, x, y) }
+
+    private fun entryContains(e: Entry, x: Int, y: Int): Boolean {
         val location = IntArray(2)
         e.view.getLocationOnScreen(location)
-        x >= location[0] && x < location[0] + e.view.width &&
+        return x >= location[0] && x < location[0] + e.view.width &&
             y >= location[1] && y < location[1] + e.view.height
+    }
+
+    /** Các nút main đang được làm "trong suốt với chạm" tạm thời để macro click xuyên qua. */
+    private val shielded = HashSet<Int>()
+
+    /**
+     * Cho các nút main nằm trên những điểm [points] tạm thời không nhận chạm (FLAG_NOT_TOUCHABLE),
+     * để click do macro bơm vào rơi xuống app phía dưới thay vì dính vào chính nút main.
+     * Ngón đang giữ nút vẫn được giao cho nút như cũ (cử chỉ đã bắt đầu từ trước).
+     * @return true nếu có cửa sổ vừa bị đổi cờ (bên gọi nên chờ hệ thống cập nhật vùng chạm).
+     */
+    fun shield(points: List<Pair<Int, Int>>): Boolean {
+        var changed = false
+        entries.forEach { (id, e) ->
+            if (id in shielded) return@forEach
+            if (points.none { entryContains(e, it.first, it.second) }) return@forEach
+            shielded.add(id)
+            e.params.flags = e.params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            runCatching { wm.updateViewLayout(e.view, e.params) }
+            changed = true
+        }
+        return changed
+    }
+
+    /** Trả cờ chạm của các nút đã [shield] về đúng trạng thái theo cấu hình hiện tại. */
+    fun unshield() {
+        if (shielded.isEmpty()) return
+        shielded.toList().forEach { id ->
+            val e = entries[id]
+            val b = repo.find(id)
+            if (e != null && b != null) {
+                applyTouchable(b, e.params)
+                runCatching { wm.updateViewLayout(e.view, e.params) }
+            }
+        }
+        shielded.clear()
     }
 
     fun cancelTouches() {
