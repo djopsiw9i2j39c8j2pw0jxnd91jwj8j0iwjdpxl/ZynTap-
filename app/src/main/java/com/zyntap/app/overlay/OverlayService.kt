@@ -816,8 +816,12 @@ class OverlayService : Service() {
             buildSidebar(startTab) { index -> showTab(index) },
             LinearLayout.LayoutParams(dp(SIDEBAR_W_DP), LinearLayout.LayoutParams.MATCH_PARENT),
         )
-        content.addView(View(this).apply { setBackgroundColor(0xFF1E2B44.toInt()) },
-            LinearLayout.LayoutParams(dp(1), LinearLayout.LayoutParams.MATCH_PARENT))
+        content.addView(View(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(0x001E2B44, 0xFF2A3D63.toInt(), 0xFF2A3D63.toInt(), 0x001E2B44),
+            )
+        }, LinearLayout.LayoutParams(dp(1), LinearLayout.LayoutParams.MATCH_PARENT))
         content.addView(
             tabContainer,
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f),
@@ -854,26 +858,49 @@ class OverlayService : Service() {
         startStatusTick()
     }
 
-    /** Góc trên bên trái: logo không nền + tên app. */
+    /** Góc trên bên trái: logo (có quầng sáng) + tên app + dòng phụ nhỏ. Cao cố định = HEADER_H_DP. */
     private fun buildHeader(): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        row.addView(ImageView(this).apply {
+        // Quầng sáng xanh mờ phía sau logo
+        val logoBox = FrameLayout(this)
+        logoBox.addView(View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setGradientType(GradientDrawable.RADIAL_GRADIENT)
+                setGradientRadius(dp(22).toFloat())
+                setColors(intArrayOf(0x401E9BFF, 0x001E9BFF))
+            }
+        }, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER))
+        logoBox.addView(ImageView(this).apply {
             setImageResource(R.drawable.logo_transparent)
             adjustViewBounds = true
             scaleType = ImageView.ScaleType.FIT_CENTER
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(22)))
-        row.addView(TextView(this).apply {
+        }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, dp(26), Gravity.CENTER))
+        row.addView(logoBox, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(HEADER_H_DP)))
+
+        val ver = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()
+        val names = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        names.addView(TextView(this).apply {
             text = getString(R.string.app_name)
             setTextColor(0xFFE8EEFA.toInt())
             scaledTextSize(15f)
             setTypeface(typeface, Typeface.BOLD)
-        }, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        ).apply { marginStart = dp(7) })
+        })
+        names.addView(TextView(this).apply {
+            text = if (ver.isNullOrBlank()) "Auto Tap" else "Auto Tap · v$ver"
+            setTextColor(0xFF5F7396.toInt())
+            scaledTextSize(10f)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        row.addView(names, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            .apply { marginStart = dp(2) })
         return row
     }
 
@@ -888,10 +915,14 @@ class OverlayService : Service() {
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             val p = dp(12)
-            setPadding(p, p, p, p)
+            setPadding(p, dp(14), p, p)
         }
         col.addView(buildHeader())
-        col.addView(View(this), LinearLayout.LayoutParams(1, dp(14)))
+        // Đường kẻ gradient dưới logo, thẳng hàng với đường kẻ dưới tiêu đề tab bên phải
+        col.addView(accentDivider(this), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, maxOf(1, dp(1)),
+        ))
+        col.addView(View(this), LinearLayout.LayoutParams(1, dp(11)))
 
         val tabH = dp(42)
         val tabGap = dp(6)
@@ -899,11 +930,22 @@ class OverlayService : Service() {
 
         // Khung chứa tab: thanh sáng nằm dưới, trượt tới tab được chọn
         val box = FrameLayout(this)
-        val indicator = View(this).apply {
-            background = GradientDrawable().apply {
-                setColor(0xFF1E3A66.toInt())
+        val indicator = FrameLayout(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(0xFF22457A.toInt(), 0xFF17294A.toInt()),
+            ).apply {
                 cornerRadius = dp(10).toFloat()
+                setStroke(dp(1), 0x661E9BFF)
             }
+            // Thanh accent bo tròn ở mép trái mục đang chọn
+            addView(View(context).apply {
+                background = GradientDrawable().apply {
+                    setColor(0xFF1E9BFF.toInt())
+                    cornerRadius = dp(2).toFloat()
+                }
+            }, FrameLayout.LayoutParams(dp(3), dp(18), Gravity.START or Gravity.CENTER_VERTICAL)
+                .apply { marginStart = dp(4) })
         }
         box.addView(indicator, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, tabH))
 
