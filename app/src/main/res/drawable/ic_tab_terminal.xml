@@ -5,13 +5,13 @@
     android:viewportHeight="24">
     <!-- Lucide: square-terminal -->
     <path
-        android:pathData="m7 11 2-2-2-2"
+        android:pathData="M12.5 16h4"
         android:strokeColor="#FFFFFF"
         android:strokeWidth="2"
         android:strokeLineCap="round"
         android:strokeLineJoin="round" />
     <path
-        android:pathData="M11 13h4"
+        android:pathData="m8 13 2-2-2-2"
         android:strokeColor="#FFFFFF"
         android:strokeWidth="2"
         android:strokeLineCap="round"
