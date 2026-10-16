@@ -893,7 +893,7 @@ class OverlayService : Service() {
             setTypeface(typeface, Typeface.BOLD)
         })
         names.addView(TextView(this).apply {
-            text = if (ver.isNullOrBlank()) "Auto Tap" else "Auto Tap · v$ver"
+            text = if (ver.isNullOrBlank()) "Macro Pro" else "Macro Pro · v$ver"
             setTextColor(0xFF5F7396.toInt())
             scaledTextSize(10f)
             maxLines = 1
