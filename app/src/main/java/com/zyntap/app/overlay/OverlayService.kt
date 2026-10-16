@@ -139,7 +139,7 @@ class OverlayService : Service() {
         crosshairSettings = CrosshairSettings(this)
         crosshair = CrosshairOverlay(this, wm, crosshairSettings, { realBounds }) { w, h, f -> overlayParams(w, h, f) }
         pointRunner = PointRunner(this, { Rect(realBounds) }, { x, y ->
-            panelBlocksInput() || handleContainsPoint(x, y) // nút main đè lên điểm nhấn tự chạm xuyên nên không chặn
+            circles.containsPoint(x, y) || panelBlocksInput() || handleContainsPoint(x, y)
         }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
         pointPicker = PointPickerOverlay(this, wm, { realBounds },
             { w, h, f -> overlayParams(w, h, f) },
@@ -878,10 +878,6 @@ class OverlayService : Service() {
     }
 
     private val tabNames = listOf("Cài tâm ảo", "Tạo nút chính", "Chỉnh điểm nhấn", "Cài cấu hình", "Debug log")
-    private val tabIcons = intArrayOf(
-        R.drawable.ic_tab_crosshair, R.drawable.ic_tab_pointer, R.drawable.ic_tab_focus,
-        R.drawable.ic_tab_sliders, R.drawable.ic_tab_terminal,
-    )
 
     /** Cột bên trái: logo + tên app ở trên cùng, bên dưới là các tab xếp dọc. */
     private fun buildSidebar(initialTab: Int, onSelect: (Int) -> Unit): View {
@@ -925,11 +921,6 @@ class OverlayService : Service() {
             } else {
                 indicator.translationY = target
             }
-            // Chữ và icon đổi màu cùng nhau
-            fun paint(t: TextView, c: Int) {
-                t.setTextColor(c)
-                t.compoundDrawablesRelative[0]?.setTint(c)
-            }
             tabs.forEachIndexed { idx, t ->
                 val to = if (idx == i) colorOn else colorOff
                 if (animate) {
@@ -937,10 +928,10 @@ class OverlayService : Service() {
                         android.animation.ArgbEvaluator(), t.currentTextColor, to,
                     ).apply {
                         duration = TAB_ANIM_MS
-                        addUpdateListener { paint(t, it.animatedValue as Int) }
+                        addUpdateListener { t.setTextColor(it.animatedValue as Int) }
                     }.start()
                 } else {
-                    paint(t, to)
+                    t.setTextColor(to)
                 }
             }
             current = i
@@ -954,11 +945,6 @@ class OverlayService : Service() {
                 ellipsize = TextUtils.TruncateAt.END
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(12), 0, dp(10), 0)
-                compoundDrawablePadding = dp(10)
-                androidx.core.content.ContextCompat.getDrawable(this@OverlayService, tabIcons[i])?.mutate()?.let { ic ->
-                    ic.setBounds(0, 0, dp(18), dp(18))
-                    setCompoundDrawablesRelative(ic, null, null, null)
-                }
                 setOnClickListener { select(i, animate = true) }
             }
             tabs.add(t)
