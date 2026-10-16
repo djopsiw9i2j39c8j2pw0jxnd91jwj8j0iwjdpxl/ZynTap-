@@ -54,7 +54,8 @@ import java.util.concurrent.Executors;
 public final class InputProxy {
 
     // ---- hằng số linux/input ---------------------------------------------------------------
-    private static final int EV_SYN = 0x00, EV_ABS = 0x03;
+    private static final int EV_SYN = 0x00, EV_KEY = 0x01, EV_ABS = 0x03;
+    private static final int BTN_TOUCH = 0x14a;
     private static final int SYN_REPORT = 0x00, SYN_DROPPED = 0x03;
     private static final int ABS_MT_SLOT = 0x2f, ABS_MT_TOUCH_MAJOR = 0x30, ABS_MT_TOUCH_MINOR = 0x31;
     private static final int ABS_MT_POSITION_X = 0x35, ABS_MT_POSITION_Y = 0x36;
@@ -65,7 +66,13 @@ public final class InputProxy {
     private static final int REAL_SLOTS = 16;          // ngón thật: pointer id 0..15
     private static final int SYNTH_BASE = 16;          // click của app: pointer id 16..23
     private static final int SYNTH_COUNT = 8;
-    private static final long WATCHDOG_MS = 3000;
+    /**
+     * Mất nhịp tim quá ngần này thì helper tự thoát. Helper vẫn phát lại ngón thật bình thường trong lúc chờ nên nới rộng
+     * không làm đơ gì; ngắn quá thì Wi-Fi chập chờn / game ngốn CPU là helper bị tắt oan giữa lúc ngón đang chạm.
+     */
+    private static final long WATCHDOG_MS = 6000;
+    /** Thời gian tối đa chờ ngón thật nhấc lên (reader VẪN phát lại) trước khi nhả grab lúc thoát. */
+    private static final long DRAIN_MS = 1500;
     /** Số lần phát sự kiện thất bại liên tiếp thì coi bộ phát đã hỏng và nhả grab NGAY (tránh liệt cảm ứng toàn máy). */
     private static final int MAX_INJECT_FAILS = 4;
 
@@ -86,7 +93,7 @@ public final class InputProxy {
     private static final BlockingQueue<String> OUTQ = new ArrayBlockingQueue<>(512);
     private static volatile boolean outThreadOn = false;
     private static volatile boolean urgentRelease = false;
-    private static int injectFails = 0;   // chỉ đụng dưới LOCK
+    private static int injectFails = 0;   // chỉ đụng trong luồng gửi (zyn-send)
 
     private static void out(String line) {
         if (!outThreadOn) { OUT.println(line); return; }
@@ -142,9 +149,14 @@ public final class InputProxy {
     private static int deviceId = 0;
 
     private static FileInputStream devIn;
-    private static boolean injecting = false;
+    private static volatile boolean injecting = false;
     private static boolean grabbed = false;
+    /** Đã yêu cầu thoát: không nhận lệnh nữa, NHƯNG reader vẫn chạy cho tới khi nhả grab ([released]). */
     private static volatile boolean stopping = false;
+    /** Đã nhả grab (đóng fd): chỉ lúc này reader mới được dừng. */
+    private static volatile boolean released = false;
+    /** Sau SYN_DROPPED: bỏ mọi sự kiện cho tới SYN_REPORT kế tiếp (chỉ đụng dưới LOCK). */
+    private static boolean discarding = false;
     private static volatile long lastPing = SystemClock.uptimeMillis();
     private static final ExecutorService TAPS = Executors.newSingleThreadExecutor();
 
@@ -193,10 +205,19 @@ public final class InputProxy {
             injector = inj;
             grabbed = grab(devIn.getFD());
             injecting = grabbed;
+            if (grabbed && !clearStaleAfterGrab()) {
+                // Grab được mà bộ phát không chạy = mất cảm ứng toàn máy. Nhả grab ngay (đóng + mở lại fd), chạy thụ động.
+                log("bộ phát không hoạt động sau grab -> nhả grab, chạy thụ động");
+                injecting = false;
+                grabbed = false;
+                try { devIn.close(); } catch (Throwable ignored) { }
+                devIn = new FileInputStream(devPath);
+            }
         }
         OUT.println("READY grab=" + (grabbed ? 1 : 0) + " inj=" + (injecting ? 1 : 0) + " dev=" + deviceId);
 
         startOutThread();
+        if (injecting) startSender();
         Thread reader = new Thread(InputProxy::readLoop, "zyn-reader");
         reader.setDaemon(true);
         reader.start();
@@ -248,8 +269,7 @@ public final class InputProxy {
         while (!stopping) {
             if (SystemClock.uptimeMillis() - lastPing > WATCHDOG_MS) {
                 log("watchdog");
-                urgentRelease = true; // mất nhịp tim: nhả grab ngay, không chờ ngón thật nhấc lên
-                shutdown();
+                shutdown(); // mất nhịp tim: chờ ngón thật nhấc (reader vẫn phát lại) rồi nhả grab
                 return;
             }
             SystemClock.sleep(500);
@@ -262,7 +282,9 @@ public final class InputProxy {
         byte[] acc = new byte[9600];
         int n = 0;
         try {
-            while (!stopping) {
+            // Chạy cho tới khi đã nhả grab ([released]), KHÔNG dừng ngay khi [stopping]: đang thoát mà grab còn giữ thì
+            // reader mà dừng là cảm ứng cả máy đơ cho tới khi nhả grab.
+            while (!released) {
                 int r = devIn.read(buf);
                 if (r < 0) break;
                 if (r == 0) continue;
@@ -272,7 +294,7 @@ public final class InputProxy {
                 if (recSize == 0) {
                     if (n < 48) continue;
                     recSize = valid(acc, 24) ? 24 : valid(acc, 16) ? 16 : -1;
-                    if (recSize < 0) { out("FAIL not input_event"); shutdown(); return; }
+                    if (recSize < 0) { out("FAIL not input_event"); urgentRelease = true; shutdown(); return; }
                 }
                 int off = 0;
                 while (n - off >= recSize) {
@@ -285,6 +307,7 @@ public final class InputProxy {
         } catch (IOException e) {
             log("read: " + e);
         }
+        urgentRelease = true; // reader đã chết: không còn gì để phát lại, nhả grab ngay
         shutdown();
     }
 
@@ -304,7 +327,23 @@ public final class InputProxy {
 
     private static void onEvent(int type, int code, int value) {
         synchronized (LOCK) {
-            if (type == EV_ABS) {
+            if (type == EV_SYN && code == SYN_DROPPED) {
+                // Kernel tràn bộ đệm: các sự kiện tới SYN_REPORT kế tiếp phải bỏ. KHÔNG coi mọi ngón là đã nhả
+                // (trước đây làm ngón đang kéo bị "chết" cho tới khi nhấc lên chạm lại vì tracking id không gửi lại).
+                // Ngón nhả đúng lúc mất sự kiện thì BTN_TOUCH=0 / TRACKING_ID=-1 kế tiếp sẽ dọn.
+                discarding = true;
+                return;
+            }
+            if (discarding) {
+                if (type == EV_SYN && code == SYN_REPORT) discarding = false;
+                return;
+            }
+            if (type == EV_KEY) {
+                // BTN_TOUCH=0: không còn ngón nào chạm -> dọn hết, phòng khi mất sự kiện nhả của một ngón
+                if (code == BTN_TOUCH && value == 0) {
+                    for (int i = 0; i < REAL_SLOTS; i++) { rawActive[i] = false; tid[i] = -1; }
+                }
+            } else if (type == EV_ABS) {
                 switch (code) {
                     case ABS_MT_SLOT:
                         curSlot = Math.max(0, Math.min(REAL_SLOTS, value));
@@ -314,7 +353,7 @@ public final class InputProxy {
                         if (value == -1) {
                             rawActive[curSlot] = false;
                             tid[curSlot] = -1;
-                        } else if (!rawActive[curSlot]) {
+                        } else if (!rawActive[curSlot] || tid[curSlot] != value) {
                             rawActive[curSlot] = true;
                             tid[curSlot] = value;
                             hasX[curSlot] = false;
@@ -343,12 +382,7 @@ public final class InputProxy {
                         break;
                 }
             } else if (type == EV_SYN) {
-                if (code == SYN_DROPPED) {
-                    // Mất đồng bộ: coi như mọi ngón đã nhả, đợi ngón mới
-                    for (int i = 0; i < REAL_SLOTS; i++) { rawActive[i] = false; tid[i] = -1; }
-                } else if (code == SYN_REPORT) {
-                    sync();
-                }
+                if (code == SYN_REPORT) sync();
             }
         }
     }
@@ -476,18 +510,106 @@ public final class InputProxy {
         long now = SystemClock.uptimeMillis();
         MotionEvent ev = MotionEvent.obtain(downTime, now, action, n, props, coords,
                 0, 0, 1f, 1f, deviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+        enqueue(ev);
+    }
+
+    // ---- hàng đợi gửi: tách việc bơm (gọi binder, có thể chậm) khỏi luồng đọc cảm ứng ---------------
+    private static final java.util.ArrayDeque<MotionEvent> SENDQ = new java.util.ArrayDeque<>();
+    private static final Object QLOCK = new Object();
+    private static boolean sending = false;          // chỉ đụng dưới QLOCK
+    private static volatile boolean senderOn = false;
+
+    /**
+     * Xếp sự kiện vào hàng đợi (gọi dưới LOCK, không bao giờ chặn). Luồng đọc không còn bị kẹt khi system_server bận:
+     * trước đây bơm ngay trong LOCK, binder chậm một nhịp là kernel tràn bộ đệm -> SYN_DROPPED -> ngón thật mất.
+     * Hàng đợi dài thì gộp các MOVE liền nhau (MOVE mang trọn trạng thái mọi pointer nên gộp không mất gì).
+     */
+    private static void enqueue(MotionEvent ev) {
+        synchronized (QLOCK) {
+            MotionEvent last = SENDQ.peekLast();
+            if (last != null && SENDQ.size() >= 4
+                    && ev.getActionMasked() == MotionEvent.ACTION_MOVE
+                    && last.getActionMasked() == MotionEvent.ACTION_MOVE) {
+                SENDQ.pollLast().recycle();
+            }
+            SENDQ.addLast(ev);
+            QLOCK.notifyAll();
+        }
+    }
+
+    private static void startSender() {
+        senderOn = true;
+        Thread t = new Thread(InputProxy::senderLoop, "zyn-send");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static void senderLoop() {
+        while (true) {
+            MotionEvent ev;
+            synchronized (QLOCK) {
+                while (SENDQ.isEmpty()) {
+                    if (released) return;
+                    try { QLOCK.wait(200); } catch (InterruptedException e) { return; }
+                }
+                ev = SENDQ.pollFirst();
+                sending = true;
+            }
+            try {
+                injector.inject(ev);
+                injectFails = 0;
+            } catch (Throwable t) {
+                log("inject fail: " + t);
+                if (++injectFails >= MAX_INJECT_FAILS && injecting) {
+                    // Bộ phát hỏng mà grab vẫn còn = cảm ứng chết cả máy. Nhả grab ngay (đóng fd), huỷ ngón kẹt.
+                    injecting = false;
+                    urgentRelease = true;
+                    log("inject hỏng liên tiếp -> nhả cảm ứng ngay");
+                    new Thread(InputProxy::shutdown, "zyn-bail").start();
+                }
+            } finally {
+                ev.recycle();
+                synchronized (QLOCK) { sending = false; QLOCK.notifyAll(); }
+            }
+        }
+    }
+
+    /** Chờ hàng đợi gửi cạn (tối đa [maxMs]) để CANCEL/UP cuối cùng chắc chắn tới hệ thống trước khi nhả grab. */
+    private static void flushQueue(long maxMs) {
+        if (!senderOn) return;
+        long end = SystemClock.uptimeMillis() + maxMs;
+        synchronized (QLOCK) {
+            while (!SENDQ.isEmpty() || sending) {
+                long left = end - SystemClock.uptimeMillis();
+                if (left <= 0) break;
+                try { QLOCK.wait(left); } catch (InterruptedException e) { break; }
+            }
+        }
+    }
+
+    /**
+     * Ngay sau grab: bơm một ACTION_CANCEL cho thiết bị cảm ứng để xoá trạng thái "ngón đang chạm" cũ trong InputDispatcher.
+     * Nếu lúc grab có ngón đang đặt trên màn hình, InputReader không bao giờ nhận được sự kiện nhả của ngón đó -> hệ thống
+     * coi thiết bị vẫn đang chạm, và mọi DOWN do helper bơm sau đó bị coi là "down khi đang down" rồi bị bỏ (ngón thật + click
+     * đều chết). CANCEL khi không có gì đang chạm thì bị hệ thống lặng lẽ bỏ qua nên vô hại.
+     * @return false nếu bơm báo lỗi (bộ phát không dùng được).
+     */
+    private static boolean clearStaleAfterGrab() {
+        MotionEvent.PointerProperties[] props = { new MotionEvent.PointerProperties() };
+        MotionEvent.PointerCoords[] coords = { new MotionEvent.PointerCoords() };
+        props[0].id = 0;
+        props[0].toolType = MotionEvent.TOOL_TYPE_FINGER;
+        coords[0].x = scrW / 2f;
+        coords[0].y = scrH / 2f;
+        long now = SystemClock.uptimeMillis();
+        MotionEvent ev = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, 1, props, coords,
+                0, 0, 1f, 1f, deviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
         try {
             injector.inject(ev);
-            injectFails = 0;
+            return true;
         } catch (Throwable t) {
-            log("inject fail: " + t);
-            if (++injectFails >= MAX_INJECT_FAILS && injecting) {
-                // Bộ phát hỏng mà grab vẫn còn = cảm ứng chết cả máy. Nhả grab ngay (đóng fd), huỷ ngón kẹt.
-                injecting = false;
-                urgentRelease = true;
-                log("inject hỏng liên tiếp -> nhả cảm ứng ngay");
-                new Thread(InputProxy::shutdown, "zyn-bail").start();
-            }
+            log("probe inject: " + t);
+            return false;
         } finally {
             ev.recycle();
         }
@@ -510,6 +632,7 @@ public final class InputProxy {
             }
             synchronized (LOCK) {
                 if (!injecting) { out("ERR " + id + " passive"); return; }
+                if (stopping) { out("ERR " + id + " stopping"); return; }
                 for (int i = 0; i < SYNTH_COUNT; i++) {
                     if (!synth.containsKey(SYNTH_BASE + i)) { sid = SYNTH_BASE + i; break; }
                 }
@@ -550,29 +673,41 @@ public final class InputProxy {
         // Chốt chặn cuối: dù bước dọn dưới đây kẹt (khoá LOCK, bộ phát treo...) tiến trình vẫn phải chết,
         // nếu không helper mồ côi giữ grab cảm ứng và lần mở app sau không bơm được.
         Thread killer = new Thread(() -> {
-            SystemClock.sleep(3000);
+            SystemClock.sleep(DRAIN_MS + 1500);
             Runtime.getRuntime().halt(0);
         }, "zyn-kill");
         killer.setDaemon(true);
         killer.start();
         try {
-            // Nhả grab khi đã không còn ngón thật chạm (tối đa ~1.5s) để hệ thống không bị kẹt ngón "ma".
-            long end = SystemClock.uptimeMillis() + 1500;
+            // 1) Huỷ click của app ngay (UP cho pointer giả). Ngón thật KHÔNG bị đụng tới.
+            synchronized (LOCK) {
+                if (!synth.isEmpty()) {
+                    synth.clear();
+                    sync();
+                }
+            }
+            // 2) Chờ ngón thật nhấc lên rồi mới nhả grab. Reader VẪN đang chạy và phát lại ngón thật trong lúc chờ
+            //    (bản cũ dừng reader trước khi chờ -> cảm ứng cả máy đứng hình tới 1.5s mỗi lần helper tắt/khởi động lại).
+            long end = SystemClock.uptimeMillis() + DRAIN_MS;
             while (!urgentRelease && SystemClock.uptimeMillis() < end) {
                 boolean any = false;
                 synchronized (LOCK) { for (int i = 0; i < REAL_SLOTS; i++) any |= rawActive[i]; }
                 if (!any) break;
-                SystemClock.sleep(30);
+                SystemClock.sleep(15);
             }
+            // 3) Còn ngón thật đặt trên màn hình (quá hạn / khẩn cấp) -> báo CANCEL cho hệ thống để không kẹt ngón.
             synchronized (LOCK) {
                 synth.clear();
                 if (injecting && !shown.isEmpty()) {
                     emit(MotionEvent.ACTION_CANCEL, -1);
                     shown.clear();
                 }
+                injecting = false;
             }
+            flushQueue(400);
         } catch (Throwable ignored) {
         }
+        released = true;
         try { if (devIn != null) devIn.close(); } catch (Throwable ignored) { } // đóng fd = nhả grab
         try { OUT.println("LOG bye"); } catch (Throwable ignored) { }
         Runtime.getRuntime().halt(0);
