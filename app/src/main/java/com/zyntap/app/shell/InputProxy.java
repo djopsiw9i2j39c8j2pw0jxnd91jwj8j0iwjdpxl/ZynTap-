@@ -31,10 +31,12 @@ import java.util.concurrent.Executors;
  *   <li>Mở tấm cảm ứng thật (đường dẫn do app tự dò), {@code EVIOCGRAB} để hệ thống KHÔNG nhận trực tiếp
  *       sự kiện của ngón thật nữa.</li>
  *   <li>Tự đọc sự kiện ngón thật rồi phát lại vào hệ thống dưới dạng {@link MotionEvent} (cùng deviceId,
- *       source cảm ứng của máy). Ngón thật = các pointer id 0..15.</li>
+ *       source cảm ứng của máy). Ngón thật = nguồn slot 0..15.</li>
  *   <li>Click của app (lệnh {@code TAP}) được nhét vào CHÍNH luồng đó dưới dạng một pointer thêm
- *       (id 16..23), mang áp lực / kích cỡ clone từ ngón thật gần nhất. Chỉ còn MỘT luồng chạm duy nhất
+ *       (nguồn 16..23), mang áp lực / kích cỡ clone từ ngón thật gần nhất. Chỉ còn MỘT luồng chạm duy nhất
  *       nên ngón thật không bị mất khi app đang click.</li>
+ *   <li>Pointer id gửi cho hệ thống được cấp lại như máy thật (số nhỏ nhất còn trống), nên click của app và
+ *       ngón thật hòa vào nhau như hai ngón thật, không phụ thuộc ai chạm trước.</li>
  * </ol>
  *
  * An toàn: grab là của file descriptor, tiến trình chết / thoát là kernel tự nhả grab. Mất heartbeat
@@ -63,7 +65,7 @@ public final class InputProxy {
     private static final int EVIOCGRAB = 0x40044590;
 
     private static final int REAL_SLOTS = 16;          // ngón thật: pointer id 0..15
-    private static final int SYNTH_BASE = 16;          // click của app: pointer id 16..23
+    private static final int SYNTH_BASE = 16;          // khoá nguồn của click app: 16..23 (id gửi đi được cấp lại, xem shown)
     private static final int SYNTH_COUNT = 8;
     private static final long WATCHDOG_MS = 3000;
     /** Số lần phát sự kiện thất bại liên tiếp thì coi bộ phát đã hỏng và nhả grab NGAY (tránh liệt cảm ứng toàn máy). */
@@ -134,7 +136,15 @@ public final class InputProxy {
         boolean same(P o) { return x == o.x && y == o.y && pressure == o.pressure && major == o.major; }
     }
 
-    private static final TreeMap<Integer, P> shown = new TreeMap<>();   // hệ thống đang thấy
+    /**
+     * Hệ thống đang thấy, khoá = pointer id GỬI ĐI (không phải id nguồn). Id gửi đi được cấp lại theo kiểu máy
+     * thật: luôn là số nhỏ nhất còn trống (0,1,2...), bất kể là ngón thật hay click của app. Nhờ vậy game
+     * không bao giờ thấy "ngón số 16" lạ, và dù click của app chạm trước hay ngón thật chạm trước thì luồng
+     * MotionEvent vẫn y hệt hai ngón thật chạm lần lượt (DOWN -> POINTER_DOWN -> POINTER_UP...).
+     */
+    private static final TreeMap<Integer, P> shown = new TreeMap<>();
+    private static final HashMap<Integer, Integer> idOfSrc = new HashMap<>();  // khoá nguồn -> id gửi đi
+    private static final HashMap<Integer, Integer> srcOfId = new HashMap<>();  // id gửi đi -> khoá nguồn
     private static final HashMap<Integer, P> synth = new HashMap<>();   // click của app đang giữ
     private static long downTime = 0;
     private static long lastRealUpAt = 0;   // uptime lúc ngón thật gần nhất vừa nhả (chỉ đụng dưới LOCK)
@@ -424,25 +434,34 @@ public final class InputProxy {
 
         for (Map.Entry<Integer, P> e : synth.entrySet()) want.put(e.getKey(), e.getValue());
 
-        // 1) pointer biến mất -> UP
-        for (Integer id : new ArrayList<>(shown.keySet())) {
-            if (!want.containsKey(id)) {
+        // Khoá nguồn: 0..15 = ngón thật (slot), 16..23 = click của app
+        // 1) nguồn biến mất -> UP (giữ nguyên id gửi đi của các ngón còn lại)
+        for (Integer src : new ArrayList<>(idOfSrc.keySet())) {
+            if (!want.containsKey(src)) {
+                int id = idOfSrc.get(src);
                 emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, id);
                 shown.remove(id);
+                idOfSrc.remove(src);
+                srcOfId.remove(id);
             }
         }
-        // 2) pointer mới -> DOWN
+        // 2) nguồn mới -> cấp id nhỏ nhất còn trống rồi DOWN
         for (Map.Entry<Integer, P> e : want.entrySet()) {
-            if (!shown.containsKey(e.getKey())) {
+            if (!idOfSrc.containsKey(e.getKey())) {
+                int id = 0;
+                while (shown.containsKey(id)) id++;
                 if (shown.isEmpty()) downTime = SystemClock.uptimeMillis();
-                shown.put(e.getKey(), e.getValue().copy());
-                emit(shown.size() == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN, e.getKey());
+                idOfSrc.put(e.getKey(), id);
+                srcOfId.put(id, e.getKey());
+                shown.put(id, e.getValue().copy());
+                emit(shown.size() == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN, id);
             }
         }
         // 3) di chuyển
         boolean moved = false;
         for (Map.Entry<Integer, P> e : shown.entrySet()) {
-            P w = want.get(e.getKey());
+            Integer src = srcOfId.get(e.getKey());
+            P w = src == null ? null : want.get(src);
             if (w != null && !w.same(e.getValue())) { e.setValue(w.copy()); moved = true; }
         }
         if (moved) emit(MotionEvent.ACTION_MOVE, -1);
@@ -569,6 +588,8 @@ public final class InputProxy {
                 if (injecting && !shown.isEmpty()) {
                     emit(MotionEvent.ACTION_CANCEL, -1);
                     shown.clear();
+                    idOfSrc.clear();
+                    srcOfId.clear();
                 }
             }
         } catch (Throwable ignored) {
