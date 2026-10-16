@@ -19,8 +19,6 @@ import java.util.TreeMap;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
 
 /**
@@ -37,8 +35,6 @@ import java.util.concurrent.Executors;
  *   <li>Click của app (lệnh {@code TAP}) được nhét vào CHÍNH luồng đó dưới dạng một pointer thêm
  *       (id 16..23), mang áp lực / kích cỡ clone từ ngón thật gần nhất. Chỉ còn MỘT luồng chạm duy nhất
  *       nên ngón thật không bị mất khi app đang click.</li>
- *   <li>Bàn giao luồng: nếu ngón thật chạm lúc hệ thống chỉ đang thấy click của app, click của app được
- *       kết thúc trước rồi ngón thật mới vào làm ngón ĐẦU của cử chỉ mới. Click app luôn chỉ là ngón phụ.</li>
  * </ol>
  *
  * An toàn: grab là của file descriptor, tiến trình chết / thoát là kernel tự nhả grab. Mất heartbeat
@@ -138,8 +134,7 @@ public final class InputProxy {
         boolean same(P o) { return x == o.x && y == o.y && pressure == o.pressure && major == o.major; }
     }
 
-    private static final TreeMap<Integer, P> shown = new TreeMap<>();   // hệ thống đang thấy (khoá = pointer id)
-    private static final HashMap<Integer, Long> synthDownAt = new HashMap<>(); // uptime lúc mỗi click app bắt đầu chạm
+    private static final TreeMap<Integer, P> shown = new TreeMap<>();   // hệ thống đang thấy
     private static final HashMap<Integer, P> synth = new HashMap<>();   // click của app đang giữ
     private static long downTime = 0;
     private static long lastRealUpAt = 0;   // uptime lúc ngón thật gần nhất vừa nhả (chỉ đụng dưới LOCK)
@@ -152,13 +147,6 @@ public final class InputProxy {
     private static volatile boolean stopping = false;
     private static volatile long lastPing = SystemClock.uptimeMillis();
     private static final ExecutorService TAPS = Executors.newSingleThreadExecutor();
-    private static final ScheduledExecutorService RESYNC = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "zyn-resync");
-        t.setDaemon(true);
-        return t;
-    });
-    /** Click app phải chạm ít nhất chừng này ms thì mới bàn giao luồng cho ngón thật (để game kịp thấy click). */
-    private static final long HANDOFF_MIN_MS = 30;
 
     // ---- phát hiện kích thước bản ghi input_event ---------------------------------------------
     private static int recSize = 0;
@@ -436,43 +424,11 @@ public final class InputProxy {
 
         for (Map.Entry<Integer, P> e : synth.entrySet()) want.put(e.getKey(), e.getValue());
 
-        // BÀN GIAO LUỒNG: ngón thật vừa chạm trong khi hệ thống chỉ đang thấy click của app (app chạm trước).
-        // Nếu để ngón thật vào làm ngón thứ hai, game thấy một cử chỉ bắt đầu bằng ngón app rồi ngón app nhấc
-        // lên, còn ngón thật mới là ngón "phụ" suốt từ đó -> điều khiển/xoay bị kẹt, khựng. Cách xử lý: kết thúc
-        // click của app trước (UP), để ngón thật là ngón ĐẦU của cử chỉ mới (ACTION_DOWN). Các click app sau đó
-        // chỉ là ngón phụ, y như trường hợp giữ tay trước rồi mới bấm app (mượt).
-        boolean newReal = false, onlySynth = !shown.isEmpty();
-        for (Integer k : want.keySet()) if (k < SYNTH_BASE && !shown.containsKey(k)) newReal = true;
-        for (Integer k : shown.keySet()) if (k < SYNTH_BASE) onlySynth = false;
-        if (newReal && onlySynth) {
-            long now = SystemClock.uptimeMillis();
-            long youngest = 0;
-            for (Integer k : shown.keySet()) {
-                Long t0 = synthDownAt.get(k);
-                if (t0 != null) youngest = Math.max(youngest, t0);
-            }
-            long wait = youngest + HANDOFF_MIN_MS - now;
-            if (wait > 0) {
-                // Click app mới chạm quá ngắn: chờ cho game kịp thấy nó rồi mới bàn giao (ngón thật được giữ lại, chưa phát)
-                for (Integer k : new ArrayList<>(want.keySet())) if (k < SYNTH_BASE) want.remove(k);
-                scheduleResync(wait);
-            } else {
-                for (Integer id : new ArrayList<>(shown.keySet())) {
-                    emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, id);
-                    shown.remove(id);
-                    synth.remove(id);
-                    synthDownAt.remove(id);
-                    want.remove(id);
-                }
-            }
-        }
-
         // 1) pointer biến mất -> UP
         for (Integer id : new ArrayList<>(shown.keySet())) {
             if (!want.containsKey(id)) {
                 emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, id);
                 shown.remove(id);
-                synthDownAt.remove(id);
             }
         }
         // 2) pointer mới -> DOWN
@@ -480,7 +436,6 @@ public final class InputProxy {
             if (!shown.containsKey(e.getKey())) {
                 if (shown.isEmpty()) downTime = SystemClock.uptimeMillis();
                 shown.put(e.getKey(), e.getValue().copy());
-                if (e.getKey() >= SYNTH_BASE) synthDownAt.put(e.getKey(), SystemClock.uptimeMillis());
                 emit(shown.size() == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN, e.getKey());
             }
         }
@@ -491,13 +446,6 @@ public final class InputProxy {
             if (w != null && !w.same(e.getValue())) { e.setValue(w.copy()); moved = true; }
         }
         if (moved) emit(MotionEvent.ACTION_MOVE, -1);
-    }
-
-    /** Chạy lại sync() sau ms (dùng khi hoãn bàn giao luồng). */
-    private static void scheduleResync(long ms) {
-        RESYNC.schedule(() -> {
-            synchronized (LOCK) { if (!stopping) sync(); }
-        }, Math.max(1, ms), TimeUnit.MILLISECONDS);
     }
 
     private static void emit(int baseAction, int pointerId) {
