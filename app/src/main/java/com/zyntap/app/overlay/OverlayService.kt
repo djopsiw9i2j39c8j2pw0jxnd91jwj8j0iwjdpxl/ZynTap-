@@ -986,59 +986,43 @@ class OverlayService : Service() {
     private var statusPulsing = false
 
     /**
-     * Thẻ trạng thái: mỗi dòng gồm chấm màu có quầng sáng + nhãn nhỏ mờ phía trên
-     * + giá trị đậm màu theo trạng thái phía dưới. Hai dòng ngăn bằng một đường mảnh.
+     * Thẻ trạng thái gọn: mỗi dòng 1 hàng = chấm màu có quầng sáng + nhãn mờ + giá trị đậm
+     * theo màu trạng thái. Cố ý thấp để không đè lên tab cuối của cột.
      */
     private fun buildStatus(): View {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(11), dp(9), dp(11), dp(9))
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                intArrayOf(0x1CFFFFFF, 0x0DFFFFFF),
-            ).apply {
-                cornerRadius = dp(12).toFloat()
-                setStroke(dp(1).coerceAtLeast(1), 0x1FFFFFFF)
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            background = GradientDrawable().apply {
+                setColor(0x12FFFFFF)
+                cornerRadius = dp(10).toFloat()
+                setStroke(1, 0x1AFFFFFF)
             }
         }
-        class Row(val view: View, val halo: View, val dot: View, val value: TextView)
-        fun row(label: String): Row {
+        class Row(val view: View, val halo: View, val dot: View, val text: TextView)
+        fun row(): Row {
             val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            // Chấm + quầng sáng xếp chồng trong khung 16dp
             val holder = FrameLayout(this)
             val halo = View(this)
             val dot = View(this)
-            holder.addView(halo, FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
-            holder.addView(dot, FrameLayout.LayoutParams(dp(8), dp(8), Gravity.CENTER))
-            val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            texts.addView(TextView(this).apply {
-                text = label.uppercase()
-                setTextColor(0xFF7C8CAA.toInt()); scaledTextSize(9f); maxLines = 1
-                letterSpacing = 0.08f
-                setTypeface(typeface, Typeface.BOLD)
-            })
-            val value = TextView(this).apply {
-                setTextColor(0xFFE8EEFA.toInt()); scaledTextSize(12.5f); maxLines = 1
+            holder.addView(halo, FrameLayout.LayoutParams(dp(14), dp(14), Gravity.CENTER))
+            holder.addView(dot, FrameLayout.LayoutParams(dp(7), dp(7), Gravity.CENTER))
+            val tv = TextView(this).apply {
+                scaledTextSize(11.5f); maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
-                setTypeface(typeface, Typeface.BOLD)
             }
-            texts.addView(value, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(1) })
-            r.addView(holder, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(9) })
-            r.addView(texts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            return Row(r, halo, dot, value)
+            r.addView(holder, LinearLayout.LayoutParams(dp(14), dp(14)).apply { marginEnd = dp(7) })
+            r.addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            return Row(r, halo, dot, tv)
         }
-        val wifi = row("Gỡ lỗi Wi-Fi")
-        val link = row("Kết nối")
+        val wifi = row()
+        val link = row()
         box.addView(wifi.view)
-        box.addView(View(this).apply { setBackgroundColor(0x14FFFFFF) },
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1).apply {
-                topMargin = dp(8); bottomMargin = dp(8)
-            })
-        box.addView(link.view)
-        statusWifiDot = wifi.dot; statusWifiHalo = wifi.halo; statusWifiText = wifi.value
-        statusLinkDot = link.dot; statusLinkHalo = link.halo; statusLinkText = link.value
+        box.addView(link.view, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(6) })
+        statusWifiDot = wifi.dot; statusWifiHalo = wifi.halo; statusWifiText = wifi.text
+        statusLinkDot = link.dot; statusLinkHalo = link.halo; statusLinkText = link.text
         refreshStatus()
         return box
     }
@@ -1051,24 +1035,33 @@ class OverlayService : Service() {
         val warn = 0xFFF5B544.toInt()
         val bad = 0xFFEF5B5B.toInt()
         fun circle(c: Int) = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(c) }
-        fun paint(dot: View?, halo: View?, value: TextView?, c: Int, text: String) {
+        fun paint(dot: View?, halo: View?, tv: TextView?, c: Int, label: String, value: String) {
             dot?.background = circle(c)
-            halo?.background = circle((c and 0x00FFFFFF) or 0x38000000)
-            value?.text = text
-            value?.setTextColor(c)
+            halo?.background = circle((c and 0x00FFFFFF) or 0x30000000)
+            tv ?: return
+            val sp = android.text.SpannableStringBuilder("$label  ")
+            sp.setSpan(android.text.style.ForegroundColorSpan(0xFF8D9DBA.toInt()),
+                0, sp.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            val from = sp.length
+            sp.append(value)
+            sp.setSpan(android.text.style.ForegroundColorSpan(c),
+                from, sp.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            sp.setSpan(android.text.style.StyleSpan(Typeface.BOLD),
+                from, sp.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            tv.text = sp
         }
 
         paint(statusWifiDot, statusWifiHalo, statusWifiText,
-            if (wifiOn) ok else bad, if (wifiOn) "Đang bật" else "Đang tắt")
+            if (wifiOn) ok else bad, "Wi-Fi", if (wifiOn) "Bật" else "Tắt")
 
         val pulse: Boolean
         val (c, t) = when {
-            linked -> { pulse = false; ok to "Đã kết nối" }
-            !paired -> { pulse = false; bad to "Chưa ghép nối" }
+            linked -> { pulse = false; ok to "Đã nối" }
+            !paired -> { pulse = false; bad to "Chưa ghép" }
             !wifiOn -> { pulse = false; bad to "Đã ngắt" }
-            else -> { pulse = true; warn to "Đang nối lại…" }
+            else -> { pulse = true; warn to "Nối lại…" }
         }
-        paint(statusLinkDot, statusLinkHalo, statusLinkText, c, t)
+        paint(statusLinkDot, statusLinkHalo, statusLinkText, c, "ADB", t)
         setStatusPulse(pulse)
     }
 
