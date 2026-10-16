@@ -17,7 +17,7 @@ import android.widget.TextView
  */
 internal fun addTabHeader(ctx: Context, page: LinearLayout, title: String, subtitle: String): TextView {
     val d = UiScale.density(ctx.resources)
-    // Khối tiêu đề cao cố định HEADER_H_DP: cùng độ cao với khối logo ở cột trái -> đường kẻ hai bên thẳng hàng
+    // Khối tiêu đề cao cố định HEADER_H_DP: cùng độ cao với khối logo ở cột trái (đường kẻ chỉ còn ở dưới logo, không kẻ dưới tiêu đề tab)
     val titleBox = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
         gravity = android.view.Gravity.CENTER_VERTICAL
@@ -40,11 +40,10 @@ internal fun addTabHeader(ctx: Context, page: LinearLayout, title: String, subti
         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (HEADER_H_DP * d).toInt())
             .apply { marginEnd = (128 * d).toInt() },
     )
-    // Không còn đường kẻ dưới tiêu đề; bù 1dp vào lề dưới để nội dung giữ nguyên độ cao
     page.addView(
         wrap,
         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            .apply { bottomMargin = (11 * d).toInt() },
+            .apply { bottomMargin = (10 * d).toInt() },
     )
     return sub
 }

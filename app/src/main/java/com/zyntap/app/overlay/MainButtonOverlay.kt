@@ -258,6 +258,7 @@ class MainButtonOverlay(
     /** Thêm nút còn thiếu, dựng lại nút bị hệ thống gỡ mất, bỏ nút đã xoá. Gọi lặp lại thoải mái. */
     fun ensureAll() {
         if (!OverlayPermission.granted(ctx)) return
+        closed = false
         val now = SystemClock.uptimeMillis()
         entries.entries.toList().forEach { (id, e) ->
             if (repo.find(id) == null) removeView(id)
@@ -324,7 +325,9 @@ class MainButtonOverlay(
     private fun refreshWatcher() {
         // Có nút main là bật proxy: helper phải grab cảm ứng từ trước, vì lúc đang giữ ngón lên nút
         // (chế độ Giữ) mới grab thì hệ thống đã kẹt ngón thật. Cũng cần cho chạm xuyên.
-        val need = OverlayPermission.granted(ctx) && repo.buttons.isNotEmpty()
+        // Nay bật NGAY khi menu hiện (kể cả chưa có nút main nào) và giữ tới khi menu đóng hẳn, để mọi click của
+        // app luôn là ngón phụ chèn vào cùng luồng với ngón thật, không bao giờ phải mở luồng `input tap` riêng.
+        val need = OverlayPermission.granted(ctx) && !closed
         if (need) watcher.start() else { watcher.stop(); cancelWatched() }
     }
 
@@ -518,7 +521,11 @@ class MainButtonOverlay(
         entries.forEach { (id, e) -> e.view.pressedVisual = false; onCancel?.invoke(id) }
     }
 
+    /** true sau [removeAll]: các hiệu ứng muộn gọi refreshWatcher() không được bật lại proxy khi menu đã đóng. */
+    @Volatile private var closed = false
+
     fun removeAll() {
+        closed = true
         watcher.stop()
         cancelWatched()
         entries.keys.toList().forEach { removeView(it) }

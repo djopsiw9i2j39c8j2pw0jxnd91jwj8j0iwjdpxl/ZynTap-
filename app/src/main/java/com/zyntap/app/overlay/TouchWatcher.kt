@@ -445,6 +445,20 @@ class TouchWatcher(
         return true
     }
 
+    /**
+     * Chờ helper READY tối đa [maxMs] (lúc menu vừa hiện, helper còn đang khởi động). Trả true nếu sẵn sàng.
+     * Không chờ khi watcher không chạy hoặc đã bỏ helper (lùi về `cat`) -> bên gọi lùi về `input tap` ngay.
+     */
+    suspend fun awaitReady(maxMs: Long): Boolean {
+        val end = SystemClock.elapsedRealtime() + maxMs
+        while (running && proxyFails < MAX_PROXY_FAILS) {
+            if (proxyReady) return true
+            if (SystemClock.elapsedRealtime() >= end) break
+            delay(40)
+        }
+        return proxyReady
+    }
+
     @Suppress("DEPRECATION")
     private fun rotation(): Int = runCatching { wm.defaultDisplay.rotation }.getOrDefault(Surface.ROTATION_0)
 
