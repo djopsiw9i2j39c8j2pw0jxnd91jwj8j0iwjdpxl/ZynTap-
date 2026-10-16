@@ -139,7 +139,7 @@ class OverlayService : Service() {
         crosshairSettings = CrosshairSettings(this)
         crosshair = CrosshairOverlay(this, wm, crosshairSettings, { realBounds }) { w, h, f -> overlayParams(w, h, f) }
         pointRunner = PointRunner(this, { Rect(realBounds) }, { x, y ->
-            circles.containsPoint(x, y) || panelBlocksInput() || handleContainsPoint(x, y)
+            panelBlocksInput() || handleContainsPoint(x, y) // nút main đè lên điểm nhấn tự chạm xuyên nên không chặn
         }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
         pointPicker = PointPickerOverlay(this, wm, { realBounds },
             { w, h, f -> overlayParams(w, h, f) },
@@ -878,6 +878,10 @@ class OverlayService : Service() {
     }
 
     private val tabNames = listOf("Cài tâm ảo", "Tạo nút chính", "Chỉnh điểm nhấn", "Cài cấu hình", "Debug log")
+    private val tabIcons = intArrayOf(
+        R.drawable.ic_tab_crosshair, R.drawable.ic_tab_pointer, R.drawable.ic_tab_focus,
+        R.drawable.ic_tab_sliders, R.drawable.ic_tab_terminal,
+    )
 
     /** Cột bên trái: logo + tên app ở trên cùng, bên dưới là các tab xếp dọc. */
     private fun buildSidebar(initialTab: Int, onSelect: (Int) -> Unit): View {
@@ -921,6 +925,11 @@ class OverlayService : Service() {
             } else {
                 indicator.translationY = target
             }
+            // Chữ và icon đổi màu cùng nhau
+            fun paint(t: TextView, c: Int) {
+                t.setTextColor(c)
+                t.compoundDrawablesRelative[0]?.setTint(c)
+            }
             tabs.forEachIndexed { idx, t ->
                 val to = if (idx == i) colorOn else colorOff
                 if (animate) {
@@ -928,10 +937,10 @@ class OverlayService : Service() {
                         android.animation.ArgbEvaluator(), t.currentTextColor, to,
                     ).apply {
                         duration = TAB_ANIM_MS
-                        addUpdateListener { t.setTextColor(it.animatedValue as Int) }
+                        addUpdateListener { paint(t, it.animatedValue as Int) }
                     }.start()
                 } else {
-                    t.setTextColor(to)
+                    paint(t, to)
                 }
             }
             current = i
@@ -945,6 +954,11 @@ class OverlayService : Service() {
                 ellipsize = TextUtils.TruncateAt.END
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(12), 0, dp(10), 0)
+                compoundDrawablePadding = dp(10)
+                androidx.core.content.ContextCompat.getDrawable(this@OverlayService, tabIcons[i])?.mutate()?.let { ic ->
+                    ic.setBounds(0, 0, dp(18), dp(18))
+                    setCompoundDrawablesRelative(ic, null, null, null)
+                }
                 setOnClickListener { select(i, animate = true) }
             }
             tabs.add(t)
@@ -963,36 +977,68 @@ class OverlayService : Service() {
     // ---- khung trạng thái ADB ở đáy cột tab -----------------------------------
 
     private var statusWifiDot: View? = null
+    private var statusWifiHalo: View? = null
     private var statusWifiText: TextView? = null
     private var statusLinkDot: View? = null
+    private var statusLinkHalo: View? = null
     private var statusLinkText: TextView? = null
+    private var statusPulse: android.animation.ObjectAnimator? = null
+    private var statusPulsing = false
 
+    /**
+     * Thẻ trạng thái: mỗi dòng gồm chấm màu có quầng sáng + nhãn nhỏ mờ phía trên
+     * + giá trị đậm màu theo trạng thái phía dưới. Hai dòng ngăn bằng một đường mảnh.
+     */
     private fun buildStatus(): View {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val p = dp(10)
-            setPadding(p, dp(8), p, dp(8))
-            background = roundedBg(0x14FFFFFF, 10)
-        }
-        fun row(): Triple<LinearLayout, View, TextView> {
-            val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            val dot = View(this)
-            val tv = TextView(this).apply {
-                setTextColor(0xFFC3CDE2.toInt()); scaledTextSize(11.5f); maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
+            setPadding(dp(11), dp(9), dp(11), dp(9))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(0x1CFFFFFF, 0x0DFFFFFF),
+            ).apply {
+                cornerRadius = dp(12).toFloat()
+                setStroke(dp(1).coerceAtLeast(1), 0x1FFFFFFF)
             }
-            r.addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
-            r.addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            return Triple(r, dot, tv)
         }
-        val (r1, d1, t1) = row()
-        val (r2, d2, t2) = row()
-        box.addView(r1)
-        box.addView(r2, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(6) })
-        statusWifiDot = d1; statusWifiText = t1
-        statusLinkDot = d2; statusLinkText = t2
+        class Row(val view: View, val halo: View, val dot: View, val value: TextView)
+        fun row(label: String): Row {
+            val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            // Chấm + quầng sáng xếp chồng trong khung 16dp
+            val holder = FrameLayout(this)
+            val halo = View(this)
+            val dot = View(this)
+            holder.addView(halo, FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
+            holder.addView(dot, FrameLayout.LayoutParams(dp(8), dp(8), Gravity.CENTER))
+            val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            texts.addView(TextView(this).apply {
+                text = label.uppercase()
+                setTextColor(0xFF7C8CAA.toInt()); scaledTextSize(9f); maxLines = 1
+                letterSpacing = 0.08f
+                setTypeface(typeface, Typeface.BOLD)
+            })
+            val value = TextView(this).apply {
+                setTextColor(0xFFE8EEFA.toInt()); scaledTextSize(12.5f); maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                setTypeface(typeface, Typeface.BOLD)
+            }
+            texts.addView(value, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(1) })
+            r.addView(holder, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(9) })
+            r.addView(texts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            return Row(r, halo, dot, value)
+        }
+        val wifi = row("Gỡ lỗi Wi-Fi")
+        val link = row("Kết nối")
+        box.addView(wifi.view)
+        box.addView(View(this).apply { setBackgroundColor(0x14FFFFFF) },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1).apply {
+                topMargin = dp(8); bottomMargin = dp(8)
+            })
+        box.addView(link.view)
+        statusWifiDot = wifi.dot; statusWifiHalo = wifi.halo; statusWifiText = wifi.value
+        statusLinkDot = link.dot; statusLinkHalo = link.halo; statusLinkText = link.value
         refreshStatus()
         return box
     }
@@ -1004,19 +1050,50 @@ class OverlayService : Service() {
         val ok = 0xFF34D399.toInt()
         val warn = 0xFFF5B544.toInt()
         val bad = 0xFFEF5B5B.toInt()
-        fun dot(c: Int) = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(c) }
-
-        statusWifiDot?.background = dot(if (wifiOn) ok else bad)
-        statusWifiText?.text = if (wifiOn) "Gỡ lỗi Wi-Fi: Bật" else "Gỡ lỗi Wi-Fi: Tắt"
-
-        val (c, t) = when {
-            linked -> ok to "Kết nối: Đã kết nối"
-            !paired -> bad to "Kết nối: Chưa ghép nối"
-            !wifiOn -> bad to "Kết nối: Đã ngắt"
-            else -> warn to "Kết nối: Đang nối lại…"
+        fun circle(c: Int) = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(c) }
+        fun paint(dot: View?, halo: View?, value: TextView?, c: Int, text: String) {
+            dot?.background = circle(c)
+            halo?.background = circle((c and 0x00FFFFFF) or 0x38000000)
+            value?.text = text
+            value?.setTextColor(c)
         }
-        statusLinkDot?.background = dot(c)
-        statusLinkText?.text = t
+
+        paint(statusWifiDot, statusWifiHalo, statusWifiText,
+            if (wifiOn) ok else bad, if (wifiOn) "Đang bật" else "Đang tắt")
+
+        val pulse: Boolean
+        val (c, t) = when {
+            linked -> { pulse = false; ok to "Đã kết nối" }
+            !paired -> { pulse = false; bad to "Chưa ghép nối" }
+            !wifiOn -> { pulse = false; bad to "Đã ngắt" }
+            else -> { pulse = true; warn to "Đang nối lại…" }
+        }
+        paint(statusLinkDot, statusLinkHalo, statusLinkText, c, t)
+        setStatusPulse(pulse)
+    }
+
+    /** Quầng sáng nhấp nháy nhẹ khi đang nối lại; trạng thái khác thì đứng yên. */
+    private fun setStatusPulse(on: Boolean) {
+        val halo = statusLinkHalo
+        if (on && statusPulse?.target === halo) return
+        if (!on && statusPulse == null) return
+        statusPulse?.cancel(); statusPulse = null
+        halo?.alpha = 1f; halo?.scaleX = 1f; halo?.scaleY = 1f
+        statusPulsing = on
+        if (on && halo != null) {
+            statusPulse = android.animation.ObjectAnimator.ofPropertyValuesHolder(
+                halo,
+                android.animation.PropertyValuesHolder.ofFloat(View.ALPHA, 1f, 0.25f),
+                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.25f),
+                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.25f),
+            ).apply {
+                duration = 900
+                repeatCount = ValueAnimator.INFINITE
+                repeatMode = ValueAnimator.REVERSE
+                interpolator = AccelerateDecelerateInterpolator()
+                start()
+            }
+        }
     }
 
     private val statusTick = object : Runnable {
@@ -1552,7 +1629,9 @@ class OverlayService : Service() {
 
     private fun removePanel() {
         handler.removeCallbacks(statusTick)
-        statusWifiDot = null; statusWifiText = null; statusLinkDot = null; statusLinkText = null
+        statusPulse?.cancel(); statusPulse = null; statusPulsing = false
+        statusWifiDot = null; statusWifiHalo = null; statusWifiText = null
+        statusLinkDot = null; statusLinkHalo = null; statusLinkText = null
         panelHidden = false
         if (::circles.isInitialized) circles.setMenuOpen(false)
         resetGhost()
