@@ -203,9 +203,6 @@ class OverlayService : Service() {
         safely("nút main") { if (::circles.isInitialized) circles.removeAll() }
         safely("ô chọn điểm") { if (::pointPicker.isInitialized) pointPicker.close() }
         safely("bộ chạy điểm nhấn") { if (::pointRunner.isInitialized) pointRunner.close() }
-        // Lưới an toàn: dù đường tắt menu nào (X, thông báo, app đích thoát, hệ thống kill service...) cũng bảo helper
-        // nhả grab + huỷ ngón phụ để luồng chạm gốc của máy được trả lại.
-        safely("helper bơm cảm ứng") { TouchWatcher.current?.stop() }
         safely("hiệu ứng") {
             closeAnim?.let { it.removeAllListeners(); it.cancel() }
             closeAnim = null
@@ -917,15 +914,12 @@ class OverlayService : Service() {
     private fun buildSidebar(initialTab: Int, onSelect: (Int) -> Unit): View {
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val p = dp(12)
-            setPadding(p, dp(14), p, p)
+            // Lề trái nhỏ hơn lề phải để cụm tab dịch sang trái một chút
+            setPadding(dp(6), dp(14), dp(12), dp(12))
         }
         col.addView(buildHeader())
-        // Đường kẻ gradient dưới logo (đường kẻ duy nhất của phần đầu menu)
-        col.addView(accentDivider(this), LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, maxOf(1, dp(1)),
-        ))
-        col.addView(View(this), LinearLayout.LayoutParams(1, dp(11)))
+        // Không còn đường kẻ dưới logo; chừa khoảng trống bằng đúng chiều cao cũ (1dp kẻ + 11dp)
+        col.addView(View(this), LinearLayout.LayoutParams(1, dp(12)))
 
         val tabH = dp(42)
         val tabGap = dp(6)
@@ -948,7 +942,7 @@ class OverlayService : Service() {
                     cornerRadius = dp(2).toFloat()
                 }
             }, FrameLayout.LayoutParams(dp(3), dp(18), Gravity.START or Gravity.CENTER_VERTICAL)
-                .apply { marginStart = dp(2) })
+                .apply { marginStart = dp(4) })
         }
         box.addView(indicator, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, tabH))
 
@@ -998,7 +992,7 @@ class OverlayService : Service() {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(8), 0, dp(10), 0)
+                setPadding(dp(12), 0, dp(10), 0)
                 compoundDrawablePadding = dp(10)
                 androidx.core.content.ContextCompat.getDrawable(this@OverlayService, tabIcons[i])?.mutate()?.let { ic ->
                     ic.setBounds(0, 0, dp(18), dp(18))

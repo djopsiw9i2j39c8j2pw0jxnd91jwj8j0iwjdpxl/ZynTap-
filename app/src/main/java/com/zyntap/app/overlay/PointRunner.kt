@@ -158,8 +158,6 @@ class PointRunner(
         currentCoroutineContext().ensureActive()
         // Ưu tiên click qua helper: chèn vào CÙNG luồng chạm với ngón thật (helper đã grab cảm ứng),
         // nhờ vậy ngón thật đang vuốt/giữ không bị mất. Helper luôn tự nhả (UP) dù coroutine bị huỷ giữa chừng.
-        // Helper còn đang khởi động (menu vừa hiện) thì chờ một chút thay vì mở luồng `input tap` riêng.
-        TouchWatcher.current?.let { if (!it.proxyReady) it.awaitReady(READY_WAIT_MS) }
         if (TouchWatcher.current?.tap(point.x, point.y, holdMs, gapMs) == true) return
         // Helper chưa sẵn sàng / ROM không cho grab -> cách cũ.
         TouchWatcher.current?.requestReinject("click phải lùi về input tap (helper chưa READY / chưa grab)")
@@ -194,8 +192,6 @@ class PointRunner(
             if (run.stream === stream) run.stream = null
         }
     }
-
-    private companion object { const val READY_WAIT_MS = 1_500L }
 
     fun close() {
         stopAll()
