@@ -308,15 +308,18 @@ class MainButtonOverlay(
     }
 
     private fun onWatchedFinger(slot: Int, down: Boolean, x: Int, y: Int) {
+        com.zyntap.app.data.DebugLog.i("Chạm", "F slot=$slot ${if (down) "XUỐNG" else "NHẢ"} ($x,$y) watched=$watched")
         if (down) {
-            if (watched.containsKey(slot)) return
-            val id = buttonAt(x, y) ?: return
+            if (watched.containsKey(slot)) { com.zyntap.app.data.DebugLog.w("Chạm", "bỏ qua XUỐNG: slot $slot còn kẹt từ lần trước"); return }
+            val id = buttonAt(x, y)
+            if (id == null) { com.zyntap.app.data.DebugLog.i("Chạm", "XUỐNG không trúng nút main nào"); return }
             val b = repo.find(id) ?: return
             watched[slot] = id
             entries[id]?.view?.pressedVisual = true
             onAction?.invoke(b, true)
         } else {
-            val id = watched.remove(slot) ?: return
+            val id = watched.remove(slot)
+            if (id == null) { com.zyntap.app.data.DebugLog.i("Chạm", "NHẢ nhưng slot $slot không theo dõi nút nào"); return }
             entries[id]?.view?.pressedVisual = watched.containsValue(id)
             val b = repo.find(id) ?: return
             if (!watched.containsValue(id)) onAction?.invoke(b, false)
@@ -326,6 +329,7 @@ class MainButtonOverlay(
     /** Huỷ các nút đang giữ qua chạm xuyên (mất ADB, tắt tính năng, xoay màn hình...). */
     private fun cancelWatched() {
         val ids = watched.values.toSet()
+        if (ids.isNotEmpty()) com.zyntap.app.data.DebugLog.w("Chạm", "cancelWatched: huỷ nút đang giữ $ids")
         watched.clear()
         ids.forEach { id ->
             entries[id]?.view?.pressedVisual = false

@@ -43,6 +43,7 @@ class PointRunner(
 
     fun touch(button: MainButton, down: Boolean) {
         val action = if (down) touches.down(button.id, button.mode) else touches.up(button.id)
+        DebugLog.i("Click", "${button.code} ${if (down) "xuống" else "nhả"} mode=${button.mode} -> $action")
         when (action) {
             MainTouchGate.Action.ONCE -> start(button, false)
             MainTouchGate.Action.LOOP -> start(button, true)
@@ -52,6 +53,7 @@ class PointRunner(
     }
 
     fun cancelTouch(id: Int) {
+        DebugLog.w("Click", "cancelTouch main$id (huỷ cả click đang chạy nếu có)")
         touches.cancel(id)
         stop(id)
     }
@@ -71,7 +73,7 @@ class PointRunner(
 
     private fun start(button: MainButton, repeat: Boolean) {
         // A single physical press cannot enqueue an unbounded backlog.
-        if (runs[button.id]?.job?.isActive == true) return
+        if (runs[button.id]?.job?.isActive == true) { DebugLog.w("Click", "${button.code}: bỏ qua, lượt trước còn đang chạy"); return }
         val screen = bounds()
         val script = PointScriptParser.parse(button.pointScript, screen.width(), screen.height())
         if (!script.valid) {
@@ -83,6 +85,7 @@ class PointRunner(
             message("Điểm nhấn đang trùng nút main/menu. Hãy thu menu hoặc đổi vị trí nút.")
             return
         }
+        DebugLog.i("Click", "${button.code}: bắt đầu chạy kịch bản (lặp=$repeat)")
         val run = Run()
         runs[button.id] = run
         run.job = scope.launch {
