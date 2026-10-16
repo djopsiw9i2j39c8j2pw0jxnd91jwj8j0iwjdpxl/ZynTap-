@@ -347,6 +347,13 @@ class TouchWatcher(
 
     @Volatile private var stageAt = SystemClock.elapsedRealtime()
 
+    /** Các slot ngón thật đang chạm (theo dòng `F` của helper / luồng `cat`). Để biết có đang đặt ngón hay không. */
+    private val downSlots = ConcurrentHashMap.newKeySet<Int>()
+    @Volatile private var lastDeferLogAt = 0L
+
+    /** Số ngón thật đang đặt trên màn hình (theo helper). */
+    fun fingersDown(): Int = downSlots.size
+
     /** Dò cảm ứng / mở luồng ADB bị treo quá lâu (adbd không trả lời). */
     private class AdbHangException(msg: String) : IOException(msg)
 
@@ -361,8 +368,18 @@ class TouchWatcher(
      * Ép chạy lại helper bơm (lỗi -> bơm lại -> lặp). Gọi khi click phải lùi về `input tap` hoặc helper không phản hồi.
      * Đóng luồng helper hiện tại, xoá bộ đếm thất bại và thử lại gần như ngay. Có giãn nhịp để không bơm lại liên tục.
      */
-    fun requestReinject(reason: String) {
+    fun requestReinject(reason: String, force: Boolean = false) {
         val now = SystemClock.elapsedRealtime()
+        // Helper đang chạy mà có ngón thật đang chạm thì KHÔNG đóng nó: đóng/khởi động lại giữa lúc đang chạm làm ngón bị
+        // huỷ rồi "chết" tới khi nhấc lên (và helper mới grab giữa chừng còn để lại ngón ma). Đợi ngón nhấc rồi mới bơm lại.
+        // force = helper treo thật (không trả lời click) -> phải đóng ngay vì lúc đó cảm ứng đang bị nó giữ.
+        if (!force && link != null && downSlots.isNotEmpty()) {
+            if (now - lastDeferLogAt > 5_000L) {
+                lastDeferLogAt = now
+                DebugLog.i("Bơm", "Hoãn bơm lại helper ($reason): đang có ${downSlots.size} ngón chạm, chờ nhấc lên")
+            }
+            return
+        }
         if (now - lastReinjectAt < reinjectGap) return
         lastReinjectAt = now
         DebugLog.w("Bơm", "Ép bơm lại helper: $reason (lần kế tiếp cách tối thiểu ${reinjectGap * 2 / 1000}s nếu vẫn lỗi)")
@@ -399,12 +416,20 @@ class TouchWatcher(
     /** Helper đã grab cảm ứng và đang phát lại luồng chạm (click của app đi qua [tap]). */
     val proxyReady get() = link?.injecting == true
 
+    /**
+     * Helper đang được khởi động / chạy lại và sắp sẵn sàng (chưa báo READY). Trong lúc này click nên CHỜ helper thay vì dùng
+     * `input tap` (một "thiết bị" khác, làm huỷ ngón thật đang chạm). Helper đã chạy ở chế độ thụ động hoặc đã bỏ cuộc thì false.
+     */
+    val proxyExpected get() = running && proxyFails < MAX_PROXY_FAILS && link?.ready != true
+
     /** Kết nối tới helper: gửi lệnh, nhận kết quả click. */
     private class ProxyLink(val stream: AdbStream) {
         private val out: OutputStream = stream.openOutputStream()
         private val pending = ConcurrentHashMap<Int, CompletableDeferred<Boolean>>()
         private val ids = AtomicInteger()
         @Volatile var injecting = false
+        /** Helper đã báo READY (dù bơm được hay ở chế độ thụ động). */
+        @Volatile var ready = false
 
         fun send(line: String) {
             synchronized(out) {
@@ -439,7 +464,7 @@ class TouchWatcher(
         if (!l.injecting) return false
         check(l.tap(x, y, holdMs, gapMs)) {
             DebugLog.e("Bơm", "Helper không phản hồi click ($x,$y) trong ${holdMs + gapMs + 3_000L}ms")
-            requestReinject("helper không phản hồi click")
+            requestReinject("helper không phản hồi click", force = true)
             "Helper chạm không phản hồi"
         }
         return true
@@ -486,6 +511,7 @@ class TouchWatcher(
                 val d = device ?: return@InputEventParser
                 val b = screen()
                 val (x, y) = InputEventParser.toScreen(rx, ry, d, rotation(), b.width(), b.height())
+                if (down) downSlots.add(slot) else downSlots.remove(slot)
                 main.post { sink.onFinger(slot, down, x, y) }
             }
             val framer = InputEventStream(parser)
@@ -572,6 +598,7 @@ class TouchWatcher(
             } finally {
                 reaper?.cancel()
                 parser.reset()
+                downSlots.clear()
                 main.post { sink.onLost() } // huỷ các nút đang giữ, không để kẹt
                 // Chỉ đóng luồng CỦA MÌNH (vòng cũ bị huỷ thức dậy muộn không được đóng luồng của vòng mới)
                 val s = catStream
@@ -650,7 +677,7 @@ class TouchWatcher(
                                 l.finish(line.substring(4).trim().substringBefore(' ').toIntOrNull() ?: -1, false)
                             }
                             line.startsWith("READY") -> {
-                                sawReady = true; l.injecting = line.contains("inj=1")
+                                sawReady = true; l.ready = true; l.injecting = line.contains("inj=1")
                                 setStage("Helper READY: ${line.trim()}", log = false)
                                 if (l.injecting) { reinjectGap = REINJECT_MIN_MS; DebugLog.i("Bơm", "Helper sẵn sàng: $line") }
                                 else DebugLog.e("Bơm", "Helper chạy nhưng KHÔNG bơm được ($line) — grab cảm ứng thất bại hoặc không tạo được bộ phát")
@@ -671,6 +698,7 @@ class TouchWatcher(
             beat.cancel()
             readyGuard.cancel()
             l.injecting = false
+            downSlots.clear()
             if (link === l) link = null
             l.failAll()
             runCatching { s.close() }
@@ -688,6 +716,7 @@ class TouchWatcher(
         val down = t[2] == "1"
         val x = t[3].toIntOrNull() ?: return
         val y = t[4].toIntOrNull() ?: return
+        if (down) downSlots.add(slot) else downSlots.remove(slot)
         main.post { sink.onFinger(slot, down, x, y) }
     }
 

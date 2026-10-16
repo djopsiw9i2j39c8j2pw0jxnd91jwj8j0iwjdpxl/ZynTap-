@@ -154,13 +154,29 @@ class PointRunner(
         }
     }
 
+    private companion object {
+        /** Chờ helper bơm sẵn sàng tối đa chừng này trước khi chịu lùi về `input tap`. */
+        const val PROXY_WAIT_MS = 3_000L
+        const val PROXY_POLL_MS = 50L
+    }
+
     private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap, holdMs: Long, gapMs: Long) {
         currentCoroutineContext().ensureActive()
         // Ưu tiên click qua helper: chèn vào CÙNG luồng chạm với ngón thật (helper đã grab cảm ứng),
         // nhờ vậy ngón thật đang vuốt/giữ không bị mất. Helper luôn tự nhả (UP) dù coroutine bị huỷ giữa chừng.
-        if (TouchWatcher.current?.tap(point.x, point.y, holdMs, gapMs) == true) return
+        val watcher = TouchWatcher.current
+        // Helper đang khởi động / chạy lại (chưa READY): CHỜ nó thay vì bấm `input tap` ngay. `input tap` là một "thiết bị" khác
+        // nên hệ thống huỷ ngón thật đang chạm rồi bỏ luôn phần còn lại của ngón đó (đúng triệu chứng "đơ ngón").
+        if (watcher != null && watcher.proxyExpected && !watcher.proxyReady) {
+            var waited = 0L
+            while (waited < PROXY_WAIT_MS && watcher.proxyExpected && !watcher.proxyReady) {
+                delay(PROXY_POLL_MS)
+                waited += PROXY_POLL_MS
+            }
+        }
+        if (watcher?.tap(point.x, point.y, holdMs, gapMs) == true) return
         // Helper chưa sẵn sàng / ROM không cho grab -> cách cũ.
-        TouchWatcher.current?.requestReinject("click phải lùi về input tap (helper chưa READY / chưa grab)")
+        watcher?.requestReinject("click phải lùi về input tap (helper chưa READY / chưa grab)")
         DebugLog.w("Bơm", "Helper chưa bơm được (${if (TouchWatcher.current == null) "chưa chạy" else "chưa READY/không grab được"}) -> click bằng `input tap` (chậm hơn, không chung luồng với ngón thật)")
         // Only validated integer coordinates enter the command. Never execute editor text.
         val stream = manager.openStream("shell:input tap ${point.x} ${point.y}; echo ZYN_EXIT:\$?")
