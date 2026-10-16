@@ -155,10 +155,7 @@ class OverlayService : Service() {
         circles.onDrag = { dragging -> setPanelGhost(dragging) } // kéo nút main -> menu ẩn, thả -> hiện
         circles.onAction = { button, down ->
             if (!pointPicker.isShowing && !editLock && !inputActive) pointRunner.touch(button, down)
-            else {
-                com.zyntap.app.data.DebugLog.w("Click", "${button.code} bị chặn: picker=${pointPicker.isShowing} editLock=$editLock inputActive=$inputActive")
-                pointRunner.cancelTouch(button.id)
-            }
+            else pointRunner.cancelTouch(button.id)
         }
         circles.onCancel = { id -> pointRunner.cancelTouch(id) }
         startForegroundWithNotification()

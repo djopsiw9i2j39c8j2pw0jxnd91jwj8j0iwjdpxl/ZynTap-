@@ -43,7 +43,6 @@ class PointRunner(
 
     fun touch(button: MainButton, down: Boolean) {
         val action = if (down) touches.down(button.id, button.mode) else touches.up(button.id)
-        DebugLog.i("Click", "${button.code} ${if (down) "xuống" else "nhả"} mode=${button.mode} -> $action")
         when (action) {
             MainTouchGate.Action.ONCE -> start(button, false)
             MainTouchGate.Action.LOOP -> start(button, true)
@@ -53,7 +52,6 @@ class PointRunner(
     }
 
     fun cancelTouch(id: Int) {
-        DebugLog.w("Click", "cancelTouch main$id (huỷ cả click đang chạy nếu có)")
         touches.cancel(id)
         stop(id)
     }
@@ -73,7 +71,7 @@ class PointRunner(
 
     private fun start(button: MainButton, repeat: Boolean) {
         // A single physical press cannot enqueue an unbounded backlog.
-        if (runs[button.id]?.job?.isActive == true) { DebugLog.w("Click", "${button.code}: bỏ qua, lượt trước còn đang chạy"); return }
+        if (runs[button.id]?.job?.isActive == true) return
         val screen = bounds()
         val script = PointScriptParser.parse(button.pointScript, screen.width(), screen.height())
         if (!script.valid) {
@@ -85,7 +83,9 @@ class PointRunner(
             message("Điểm nhấn đang trùng nút main/menu. Hãy thu menu hoặc đổi vị trí nút.")
             return
         }
-        DebugLog.i("Click", "${button.code}: bắt đầu chạy kịch bản (lặp=$repeat)")
+        // Click 1 lần: giữ lâu hơn. Chạm xuyên: chờ ngón thật nhả đủ lâu rồi mới click (tránh game nuốt click đầu).
+        val holdMs = if (repeat) TouchWatcher.TAP_HOLD_MS else TouchWatcher.TAP_HOLD_ONCE_MS
+        val gapMs = if (!repeat && button.passThrough) TouchWatcher.TAP_GAP_AFTER_UP_MS else 0L
         val run = Run()
         runs[button.id] = run
         run.job = scope.launch {
@@ -118,7 +118,7 @@ class PointRunner(
                                     ensureActive()
                                     withContext(Dispatchers.IO) {
                                         try {
-                                            tap(manager, run, step)
+                                            tap(manager, run, step, holdMs, gapMs)
                                         } catch (e: java.io.IOException) {
                                             // Bị huỷ chủ động (nhả ngón/xoay màn hình) thì không nối lại
                                             ensureActive()
@@ -131,7 +131,7 @@ class PointRunner(
                                                 throw IllegalStateException("ADB đã ngắt, đang nối lại. Thử lại sau giây lát.")
                                             }
                                             ensureActive()
-                                            tap(manager, run, step)
+                                            tap(manager, run, step, holdMs, gapMs)
                                         }
                                     }
                                 }
@@ -154,11 +154,11 @@ class PointRunner(
         }
     }
 
-    private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap) {
+    private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap, holdMs: Long, gapMs: Long) {
         currentCoroutineContext().ensureActive()
         // Ưu tiên click qua helper: chèn vào CÙNG luồng chạm với ngón thật (helper đã grab cảm ứng),
         // nhờ vậy ngón thật đang vuốt/giữ không bị mất. Helper luôn tự nhả (UP) dù coroutine bị huỷ giữa chừng.
-        if (TouchWatcher.current?.tap(point.x, point.y) == true) return
+        if (TouchWatcher.current?.tap(point.x, point.y, holdMs, gapMs) == true) return
         // Helper chưa sẵn sàng / ROM không cho grab -> cách cũ.
         TouchWatcher.current?.requestReinject("click phải lùi về input tap (helper chưa READY / chưa grab)")
         DebugLog.w("Bơm", "Helper chưa bơm được (${if (TouchWatcher.current == null) "chưa chạy" else "chưa READY/không grab được"}) -> click bằng `input tap` (chậm hơn, không chung luồng với ngón thật)")

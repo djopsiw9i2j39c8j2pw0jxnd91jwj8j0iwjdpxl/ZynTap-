@@ -413,13 +413,13 @@ class TouchWatcher(
             }
         }
 
-        suspend fun tap(x: Int, y: Int, holdMs: Long): Boolean {
+        suspend fun tap(x: Int, y: Int, holdMs: Long, gapMs: Long): Boolean {
             val id = ids.incrementAndGet()
             val done = CompletableDeferred<Boolean>()
             pending[id] = done
             try {
-                withContext(Dispatchers.IO) { send("TAP $id $x $y $holdMs") }
-                return withTimeoutOrNull(holdMs + 3_000L) { done.await() } ?: false
+                withContext(Dispatchers.IO) { send("TAP $id $x $y $holdMs $gapMs") }
+                return withTimeoutOrNull(holdMs + gapMs + 3_000L) { done.await() } ?: false
             } finally {
                 pending.remove(id)
             }
@@ -434,11 +434,11 @@ class TouchWatcher(
      * @return false nếu helper chưa sẵn sàng / đang ở chế độ thụ động -> bên gọi tự lùi về `input tap`.
      * @throws IllegalStateException nếu đã gửi mà helper không xác nhận.
      */
-    suspend fun tap(x: Int, y: Int, holdMs: Long = TAP_HOLD_MS): Boolean {
+    suspend fun tap(x: Int, y: Int, holdMs: Long = TAP_HOLD_MS, gapMs: Long = 0L): Boolean {
         val l = link ?: return false
         if (!l.injecting) return false
-        check(l.tap(x, y, holdMs)) {
-            DebugLog.e("Bơm", "Helper không phản hồi click ($x,$y) trong ${holdMs + 3_000L}ms")
+        check(l.tap(x, y, holdMs, gapMs)) {
+            DebugLog.e("Bơm", "Helper không phản hồi click ($x,$y) trong ${holdMs + gapMs + 3_000L}ms")
             requestReinject("helper không phản hồi click")
             "Helper chạm không phản hồi"
         }
@@ -823,6 +823,10 @@ class TouchWatcher(
         private const val CMD_TIMEOUT_MS = 8_000L
         /** Thời gian giữ của một click (ms): đủ để game/app nhận trọn DOWN rồi UP. */
         const val TAP_HOLD_MS = 40L
+        /** Click 1 lần (Nhấn/Thả): giữ lâu hơn để game chắc chắn thấy ngón (≥ vài khung hình, kể cả khi game tụt FPS). */
+        const val TAP_HOLD_ONCE_MS = 90L
+        /** Chạm xuyên: click chờ tới khi ngón thật đã nhả ít nhất chừng này ms (game kịp xử lý ngón thật trước). */
+        const val TAP_GAP_AFTER_UP_MS = 100L
         private val PATH_RE = Regex("^/dev/input/event\\d+$")
     }
 }
