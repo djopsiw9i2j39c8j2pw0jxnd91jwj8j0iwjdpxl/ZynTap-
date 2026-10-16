@@ -540,7 +540,9 @@ class MainButtonOverlay(
                     pointerId = -1
                     v.pressedVisual = false
                     if (editing && moved) { repo.save(); onDrag?.invoke(false) }
-                    onCancel?.invoke(id)
+                    // Chế độ Thả: ngón đã rời nút (hệ thống huỷ chuỗi chạm) vẫn tính là nhả -> click.
+                    if (!editing && b.mode == MainButton.MODE_RELEASE) onAction?.invoke(b, false)
+                    else onCancel?.invoke(id)
                     true
                 }
                 MotionEvent.ACTION_POINTER_DOWN -> true
