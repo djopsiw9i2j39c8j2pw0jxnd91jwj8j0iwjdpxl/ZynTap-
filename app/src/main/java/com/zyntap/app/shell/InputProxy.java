@@ -42,7 +42,8 @@ import java.util.concurrent.Executors;
  *
  * Giao thức (mỗi dòng, UTF-8):
  * <pre>
- *   app -> helper:  PING | ROT r w h | TAP id x y holdMs | QUIT
+ *   app -> helper:  PING | ROT r w h | TAP id x y holdMs [gapMs] | QUIT
+ *   (gapMs: click chờ cho tới khi ngón thật đã nhả ít nhất gapMs, để game kịp xử lý ngón thật trước)
  *   helper -> app:  READY grab=0|1 inj=0|1 dev=n | FAIL msg | F slot 1|0 x y | OK id | ERR id msg | LOG msg
  * </pre>
  * Tọa độ x,y (F, TAP) là PIXEL màn hình hiện tại (đã tính xoay).
@@ -65,8 +66,6 @@ public final class InputProxy {
     private static final int SYNTH_BASE = 16;          // click của app: pointer id 16..23
     private static final int SYNTH_COUNT = 8;
     private static final long WATCHDOG_MS = 3000;
-    /** Khoảng nghỉ tối thiểu giữa lúc ngón thật nhả và lúc ngón giả (click của app) chạm xuống. */
-    private static final long MIN_GAP_AFTER_REAL_UP_MS = 30;
     /** Số lần phát sự kiện thất bại liên tiếp thì coi bộ phát đã hỏng và nhả grab NGAY (tránh liệt cảm ứng toàn máy). */
     private static final int MAX_INJECT_FAILS = 4;
 
@@ -138,14 +137,8 @@ public final class InputProxy {
     private static final TreeMap<Integer, P> shown = new TreeMap<>();   // hệ thống đang thấy
     private static final HashMap<Integer, P> synth = new HashMap<>();   // click của app đang giữ
     private static long downTime = 0;
+    private static long lastRealUpAt = 0;   // uptime lúc ngón thật gần nhất vừa nhả (chỉ đụng dưới LOCK)
     private static P lastReal = null;       // áp lực / kích cỡ của ngón thật gần nhất (để clone)
-    /** Đỉnh áp lực / kích cỡ của từng ngón thật trong lúc đang chạm (chạm nhanh chỉ có 1-2 frame, frame cuối thường "yếu"). */
-    private static final P[] peakReal = new P[REAL_SLOTS];
-    /** Áp lực / kích cỡ "ngón điển hình" = đỉnh của lần chạm thật vừa xong; click của app clone từ đây thay vì frame cuối. */
-    private static P typicalReal = null;
-    /** Lúc ngón thật nhả gần nhất (uptime ms) — để click của app không dính sát ngay sau cú nhả. */
-    private static volatile long lastRealUpAt = 0;
-    private static int tapLogs = 0;
     private static int deviceId = 0;
 
     private static FileInputStream devIn;
@@ -235,7 +228,8 @@ public final class InputProxy {
                     final String id = t[1];
                     final float x = Float.parseFloat(t[2]), y = Float.parseFloat(t[3]);
                     final int hold = Math.max(5, Math.min(2000, Integer.parseInt(t[4])));
-                    TAPS.execute(() -> doTap(id, x, y, hold));
+                    final int gap = t.length > 5 ? Math.max(0, Math.min(500, Integer.parseInt(t[5]))) : 0;
+                    TAPS.execute(() -> doTap(id, x, y, hold, gap));
                     break;
                 }
                 case "QUIT":
@@ -412,7 +406,6 @@ public final class InputProxy {
                 P p = realPointer(s);
                 want.put(s, p);
                 lastReal = p;
-                trackPeak(s, p);
                 // báo cho phần "chạm xuyên" của app (toạ độ pixel)
                 if (!reported[s]) {
                     reported[s] = true;
@@ -423,7 +416,6 @@ public final class InputProxy {
                 }
             } else if (reported[s] && !rawActive[s]) {
                 reported[s] = false;
-                if (peakReal[s] != null) { typicalReal = peakReal[s]; peakReal[s] = null; }
                 lastRealUpAt = SystemClock.uptimeMillis();
                 out("F " + s + " 0 " + lastRepX[s] + " " + lastRepY[s]);
             }
@@ -502,50 +494,27 @@ public final class InputProxy {
     }
 
     // ---- click của app --------------------------------------------------------------------------
-    /** Giữ đỉnh áp lực / kích cỡ của ngón thật [s] trong suốt lần chạm (gọi dưới LOCK). */
-    private static void trackPeak(int s, P p) {
-        P k = peakReal[s];
-        if (k == null) { peakReal[s] = p.copy(); return; }
-        k.pressure = Math.max(k.pressure, p.pressure);
-        k.size = Math.max(k.size, p.size);
-        k.major = Math.max(k.major, p.major);
-        k.minor = Math.max(k.minor, p.minor);
-        k.toolMajor = Math.max(k.toolMajor, p.toolMajor);
-    }
-
-    /**
-     * Ngón giả mang thông số ngón thật. Chạm NHANH (chạm rồi thả ngay) chỉ có vài frame đầu, áp lực/kích cỡ còn
-     * rất nhỏ hoặc bằng 0 -> clone nguyên xi thì game coi là chạm "ma" và bỏ qua, phải chạm lần 2 (giữ lâu hơn) mới ăn.
-     * Nên: lấy ĐỈNH của lần chạm thật và nâng lên mức sàn của một ngón bình thường.
-     */
-    private static P syntheticPointer() {
-        P base = typicalReal != null ? typicalReal : lastReal;
-        P p = base != null ? base.copy() : defaultPointer();
-        P floor = defaultPointer();
-        p.pressure = Math.max(p.pressure, floor.pressure * 0.6f);
-        p.size = Math.max(p.size, floor.size * 0.6f);
-        p.major = Math.max(p.major, floor.major * 0.6f);
-        p.minor = Math.max(p.minor, floor.major * 0.6f);
-        p.toolMajor = Math.max(p.toolMajor, p.major);
-        return p;
-    }
-
-    private static void doTap(String id, float x, float y, int hold) {
+    private static void doTap(String id, float x, float y, int hold, int gap) {
         int sid = -1;
         try {
-            // Chế độ Thả: click chạy ngay sau khi ngón thật nhả. Chờ đủ một khoảng ngắn để game kịp xử lý xong
-            // cú nhả (UP) trước khi nhận ngón giả; chạm nhanh thì UP và DOWN giả dính nhau trong cùng một frame.
-            long wait = lastRealUpAt + MIN_GAP_AFTER_REAL_UP_MS - SystemClock.uptimeMillis();
-            if (wait > 0) SystemClock.sleep(Math.min(wait, MIN_GAP_AFTER_REAL_UP_MS));
+            // Click đến ngay sau khi ngón thật vừa nhả (chế độ Thả + chạm xuyên): game đang bận xử lý ngón thật
+            // (vd. nút bắn gây khung hình nặng) nên DOWN+UP quá sát/quá ngắn bị nuốt. Chờ cho đủ khoảng cách.
+            if (gap > 0) {
+                long wait = 0;
+                synchronized (LOCK) {
+                    boolean realDown = false;
+                    for (int i = 0; i < REAL_SLOTS; i++) realDown |= rawActive[i];
+                    if (!realDown && lastRealUpAt > 0) wait = lastRealUpAt + gap - SystemClock.uptimeMillis();
+                }
+                if (wait > 0) SystemClock.sleep(Math.min(wait, gap));
+            }
             synchronized (LOCK) {
                 if (!injecting) { out("ERR " + id + " passive"); return; }
                 for (int i = 0; i < SYNTH_COUNT; i++) {
                     if (!synth.containsKey(SYNTH_BASE + i)) { sid = SYNTH_BASE + i; break; }
                 }
                 if (sid < 0) { out("ERR " + id + " busy"); return; }
-                P p = syntheticPointer();
-                if (tapLogs++ < 30) log("tap (" + (int) x + "," + (int) y + ") áp lực=" + p.pressure + " size=" + p.size
-                        + " major=" + p.major + " sauNhả=" + (SystemClock.uptimeMillis() - lastRealUpAt) + "ms");
+                P p = lastReal != null ? lastReal.copy() : defaultPointer();
                 p.x = clampX(x); p.y = clampY(y);
                 synth.put(sid, p);
                 sync();
@@ -566,9 +535,6 @@ public final class InputProxy {
         P p = new P();
         p.pressure = maxPressure > 0 ? 0.5f : 1f;
         p.size = maxMajor > 0 ? 0.1f : 0f;
-        p.major = maxMajor > 0 ? maxMajor * 0.15f * pxPerRaw() : 0f;
-        p.minor = p.major;
-        p.toolMajor = p.major;
         return p;
     }
 
