@@ -605,7 +605,15 @@ public final class InputProxy {
         MotionEvent ev = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, 1, props, coords,
                 0, 0, 1f, 1f, deviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
         try {
-            injector.inject(ev);
+            // ACTION_CANCEL hợp lệ cần FLAG_CANCELED (0x20); một số ROM (Android 14+) từ chối CANCEL thiếu cờ này.
+            try { MotionEvent.class.getMethod("setFlags", int.class).invoke(ev, 0x20); } catch (Throwable ignored) { }
+            boolean accepted = injector.injectRaw(ev);
+            if (!accepted) {
+                // Hệ thống trả false cho CANCEL khi KHÔNG có ngón nào đang chạm là bình thường trên nhiều ROM -> không phải bộ phát hỏng.
+                // Chỉ ngoại lệ (SecurityException, hàm biến mất...) mới là hỏng thật. Nếu bộ phát hỏng thật thì senderLoop
+                // đã có cơ chế nhả grab sau MAX_INJECT_FAILS lần lỗi liên tiếp nên vẫn an toàn.
+                log("probe inject: hệ thống trả false cho CANCEL (không có ngón đang chạm) -> bỏ qua, vẫn bơm");
+            }
             return true;
         } catch (Throwable t) {
             log("probe inject: " + t);
@@ -813,12 +821,17 @@ public final class InputProxy {
         }
 
         void inject(InputEvent ev) throws Exception {
+            if (!injectRaw(ev)) throw new IllegalStateException("hệ thống từ chối sự kiện");
+        }
+
+        /** @return false nếu hệ thống trả false (từ chối); ném ngoại lệ nếu gọi hàm thất bại. */
+        boolean injectRaw(InputEvent ev) throws Exception {
             if (setDisplay != null) {
                 try { setDisplay.invoke(ev, 0); } catch (Throwable ignored) { }
             }
             // mode 0 = ASYNC, uid -1 = INVALID_UID
             Object r = withUid ? method.invoke(target, ev, 0, -1) : method.invoke(target, ev, 0);
-            if (r instanceof Boolean && !((Boolean) r)) throw new IllegalStateException("hệ thống từ chối sự kiện");
+            return !(r instanceof Boolean) || (Boolean) r;
         }
     }
 }
