@@ -167,14 +167,6 @@ class OverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_HIDE -> closePanel()
-            ACTION_TOGGLE_PANEL -> {
-                // Từ nút Quick Settings: đang mở thì thu lại, đang đóng thì mở ra
-                ensureHandle()
-                circles.ensureAll()
-                crosshair.ensure()
-                startWatchdog()
-                if (panelView != null && !panelHidden && !closing) closePanel() else openPanel()
-            }
             ACTION_STOP -> {
                 // Người dùng chủ động tắt -> không tự khôi phục nữa
                 setWanted(this, false)
@@ -1762,7 +1754,6 @@ class OverlayService : Service() {
         const val ACTION_SHOW = "com.zyntap.app.overlay.SHOW"
         const val ACTION_HIDE = "com.zyntap.app.overlay.HIDE"
         const val ACTION_STOP = "com.zyntap.app.overlay.STOP"
-        const val ACTION_TOGGLE_PANEL = "com.zyntap.app.overlay.TOGGLE_PANEL"
 
         /** Dịch vụ menu nổi đang chạy trong tiến trình này. */
         @Volatile var running = false
@@ -1772,15 +1763,6 @@ class OverlayService : Service() {
         fun lastTarget(context: Context): String? =
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_TARGET, null)
 
-        /** Bật/tắt bảng menu khi menu nổi đang chạy. */
-        fun togglePanel(context: Context) {
-            val intent = Intent(context, OverlayService::class.java).setAction(ACTION_TOGGLE_PANEL)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
-        }
         private const val NOTIF_ID = 1001
         private const val GHOST_SHRINK = 0.06f
         private const val PANEL_MAX_W_FRAC = 0.94f
