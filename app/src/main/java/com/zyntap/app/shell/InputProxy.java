@@ -66,6 +66,8 @@ public final class InputProxy {
     private static final int REAL_SLOTS = 16;          // ngón thật: pointer id 0..15
     private static final int SYNTH_BASE = 16;          // click của app: pointer id 16..23
     private static final int SYNTH_COUNT = 8;
+    /** Click giả tối thiểu phải giữ ngần này ms (tính từ lúc DOWN) trước khi được nhả sớm nhường ngón đầu cho ngón thật. */
+    private static final long EARLY_MIN_HOLD_MS = 30;
     /**
      * Mất nhịp tim quá ngần này thì helper tự thoát. Helper vẫn phát lại ngón thật bình thường trong lúc chờ nên nới rộng
      * không làm đơ gì; ngắn quá thì Wi-Fi chập chờn / game ngốn CPU là helper bị tắt oan giữa lúc ngón đang chạm.
@@ -458,6 +460,17 @@ public final class InputProxy {
 
         for (Map.Entry<Integer, P> e : synth.entrySet()) want.put(e.getKey(), e.getValue());
 
+        // Chống kẹt ngón thật: nếu hệ thống đang chỉ thấy click giả (nó là "ngón đầu") mà ngón thật mới chạm xuống,
+        // KHÔNG chèn ngón thật làm ngón phụ phía sau click giả. Game hay coi ngón đầu nhả = hết cử chỉ nên bỏ rơi ngón phụ
+        // (vuốt camera bị khựng/đơ tới khi nhấc ngón chạm lại). Hoãn ngón thật vài chục ms; ngay khi click giả nhả, ngón thật
+        // xuống như một ngón đầu sạch (ACTION_DOWN) và doTap sẽ nhả click sớm cho nó (xem [realWaiting]).
+        if (!synth.isEmpty() && !shown.isEmpty() && shown.firstKey() >= SYNTH_BASE) {
+            for (java.util.Iterator<Integer> it = want.keySet().iterator(); it.hasNext(); ) {
+                int k = it.next();
+                if (k < SYNTH_BASE && !shown.containsKey(k)) it.remove();
+            }
+        }
+
         // 1) pointer biến mất -> UP
         for (Integer id : new ArrayList<>(shown.keySet())) {
             if (!want.containsKey(id)) {
@@ -650,7 +663,20 @@ public final class InputProxy {
                 synth.put(sid, p);
                 sync();
             }
-            SystemClock.sleep(hold);
+            // Giữ đủ [hold], nhưng nếu ngón thật chạm xuống trong lúc này (đang bị hoãn trong sync) thì nhả click sớm
+            // (sau tối thiểu EARLY_MIN_HOLD_MS để game vẫn kịp nhận) để ngón thật tiếp quản làm ngón đầu ngay.
+            long start = SystemClock.uptimeMillis();
+            long minHold = Math.min(hold, EARLY_MIN_HOLD_MS);
+            while (true) {
+                long el = SystemClock.uptimeMillis() - start;
+                if (el >= hold) break;
+                if (el >= minHold) {
+                    boolean waiting;
+                    synchronized (LOCK) { waiting = realWaiting(); }
+                    if (waiting) break;
+                }
+                SystemClock.sleep(Math.max(1, Math.min(4, hold - el)));
+            }
             synchronized (LOCK) {
                 synth.remove(sid);
                 sync();
@@ -660,6 +686,14 @@ public final class InputProxy {
             synchronized (LOCK) { if (sid >= 0) { synth.remove(sid); sync(); } }
             out("ERR " + id + " " + t);
         }
+    }
+
+    /** Có ngón thật đang chạm mà chưa được gửi cho hệ thống (đang bị hoãn vì click giả giữ vai ngón đầu). Gọi dưới LOCK. */
+    private static boolean realWaiting() {
+        for (int s = 0; s < REAL_SLOTS; s++) {
+            if (rawActive[s] && hasX[s] && hasY[s] && !shown.containsKey(s)) return true;
+        }
+        return false;
     }
 
     private static P defaultPointer() {
