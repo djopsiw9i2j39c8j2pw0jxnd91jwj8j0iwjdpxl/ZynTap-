@@ -680,7 +680,15 @@ class TouchWatcher(
                                 if (l.injecting) { reinjectGap = REINJECT_MIN_MS; DebugLog.i("Bơm", "Helper sẵn sàng: $line") }
                                 else DebugLog.e("Bơm", "Helper chạy nhưng KHÔNG bơm được ($line) — grab cảm ứng thất bại hoặc không tạo được bộ phát")
                             }
-                            line.startsWith("LOG ") -> DebugLog.w("Bơm", "Helper báo: ${line.substring(4).trim()}")
+                            line.startsWith("LOG ") -> {
+                                // Helper báo cả thông tin bình thường (vd "ngón thật chạm lúc đang click -> nhường...")
+                                // lẫn sự cố thật. Chỉ dòng có dấu hiệu sự cố mới là cảnh báo, còn lại là log thường.
+                                val msg = line.substring(4).trim()
+                                val lower = msg.lowercase()
+                                val bad = listOf("fail", "lỗi", "hỏng", "watchdog", "bad cmd", "read:", "inject:", "grab:")
+                                    .any { lower.contains(it) }
+                                if (bad) DebugLog.w("Bơm", "Helper báo: $msg") else DebugLog.i("Bơm", "Helper báo: $msg")
+                            }
                             line.startsWith("FAIL") -> { DebugLog.e("Bơm", "Helper báo lỗi: ${line.trim()}"); break }
                             else -> if (unknownLines++ < 5) DebugLog.w("Bơm", "Helper nói: ${line.take(200)}")
                         }

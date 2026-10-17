@@ -359,7 +359,7 @@ class CrosshairOverlay(
                 if (v === keep) continue
                 if (detach(w, v)) n++
             }
-            if (n > 0) DebugLog.w("Tâm ảo", "Đã gỡ $n cửa sổ tâm còn sót trên màn hình")
+            if (n > 0) DebugLog.i("Tâm ảo", "Đã gỡ $n cửa sổ tâm còn sót trên màn hình")
             return n
         }
     }
