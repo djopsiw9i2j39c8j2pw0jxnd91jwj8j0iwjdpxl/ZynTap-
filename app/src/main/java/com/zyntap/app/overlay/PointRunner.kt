@@ -154,23 +154,52 @@ class PointRunner(
         }
     }
 
+    private companion object {
+        /** Chờ helper READY tối đa chừng này trước khi bỏ click (không dùng `input tap` khi helper còn sống). */
+        const val HELPER_WAIT_MS = 1500L
+    }
+
     private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap, holdMs: Long, gapMs: Long) {
         currentCoroutineContext().ensureActive()
         // Ưu tiên click qua helper: chèn vào CÙNG luồng chạm với ngón thật (helper đã grab cảm ứng),
         // nhờ vậy ngón thật đang vuốt/giữ không bị mất. Helper luôn tự nhả (UP) dù coroutine bị huỷ giữa chừng.
-        // Helper đã thử và tự click lại rồi mà vẫn lỗi/không phản hồi -> click thêm 1 lần bằng `input tap` cho khỏi xịt.
         var helperError: String? = null
+        val watcher = TouchWatcher.current
         try {
-            if (TouchWatcher.current?.tap(point.x, point.y, holdMs, gapMs) == true) return
+            if (watcher?.tap(point.x, point.y, holdMs, gapMs) == true) return
         } catch (e: CancellationException) {
             throw e
         } catch (e: IllegalStateException) {
             helperError = e.message ?: "helper lỗi"
         }
+
+        if (watcher != null && !watcher.inputTapAllowed()) {
+            // Helper đang khởi động lại / click lỗi thoáng qua. TUYỆT ĐỐI không lùi về `input tap` ở đây: nó là luồng chạm
+            // riêng nên hệ thống huỷ luôn ngón thật đang đè (đơ màn hình). Chờ helper sẵn sàng một chút rồi thử lại qua
+            // helper; vẫn không được thì bỏ click này còn hơn làm mất ngón thật.
+            if (helperError == null) {
+                val ready = withTimeoutOrNull(HELPER_WAIT_MS) {
+                    while (!watcher.proxyReady) delay(40)
+                    true
+                } == true
+                if (ready) {
+                    try {
+                        if (watcher.tap(point.x, point.y, holdMs, gapMs)) return
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: IllegalStateException) {
+                        helperError = e.message ?: "helper lỗi"
+                    }
+                }
+            }
+            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}) vì helper chưa bơm được${helperError?.let { " ($it)" } ?: ""} — không dùng `input tap` để khỏi cắt ngón thật")
+            return
+        }
+
+        // Tới đây: helper thụ động (ROM không cho grab) / đã bỏ helper hẳn / chưa có TouchWatcher -> không còn cách nào khác.
         if (helperError != null) {
             DebugLog.w("Bơm", "Click qua helper lỗi ($helperError) -> click lại bằng `input tap` để không bị xịt")
         } else {
-            // Helper chưa sẵn sàng / ROM không cho grab -> cách cũ.
             TouchWatcher.current?.requestReinject("click phải lùi về input tap (helper chưa READY / chưa grab)")
             DebugLog.w("Bơm", "Helper chưa bơm được (${if (TouchWatcher.current == null) "chưa chạy" else "chưa READY/không grab được"}) -> click bằng `input tap` (chậm hơn, không chung luồng với ngón thật)")
         }

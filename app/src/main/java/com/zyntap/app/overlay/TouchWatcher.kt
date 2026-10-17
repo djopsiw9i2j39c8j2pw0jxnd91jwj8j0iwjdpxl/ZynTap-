@@ -399,12 +399,29 @@ class TouchWatcher(
     /** Helper đã grab cảm ứng và đang phát lại luồng chạm (click của app đi qua [tap]). */
     val proxyReady get() = link?.injecting == true
 
+    /** Đang ở chế độ đọc thô `cat` (helper đã bị bỏ sau nhiều lần thất bại). */
+    @Volatile private var inCatMode = false
+
+    /**
+     * `input tap` là một luồng chạm RIÊNG, không chung với ngón thật: chen vào lúc ngón thật đang đè là hệ thống
+     * huỷ ngón thật (đơ màn hình). Vì vậy CHỈ cho phép khi thật sự không còn đường nào chung luồng:
+     * helper chạy được nhưng ROM không cho grab/bơm (thụ động), hoặc đã bỏ helper và đang đọc thô bằng cat.
+     * Helper đang khởi động lại / click lỗi thoáng qua thì KHÔNG được dùng.
+     */
+    fun inputTapAllowed(): Boolean {
+        val l = link
+        val passive = l != null && l.ready && !l.injecting
+        return inCatMode || passive
+    }
+
     /** Kết nối tới helper: gửi lệnh, nhận kết quả click. */
     private class ProxyLink(val stream: AdbStream) {
         private val out: OutputStream = stream.openOutputStream()
         private val pending = ConcurrentHashMap<Int, CompletableDeferred<Int>>()
         private val ids = AtomicInteger()
         @Volatile var injecting = false
+        /** Helper đã báo READY (dù có bơm được hay không). */
+        @Volatile var ready = false
 
         fun send(line: String) {
             synchronized(out) {
@@ -476,6 +493,7 @@ class TouchWatcher(
 
     fun stop() {
         setStage("đã dừng", log = false)
+        inCatMode = false
         if (current === this) current = null
         job?.cancel()
         job = null
@@ -536,6 +554,7 @@ class TouchWatcher(
                     delay(RETRY_MS * 3); continue
                 }
                 if (proxyFails < MAX_PROXY_FAILS) {
+                    inCatMode = false
                     killStaleHelpers(manager)
                     setStage("Đang chạy helper bơm trên ${dev.path} (chờ READY)")
                     val ok = runProxy(manager, dev)
@@ -553,6 +572,7 @@ class TouchWatcher(
                     fastRetry = false
                     continue
                 }
+                inCatMode = true
                 // Lùi về đọc thô: chỉ tạm thời. Sau PROXY_RETRY_MS tự đóng luồng và thử bơm lại helper (lặp).
                 setStage("Đọc thô bằng cat (helper không bơm được) — sẽ thử bơm lại sau ${PROXY_RETRY_MS / 1000}s")
                 val cmd = if (useShell) "shell:stty raw -echo 2>/dev/null; exec cat ${dev.path}"
@@ -675,7 +695,7 @@ class TouchWatcher(
                                 l.finish(rest.substringBefore(' ').toIntOrNull() ?: -1, if (passive) TAP_PASSIVE else TAP_FAILED)
                             }
                             line.startsWith("READY") -> {
-                                sawReady = true; l.injecting = line.contains("inj=1")
+                                sawReady = true; l.ready = true; l.injecting = line.contains("inj=1")
                                 setStage("Helper READY: ${line.trim()}", log = false)
                                 if (l.injecting) { reinjectGap = REINJECT_MIN_MS; DebugLog.i("Bơm", "Helper sẵn sàng: $line") }
                                 else DebugLog.e("Bơm", "Helper chạy nhưng KHÔNG bơm được ($line) — grab cảm ứng thất bại hoặc không tạo được bộ phát")
@@ -685,7 +705,7 @@ class TouchWatcher(
                                 // lẫn sự cố thật. Chỉ dòng có dấu hiệu sự cố mới là cảnh báo, còn lại là log thường.
                                 val msg = line.substring(4).trim()
                                 val lower = msg.lowercase()
-                                val bad = listOf("fail", "lỗi", "hỏng", "watchdog", "bad cmd", "read:", "inject:", "grab:")
+                                val bad = listOf("fail", "lỗi", "hỏng", "watchdog", "bad cmd", "read:", "inject:", "grab:", "dropped", "dựng lại")
                                     .any { lower.contains(it) }
                                 if (bad) DebugLog.w("Bơm", "Helper báo: $msg") else DebugLog.i("Bơm", "Helper báo: $msg")
                             }
