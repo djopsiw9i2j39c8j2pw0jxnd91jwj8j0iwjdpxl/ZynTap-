@@ -1,6 +1,7 @@
 package com.zyntap.app
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
@@ -16,6 +17,7 @@ import com.zyntap.app.overlay.CrosshairOverlay
 import com.zyntap.app.overlay.OverlayPermission
 import com.zyntap.app.overlay.OverlayService
 import com.zyntap.app.overlay.UsageAccess
+import com.zyntap.app.overlay.ZynTileService
 import com.zyntap.app.ui.ZynTapApp
 import com.zyntap.app.ui.ZynTapTheme
 
@@ -60,7 +62,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestNextPermission() {
-        while (permissionStep < 3) {
+        while (permissionStep < 4) {
             val step = permissionStep++
             if (step == 0 &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -79,6 +81,24 @@ class MainActivity : ComponentActivity() {
                 overlayLauncher.launch(UsageAccess.settingsIntent(this))
                 return
             }
+            if (step == 3) offerQuickSettingsTile()
         }
+    }
+
+    /** Android 13+: hỏi thêm nút ZynTap vào bảng cài đặt nhanh (chỉ hỏi 1 lần; có thể tự thêm bằng nút bút chì). */
+    private fun offerQuickSettingsTile() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val prefs = getSharedPreferences("zyntap", MODE_PRIVATE)
+        if (prefs.getBoolean("tile_asked", false)) return
+        prefs.edit().putBoolean("tile_asked", true).apply()
+        runCatching {
+            val sbm = getSystemService(android.app.StatusBarManager::class.java)
+            sbm.requestAddTileService(
+                ComponentName(this, ZynTileService::class.java),
+                "ZynTap",
+                android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_tab_pointer),
+                mainExecutor,
+            ) { result -> DebugLog.i("Nút nhanh", "Yêu cầu thêm nút vào bảng cài đặt nhanh: kết quả $result") }
+        }.onFailure { DebugLog.w("Nút nhanh", "Không hỏi thêm được nút vào bảng cài đặt nhanh", it) }
     }
 }
