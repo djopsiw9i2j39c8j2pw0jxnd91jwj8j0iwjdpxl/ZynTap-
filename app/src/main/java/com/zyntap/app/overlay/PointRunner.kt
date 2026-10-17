@@ -154,30 +154,26 @@ class PointRunner(
         }
     }
 
-    private companion object {
-        /** Chờ helper bơm sẵn sàng tối đa chừng này trước khi chịu lùi về `input tap`. */
-        const val PROXY_WAIT_MS = 3_000L
-        const val PROXY_POLL_MS = 50L
-    }
-
     private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap, holdMs: Long, gapMs: Long) {
         currentCoroutineContext().ensureActive()
         // Ưu tiên click qua helper: chèn vào CÙNG luồng chạm với ngón thật (helper đã grab cảm ứng),
         // nhờ vậy ngón thật đang vuốt/giữ không bị mất. Helper luôn tự nhả (UP) dù coroutine bị huỷ giữa chừng.
-        val watcher = TouchWatcher.current
-        // Helper đang khởi động / chạy lại (chưa READY): CHỜ nó thay vì bấm `input tap` ngay. `input tap` là một "thiết bị" khác
-        // nên hệ thống huỷ ngón thật đang chạm rồi bỏ luôn phần còn lại của ngón đó (đúng triệu chứng "đơ ngón").
-        if (watcher != null && watcher.proxyExpected && !watcher.proxyReady) {
-            var waited = 0L
-            while (waited < PROXY_WAIT_MS && watcher.proxyExpected && !watcher.proxyReady) {
-                delay(PROXY_POLL_MS)
-                waited += PROXY_POLL_MS
-            }
+        // Helper đã thử và tự click lại rồi mà vẫn lỗi/không phản hồi -> click thêm 1 lần bằng `input tap` cho khỏi xịt.
+        var helperError: String? = null
+        try {
+            if (TouchWatcher.current?.tap(point.x, point.y, holdMs, gapMs) == true) return
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IllegalStateException) {
+            helperError = e.message ?: "helper lỗi"
         }
-        if (watcher?.tap(point.x, point.y, holdMs, gapMs) == true) return
-        // Helper chưa sẵn sàng / ROM không cho grab -> cách cũ.
-        watcher?.requestReinject("click phải lùi về input tap (helper chưa READY / chưa grab)")
-        DebugLog.w("Bơm", "Helper chưa bơm được (${if (TouchWatcher.current == null) "chưa chạy" else "chưa READY/không grab được"}) -> click bằng `input tap` (chậm hơn, không chung luồng với ngón thật)")
+        if (helperError != null) {
+            DebugLog.w("Bơm", "Click qua helper lỗi ($helperError) -> click lại bằng `input tap` để không bị xịt")
+        } else {
+            // Helper chưa sẵn sàng / ROM không cho grab -> cách cũ.
+            TouchWatcher.current?.requestReinject("click phải lùi về input tap (helper chưa READY / chưa grab)")
+            DebugLog.w("Bơm", "Helper chưa bơm được (${if (TouchWatcher.current == null) "chưa chạy" else "chưa READY/không grab được"}) -> click bằng `input tap` (chậm hơn, không chung luồng với ngón thật)")
+        }
         // Only validated integer coordinates enter the command. Never execute editor text.
         val stream = manager.openStream("shell:input tap ${point.x} ${point.y}; echo ZYN_EXIT:\$?")
         run.stream = stream
