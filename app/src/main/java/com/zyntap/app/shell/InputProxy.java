@@ -72,11 +72,11 @@ public final class InputProxy {
 
     // ---- click thông minh ---------------------------------------------------------------------
     /** Click giữ ngắn hơn mức này game dễ không kịp thấy (delay 1ms vẫn bị nâng lên mức này). */
-    private static final int MIN_HOLD_MS = 12;
+    private static final int MIN_HOLD_MS = 10;
     /** Click đã giữ đủ lâu thì dù bị ngón thật chen vào cắt sớm vẫn coi là đã tới nơi (không click lại, tránh đúp). */
-    private static final int DELIVERED_HOLD_MS = 25;
+    private static final int DELIVERED_HOLD_MS = 15;
     /** Khoảng nhả tối thiểu giữa 2 click liên tiếp: delay 1ms vẫn phải ra 2 lần chạm tách bạch, không dính cùng khung hình. */
-    private static final int MIN_RELEASE_GAP_MS = 12;
+    private static final int MIN_RELEASE_GAP_MS = 10;
     /** Click thất bại (hệ thống từ chối / bị cắt quá sớm) thì click lại thêm tối đa chừng này lần. */
     private static final int MAX_TAP_RETRY = 1;
     private static final int RETRY_PAUSE_MS = 8;
