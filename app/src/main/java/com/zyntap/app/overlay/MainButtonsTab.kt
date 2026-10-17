@@ -175,7 +175,8 @@ class MainButtonsTab(
 
     // ---- thanh nút ---------------------------------------------------------
 
-    private fun subtitle(b: MainButton) = "${b.code}  •  ${MainButton.modeLabel(b.mode)}  •  ${b.sizeDp}dp  •  ${b.alphaPct}%"
+    private fun subtitle(b: MainButton) =
+        "${b.code}  •  ${if (b.assistEnabled) MainButton.ASSIST_LABELS[b.assistMode] else MainButton.modeLabel(b.mode)}  •  ${b.sizeDp}dp  •  ${b.alphaPct}%"
 
     private inner class Bar(val b: MainButton) {
         val slot = RevealLayout(ctx)
@@ -463,6 +464,48 @@ class MainButtonsTab(
         // Chạm xuyên
         form.addView(passThroughRow(b, onChange = { onLive(); onCommit() }))
 
+        // Trợ vuốt tâm: toggle; các mục khác chỉ hiện khi bật
+        val assistBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        val pullBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        val boostBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        fun syncAssistVisibility() {
+            assistBox.visibility = if (b.assistEnabled) View.VISIBLE else View.GONE
+            pullBox.visibility = if (b.assistMode != MainButton.ASSIST_BOOST) View.VISIBLE else View.GONE
+            boostBox.visibility = if (b.assistMode == MainButton.ASSIST_BOOST) View.VISIBLE else View.GONE
+        }
+        form.addView(switchRow("Bật trợ vuốt tâm",
+            "Giữ nút để tự vuốt, hoặc buff lực vuốt ngón thật.", b.assistEnabled) { on ->
+            b.assistEnabled = on
+            syncAssistVisibility()
+            onLive(); onCommit()
+        })
+        assistBox.addView(fieldLabel("Chế độ trợ vuốt"))
+        assistBox.addView(
+            DropdownField(ctx, host.dropdown, MainButton.ASSIST_LABELS, b.assistMode) { i ->
+                b.assistMode = i
+                syncAssistVisibility()
+                onLive(); onCommit()
+            },
+            LinearLayout.LayoutParams(match, dp(46)),
+        )
+        pullBox.addView(slider("Tốc độ kéo", MainButton.MIN_ASSIST_SPEED, MainButton.MAX_ASSIST_SPEED, b.assistSpeed, " dp/s",
+            onValue = { b.assistSpeed = it; onLive() }, onStop = onCommit))
+        pullBox.addView(slider("Quãng mỗi lần vuốt", MainButton.MIN_ASSIST_LENGTH, MainButton.MAX_ASSIST_LENGTH, b.assistLength, " dp",
+            onValue = { b.assistLength = it; onLive() }, onStop = onCommit))
+        pullBox.addView(slider("Delay mỗi lần kéo", MainButton.MIN_ASSIST_DELAY, MainButton.MAX_ASSIST_DELAY, b.assistDelay, " ms",
+            onValue = { b.assistDelay = it; onLive() }, onStop = onCommit))
+        boostBox.addView(slider("Lực buff (x100%)", MainButton.MIN_BOOST_GAIN, MainButton.MAX_BOOST_GAIN, b.boostGain, "%",
+            onValue = { b.boostGain = it; onLive() }, onStop = onCommit))
+        boostBox.addView(switchRow("Chỉ buff khi giữ nút",
+            "Tắt: buff luôn bật cho mọi ngón mới chạm xuống.", b.boostHoldOnly) { on ->
+            b.boostHoldOnly = on
+            onLive(); onCommit()
+        })
+        assistBox.addView(pullBox, LinearLayout.LayoutParams(match, ViewGroup.LayoutParams.WRAP_CONTENT))
+        assistBox.addView(boostBox, LinearLayout.LayoutParams(match, ViewGroup.LayoutParams.WRAP_CONTENT))
+        form.addView(assistBox, LinearLayout.LayoutParams(match, ViewGroup.LayoutParams.WRAP_CONTENT))
+        syncAssistVisibility()
+
         // Độ mờ
         form.addView(slider("Độ mờ", MainButton.MIN_ALPHA, MainButton.MAX_ALPHA, b.alphaPct, "%",
             onValue = { b.alphaPct = it; onLive() }, onStop = onCommit))
@@ -473,7 +516,14 @@ class MainButtonsTab(
     }
 
     /** Công tắc "Chạm xuyên nút main": bật thì chạm vào nút vẫn lọt xuống app/màn hình bên dưới. */
-    private fun passThroughRow(b: MainButton, onChange: () -> Unit): View {
+    private fun passThroughRow(b: MainButton, onChange: () -> Unit): View =
+        switchRow("Chạm xuyên nút", "Giúp chạm các tính năng bên dưới nút nổi cùng lúc.", b.passThrough) { on ->
+            b.passThrough = on
+            onChange()
+        }
+
+    /** Một dòng có tiêu đề + mô tả + công tắc. */
+    private fun switchRow(title: String, desc: String, checked: Boolean, onChange: (Boolean) -> Unit): View {
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -482,27 +532,24 @@ class MainButtonsTab(
         }
         val texts = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         texts.addView(TextView(ctx).apply {
-            text = "Chạm xuyên nút"
+            text = title
             setTextColor(0xFFE8EEFA.toInt())
             scaledTextSize(14.5f)
         })
         texts.addView(TextView(ctx).apply {
-            text = "Giúp chạm các tính năng bên dưới nút nổi cùng lúc."
+            text = desc
             setTextColor(0xFF8D9DBA.toInt())
             scaledTextSize(11.5f)
         })
         row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
         val sw = Switch(ctx).apply {
-            isChecked = b.passThrough
+            isChecked = checked
             thumbTintList = ColorStateList.valueOf(0xFFFFFFFF.toInt())
             trackTintList = ColorStateList(
                 arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
                 intArrayOf(0xFF19D3FF.toInt(), 0xFF2A3A5C.toInt()),
             )
-            setOnCheckedChangeListener { _, on ->
-                b.passThrough = on
-                onChange()
-            }
+            setOnCheckedChangeListener { _, on -> onChange(on) }
         }
         row.addView(sw, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         row.setOnClickListener { sw.toggle() }

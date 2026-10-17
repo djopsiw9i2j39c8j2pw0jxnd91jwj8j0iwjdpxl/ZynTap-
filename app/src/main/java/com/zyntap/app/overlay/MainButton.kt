@@ -20,8 +20,26 @@ class MainButton(
     var pointScript: String = "",
     /** Chạm xuyên: chạm vào nút vừa kích hoạt nút main, vừa lọt xuống app bên dưới. */
     var passThrough: Boolean = false,
+    /** Trợ vuốt tâm: bật thì nút main chạy chế độ trợ vuốt thay vì script điểm nhấn. */
+    var assistEnabled: Boolean = false,
+    var assistMode: Int = ASSIST_PULL_UP,
+    /** Tốc độ kéo (dp/giây). */
+    var assistSpeed: Int = DEFAULT_ASSIST_SPEED,
+    /** Quãng mỗi lần vuốt (dp). */
+    var assistLength: Int = DEFAULT_ASSIST_LENGTH,
+    /** Nghỉ giữa hai lần vuốt (ms). */
+    var assistDelay: Int = DEFAULT_ASSIST_DELAY,
+    /** Buff lực vuốt: hệ số nhân quãng vuốt của ngón thật, tính theo % (200 = x2). */
+    var boostGain: Int = DEFAULT_BOOST_GAIN,
+    /** Buff lực vuốt chỉ hoạt động khi đang giữ nút main này. */
+    var boostHoldOnly: Boolean = false,
 ) {
     val code: String get() = "main$id"
+
+    /** Kéo tâm / ghìm tâm đang bật: nút main tự vuốt liên tục khi giữ. */
+    val assistPull: Boolean get() = assistEnabled && assistMode != ASSIST_BOOST
+    /** Buff lực vuốt đang bật. */
+    val assistBoost: Boolean get() = assistEnabled && assistMode == ASSIST_BOOST
 
     companion object {
         const val MODE_TAP = 0      // nhấn
@@ -38,6 +56,23 @@ class MainButton(
         const val MAX_SIZE = 120
         const val DEFAULT_SIZE = 56
         const val MAX_NAME = 24
+
+        const val ASSIST_PULL_UP = 0    // kéo tâm: vuốt lên
+        const val ASSIST_HOLD_DOWN = 1  // ghìm tâm: vuốt xuống
+        const val ASSIST_BOOST = 2      // buff lực vuốt
+        val ASSIST_LABELS = listOf("Kéo tâm", "Ghìm tâm", "Buff lực vuốt")
+        const val MIN_ASSIST_SPEED = 200
+        const val MAX_ASSIST_SPEED = 5000
+        const val DEFAULT_ASSIST_SPEED = 1200
+        const val MIN_ASSIST_LENGTH = 20
+        const val MAX_ASSIST_LENGTH = 500
+        const val DEFAULT_ASSIST_LENGTH = 120
+        const val MIN_ASSIST_DELAY = 0
+        const val MAX_ASSIST_DELAY = 1000
+        const val DEFAULT_ASSIST_DELAY = 30
+        const val MIN_BOOST_GAIN = 100
+        const val MAX_BOOST_GAIN = 500
+        const val DEFAULT_BOOST_GAIN = 200
 
         fun modeLabel(mode: Int) = MODE_LABELS.getOrElse(mode) { MODE_LABELS[0] }
     }
@@ -92,7 +127,14 @@ class MainButtonRepo(context: Context) {
                     .put("x", b.x.toDouble())
                     .put("y", b.y.toDouble())
                     .put("pointScript", b.pointScript)
-                    .put("passThrough", b.passThrough),
+                    .put("passThrough", b.passThrough)
+                    .put("assistEnabled", b.assistEnabled)
+                    .put("assistMode", b.assistMode)
+                    .put("assistSpeed", b.assistSpeed)
+                    .put("assistLength", b.assistLength)
+                    .put("assistDelay", b.assistDelay)
+                    .put("boostGain", b.boostGain)
+                    .put("boostHoldOnly", b.boostHoldOnly),
             )
         }
         return arr
@@ -131,6 +173,18 @@ class MainButtonRepo(context: Context) {
                             .coerceIn(MainButton.MIN_SIZE, MainButton.MAX_SIZE),
                         pointScript = o.optString("pointScript", "").take(PointScriptParser.MAX_TEXT),
                         passThrough = o.optBoolean("passThrough", false),
+                        assistEnabled = o.optBoolean("assistEnabled", false),
+                        assistMode = o.optInt("assistMode", MainButton.ASSIST_PULL_UP)
+                            .coerceIn(0, MainButton.ASSIST_LABELS.lastIndex),
+                        assistSpeed = o.optInt("assistSpeed", MainButton.DEFAULT_ASSIST_SPEED)
+                            .coerceIn(MainButton.MIN_ASSIST_SPEED, MainButton.MAX_ASSIST_SPEED),
+                        assistLength = o.optInt("assistLength", MainButton.DEFAULT_ASSIST_LENGTH)
+                            .coerceIn(MainButton.MIN_ASSIST_LENGTH, MainButton.MAX_ASSIST_LENGTH),
+                        assistDelay = o.optInt("assistDelay", MainButton.DEFAULT_ASSIST_DELAY)
+                            .coerceIn(MainButton.MIN_ASSIST_DELAY, MainButton.MAX_ASSIST_DELAY),
+                        boostGain = o.optInt("boostGain", MainButton.DEFAULT_BOOST_GAIN)
+                            .coerceIn(MainButton.MIN_BOOST_GAIN, MainButton.MAX_BOOST_GAIN),
+                        boostHoldOnly = o.optBoolean("boostHoldOnly", false),
                         x = o.optDouble("x", 0.8).toFloat().coerceIn(0f, 1f),
                         y = o.optDouble("y", 0.5).toFloat().coerceIn(0f, 1f),
                     ),

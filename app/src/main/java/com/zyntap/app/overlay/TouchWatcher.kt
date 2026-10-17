@@ -429,6 +429,29 @@ class TouchWatcher(
         scope.launch(Dispatchers.IO) { runCatching { l.send(line) } }
     }
 
+    /** Hệ số buff lực vuốt (1.0 = tắt). Nhớ lại để gửi lại khi helper khởi động lại. */
+    @Volatile private var boostLine = "BOOST 1"
+
+    fun setBoost(gain: Float) {
+        val line = "BOOST " + String.format(java.util.Locale.US, "%.2f", gain.coerceIn(1f, 10f))
+        if (line == boostLine) return
+        boostLine = line
+        val l = link ?: return
+        scope.launch(Dispatchers.IO) { runCatching { l.send(line) } }
+    }
+
+    /** Bắt đầu vuốt lặp (kéo/ghìm tâm). @return false nếu helper chưa bơm được. */
+    fun startSwipe(id: Int, x1: Int, y1: Int, x2: Int, y2: Int, durMs: Int, delayMs: Int): Boolean {
+        val l = link ?: return false
+        if (!l.injecting) return false
+        return runCatching { l.send("SWIPE $id $x1 $y1 $x2 $y2 $durMs $delayMs") }.isSuccess
+    }
+
+    fun stopSwipe(id: Int) {
+        val l = link ?: return
+        runCatching { l.send("SWIPESTOP $id") }
+    }
+
     /** Kết nối tới helper: gửi lệnh, nhận kết quả click. */
     private class ProxyLink(val stream: AdbStream) {
         private val out: OutputStream = stream.openOutputStream()
@@ -712,6 +735,7 @@ class TouchWatcher(
                             line.startsWith("READY") -> {
                                 sawReady = true; l.ready = true; l.injecting = line.contains("inj=1")
                                 runCatching { l.send(zonesLine) }
+                                runCatching { l.send(boostLine) }
                                 setStage("Helper READY: ${line.trim()}", log = false)
                                 if (l.injecting) { reinjectGap = REINJECT_MIN_MS; DebugLog.i("Bơm", "Helper sẵn sàng: $line") }
                                 else DebugLog.e("Bơm", "Helper chạy nhưng KHÔNG bơm được ($line) — grab cảm ứng thất bại hoặc không tạo được bộ phát")

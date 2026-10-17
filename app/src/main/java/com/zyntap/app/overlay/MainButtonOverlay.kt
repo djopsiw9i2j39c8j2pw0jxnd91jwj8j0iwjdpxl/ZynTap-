@@ -270,7 +270,7 @@ class MainButtonOverlay(
     // ---- chạm xuyên ---------------------------------------------------------
 
     /** Nút đang ở chế độ chạm xuyên (và không phải đang kéo chỉnh vị trí). */
-    private fun isPassThrough(b: MainButton) = (b.passThrough || overlapsTapPoint(b)) && editingId != b.id
+    private fun isPassThrough(b: MainButton) = (b.passThrough || b.assistPull || overlapsTapPoint(b)) && editingId != b.id
 
     /**
      * Nút main đè lên BẤT KỲ điểm nhấn nào (của mọi nút) -> tự chạm xuyên (cờ đặt sẵn từ trước, không đổi lúc click),
@@ -334,6 +334,34 @@ class MainButtonOverlay(
             Triple(e.params.x + e.params.width / 2, e.params.y + e.params.height / 2, dp(b.sizeDp) / 2)
         }
         watcher.setSwallowZones(zones)
+        updateBoost()
+    }
+
+    // ---- trợ vuốt tâm ---------------------------------------------------------
+
+    /** Các nút main đang được giữ (để buff lực vuốt kiểu "chỉ khi giữ nút"). */
+    private val pressedIds = HashSet<Int>()
+
+    fun trackPress(id: Int, down: Boolean) {
+        if (down) pressedIds.add(id) else pressedIds.remove(id)
+        updateBoost()
+    }
+
+    /** Hệ số buff lực vuốt hiện tại gửi cho helper; menu mở / đang chỉnh nút thì tắt để không làm kéo nút bị lố. */
+    private fun updateBoost() {
+        var gain = 1f
+        if (!menuOpen && editingId == null) {
+            for (b in repo.buttons) {
+                if (b.assistBoost && (!b.boostHoldOnly || b.id in pressedIds)) gain = maxOf(gain, b.boostGain / 100f)
+            }
+        }
+        watcher.setBoost(gain)
+    }
+
+    /** Tâm nút trên màn hình (pixel), null nếu nút chưa lên màn hình. */
+    fun centerOf(id: Int): Pair<Int, Int>? {
+        val p = entries[id]?.params ?: return null
+        return (p.x + p.width / 2) to (p.y + p.height / 2)
     }
 
     private fun refreshWatcher() {
@@ -411,6 +439,7 @@ class MainButtonOverlay(
         menuOpen = open
         entries.values.forEach { it.view.minPct = if (open) MainButton.MENU_MIN_ALPHA else 0 }
         if (!open) refreshTouchable() // script điểm nhấn có thể vừa đổi
+        updateBoost()
     }
 
     private fun bind(v: MainButtonView, b: MainButton) {

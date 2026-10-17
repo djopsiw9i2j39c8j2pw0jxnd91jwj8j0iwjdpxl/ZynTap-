@@ -41,8 +41,14 @@ class PointRunner(
         if (now - lastReport > 1500) { lastReport = now; report(text) }
     }
 
+    /** Vị trí tâm nút main trên màn hình (pixel), do overlay cung cấp. */
+    var buttonCenter: ((MainButton) -> Pair<Int, Int>?)? = null
+
     fun touch(button: MainButton, down: Boolean) {
-        val action = if (down) touches.down(button.id, button.mode) else touches.up(button.id)
+        // Buff lực vuốt do helper lo (không có gì để chạy lúc bấm nút). Kéo/ghìm tâm luôn theo kiểu Giữ.
+        if (button.assistBoost) return
+        val mode = if (button.assistPull) MainButton.MODE_HOLD else button.mode
+        val action = if (down) touches.down(button.id, mode) else touches.up(button.id)
         when (action) {
             MainTouchGate.Action.ONCE -> start(button, false)
             MainTouchGate.Action.LOOP -> start(button, true)
@@ -69,7 +75,45 @@ class PointRunner(
         runs.keys.toList().forEach(::stop)
     }
 
+    /** Kéo tâm (vuốt lên) / ghìm tâm (vuốt xuống) lặp liên tục từ vị trí nút, tới khi nhả nút. */
+    private fun startAssist(button: MainButton) {
+        if (runs[button.id]?.job?.isActive == true) return
+        val screen = bounds()
+        val center = buttonCenter?.invoke(button)
+        if (center == null) { message("Không xác định được vị trí nút ${button.code}"); return }
+        val density = context.resources.displayMetrics.density
+        val sx = center.first.coerceIn(0, screen.width() - 1)
+        val sy = center.second.coerceIn(0, screen.height() - 1)
+        val dir = if (button.assistMode == MainButton.ASSIST_HOLD_DOWN) 1 else -1
+        val ey = (sy + dir * (button.assistLength * density).toInt()).coerceIn(0, screen.height() - 1)
+        val distPx = kotlin.math.abs(ey - sy).coerceAtLeast(1)
+        val speedPx = (button.assistSpeed * density).coerceAtLeast(1f)
+        val durMs = (distPx / speedPx * 1000f).toInt().coerceIn(30, 3000)
+        val run = Run()
+        runs[button.id] = run
+        run.job = scope.launch {
+            try {
+                val w = TouchWatcher.current
+                val ok = w != null && withContext(Dispatchers.IO) {
+                    withTimeoutOrNull(HELPER_WAIT_MS) {
+                        while (!w.proxyReady) delay(40)
+                        true
+                    } == true && w.startSwipe(button.id, sx, sy, sx, ey, durMs, button.assistDelay)
+                }
+                if (!ok) {
+                    message("Trợ vuốt cần ADB Wi-Fi đang kết nối và helper chạm ở chế độ bơm được.")
+                    return@launch
+                }
+                awaitCancellation()
+            } finally {
+                withContext(NonCancellable + Dispatchers.IO) { TouchWatcher.current?.stopSwipe(button.id) }
+                if (runs[button.id] === run) runs.remove(button.id)
+            }
+        }
+    }
+
     private fun start(button: MainButton, repeat: Boolean) {
+        if (button.assistPull) { startAssist(button); return }
         // A single physical press cannot enqueue an unbounded backlog.
         if (runs[button.id]?.job?.isActive == true) return
         val screen = bounds()
