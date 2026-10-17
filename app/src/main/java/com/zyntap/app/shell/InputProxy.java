@@ -142,6 +142,14 @@ public final class InputProxy {
     private static final boolean[] swallowed = new boolean[REAL_SLOTS];
     /** Các vùng tròn {x, y, r} (pixel màn hình hiện tại), phẳng. Chỉ đọc/ghi dưới LOCK. */
     private static float[] swallowZones = new float[0];
+    /**
+     * Buff lực vuốt: hệ số nhân quãng di chuyển của ngón thật so với chỗ chạm xuống (1 = tắt). Hệ số được chốt
+     * MỘT lần lúc ngón chạm xuống ([fingerGain]) nên ngón đang đè (vd. ngón giữ nút main) không bị đổi giữa chừng.
+     */
+    private static float boostGain = 1f;
+    private static final float[] fingerGain = new float[REAL_SLOTS];
+    private static final float[] downX = new float[REAL_SLOTS];
+    private static final float[] downY = new float[REAL_SLOTS];
     private static final int[] lastRepX = new int[REAL_SLOTS];
     private static final int[] lastRepY = new int[REAL_SLOTS];
     private static int curSlot = 0;
@@ -276,6 +284,21 @@ public final class InputProxy {
                     synchronized (LOCK) { swallowZones = z; }
                     break;
                 }
+                case "BOOST": {
+                    float g = Math.max(1f, Math.min(10f, Float.parseFloat(t[1])));
+                    synchronized (LOCK) { boostGain = g; }
+                    break;
+                }
+                case "SWIPE": {
+                    // SWIPE id x1 y1 x2 y2 durMs delayMs : vuốt lặp đi lặp lại cho tới SWIPESTOP id
+                    startSwipe(t[1], Float.parseFloat(t[2]), Float.parseFloat(t[3]), Float.parseFloat(t[4]),
+                            Float.parseFloat(t[5]), Math.max(30, Math.min(3000, Integer.parseInt(t[6]))),
+                            Math.max(0, Math.min(2000, Integer.parseInt(t[7]))));
+                    break;
+                }
+                case "SWIPESTOP":
+                    stopSwipe(t[1]);
+                    break;
                 case "TAP": {
                     final String id = t[1];
                     final float x = Float.parseFloat(t[2]), y = Float.parseFloat(t[3]);
@@ -482,15 +505,28 @@ public final class InputProxy {
                 if (!reported[s]) {
                     reported[s] = true;
                     swallowed[s] = inSwallowZone(p.x, p.y); // quyết định MỘT lần lúc ngón chạm xuống
+                    fingerGain[s] = boostGain;
+                    downX[s] = p.x; downY[s] = p.y;
                     lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
                     out("F " + s + " 1 " + lastRepX[s] + " " + lastRepY[s]);
                 } else {
                     lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
                 }
-                if (!swallowed[s]) want.put(s, p);
+                if (!swallowed[s]) {
+                    if (fingerGain[s] > 1f) {
+                        // Buff lực vuốt (360°): đẩy ngón ảo đi xa hơn theo ĐÚNG hướng ngón thật vuốt, tính từ chỗ chạm xuống
+                        P bp = p.copy();
+                        bp.x = clampX(downX[s] + (p.x - downX[s]) * fingerGain[s]);
+                        bp.y = clampY(downY[s] + (p.y - downY[s]) * fingerGain[s]);
+                        want.put(s, bp);
+                    } else {
+                        want.put(s, p);
+                    }
+                }
             } else if (reported[s] && !rawActive[s]) {
                 reported[s] = false;
                 swallowed[s] = false;
+                fingerGain[s] = 1f;
                 lastRealUpAt = SystemClock.uptimeMillis();
                 out("F " + s + " 0 " + lastRepX[s] + " " + lastRepY[s]);
             }
@@ -743,6 +779,87 @@ public final class InputProxy {
         }
     }
 
+    // ---- vuốt lặp (kéo tâm / ghìm tâm) -----------------------------------------------------------
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean> SWIPES =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static void stopSwipe(String id) {
+        java.util.concurrent.atomic.AtomicBoolean on = SWIPES.remove(id);
+        if (on != null) on.set(false);
+    }
+
+    private static void startSwipe(final String id, final float x1, final float y1, final float x2, final float y2,
+                                   final int dur, final int delay) {
+        final java.util.concurrent.atomic.AtomicBoolean on = new java.util.concurrent.atomic.AtomicBoolean(true);
+        java.util.concurrent.atomic.AtomicBoolean old = SWIPES.put(id, on);
+        if (old != null) old.set(false);
+        Thread th = new Thread(() -> {
+            try {
+                while (on.get() && !stopping) {
+                    String err = swipeOnce(x1, y1, x2, y2, dur, on);
+                    if (err != null) {
+                        if (err.equals("passive")) { out("ERR " + id + " passive"); break; }
+                        log("vuốt lỗi (" + err + ")");
+                        SystemClock.sleep(RETRY_PAUSE_MS * 4);
+                    }
+                    // nghỉ giữa hai lần vuốt, vẫn dừng ngay được khi nhả nút
+                    long end = SystemClock.uptimeMillis() + Math.max(delay, MIN_RELEASE_GAP_MS);
+                    while (on.get() && !stopping && SystemClock.uptimeMillis() < end) SystemClock.sleep(2);
+                }
+            } finally {
+                SWIPES.remove(id, on);
+            }
+        }, "zyn-swipe-" + id);
+        th.setDaemon(true);
+        th.start();
+    }
+
+    /** Một lần vuốt từ (x1,y1) tới (x2,y2) trong dur ms. null = xong (hoặc bị dừng); khác null = lý do lỗi. */
+    private static String swipeOnce(float x1, float y1, float x2, float y2, int dur,
+                                    java.util.concurrent.atomic.AtomicBoolean on) {
+        int sid = -1;
+        Tap tap = null;
+        try {
+            synchronized (LOCK) {
+                if (!injecting) return "passive";
+                sid = allocSynthId();
+                if (sid < 0) return "busy";
+                P p = lastReal != null ? lastReal.copy() : defaultPointer();
+                p.x = clampX(x1); p.y = clampY(y1);
+                tap = new Tap(p);
+                synth.put(sid, tap);
+                int errs = injectErrors;
+                sync();
+                if (injectErrors != errs || !shown.containsKey(sid)) {
+                    synth.remove(sid);
+                    sync();
+                    return injecting ? "inject" : "passive";
+                }
+            }
+            long t0 = SystemClock.uptimeMillis();
+            for (;;) {
+                if (!on.get() || stopping) break;
+                long el = SystemClock.uptimeMillis() - t0;
+                float f = Math.min(1f, el / (float) dur);
+                synchronized (LOCK) {
+                    if (!synth.containsKey(sid)) break;   // ngón thật chen vào làm vuốt bị nhường -> kết thúc lượt này
+                    tap.p.x = clampX(x1 + (x2 - x1) * f);
+                    tap.p.y = clampY(y1 + (y2 - y1) * f);
+                    sync();
+                }
+                if (f >= 1f) break;
+                SystemClock.sleep(8);
+            }
+            synchronized (LOCK) {
+                if (synth.remove(sid) != null) sync();   // UP (nếu còn hiện)
+            }
+            return null;
+        } catch (Throwable ex) {
+            synchronized (LOCK) { if (sid >= 0) { synth.remove(sid); sync(); } }
+            return String.valueOf(ex);
+        }
+    }
+
     private static P defaultPointer() {
         P p = new P();
         p.pressure = maxPressure > 0 ? 0.5f : 1f;
@@ -759,6 +876,7 @@ public final class InputProxy {
             down = true;
         }
         stopping = true;
+        for (String k : new ArrayList<>(SWIPES.keySet())) stopSwipe(k);
         // Chốt chặn cuối: dù bước dọn dưới đây kẹt (khoá LOCK, bộ phát treo...) tiến trình vẫn phải chết,
         // nếu không helper mồ côi giữ grab cảm ứng và lần mở app sau không bơm được.
         Thread killer = new Thread(() -> {
