@@ -48,6 +48,7 @@ import com.zyntap.app.data.AdbLinkStore
 import com.zyntap.app.data.AdbSession
 import com.zyntap.app.data.DebugLog
 import com.zyntap.app.data.WifiAdbMonitor
+import com.zyntap.app.data.WifiState
 import com.zyntap.app.data.ZynAdbConnectionManager
 import kotlin.math.abs
 
@@ -123,6 +124,8 @@ class OverlayService : Service() {
         super.onCreate()
         DebugLog.init(this)
         DebugLog.i("Dịch vụ", "Menu nổi bắt đầu chạy")
+        running = true
+        WifiState.start(this)
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         // Dọn tâm ảo còn sót lại từ lần chạy trước (nếu lần đó bị tắt giữa chừng)
         runCatching { CrosshairOverlay.sweepOrphans() }
@@ -164,6 +167,14 @@ class OverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_HIDE -> closePanel()
+            ACTION_TOGGLE_PANEL -> {
+                // Từ nút Quick Settings: đang mở thì thu lại, đang đóng thì mở ra
+                ensureHandle()
+                circles.ensureAll()
+                crosshair.ensure()
+                startWatchdog()
+                if (panelView != null && !panelHidden && !closing) closePanel() else openPanel()
+            }
             ACTION_STOP -> {
                 // Người dùng chủ động tắt -> không tự khôi phục nữa
                 setWanted(this, false)
@@ -213,6 +224,7 @@ class OverlayService : Service() {
         // Lưới an toàn cuối: còn cửa sổ tâm nào sót thì gỡ nốt
         safely("tâm ảo (quét lại)") { CrosshairOverlay.sweepOrphans() }
         DebugLog.i("Dịch vụ", "Menu nổi đã tắt")
+        running = false
         super.onDestroy()
     }
 
@@ -1077,11 +1089,12 @@ class OverlayService : Service() {
     }
 
     private fun refreshStatus() {
-        val wifiOn = WifiAdbMonitor.isWifiAdbEnabled(this)
+        val wifiOn = WifiAdbMonitor.isWifiAdbEnabled(this)   // "Gỡ lỗi Wi-Fi" đang bật
+        val wifiNet = WifiState.isConnected(this)            // đang nối Wi-Fi thật (không tính 4G)
         val paired = AdbLinkStore.isPaired(this)
         val linked = runCatching { ZynAdbConnectionManager.get(applicationContext).isConnected }.getOrDefault(false)
         // Trạng thái không đổi thì khỏi vẽ lại (tránh tạo drawable/span mới mỗi nhịp)
-        val key = (if (wifiOn) 1 else 0) or (if (paired) 2 else 0) or (if (linked) 4 else 0)
+        val key = (if (wifiOn) 1 else 0) or (if (paired) 2 else 0) or (if (linked) 4 else 0) or (if (wifiNet) 8 else 0)
         if (key == lastStatusKey) return
         lastStatusKey = key
         val ok = 0xFF34D399.toInt()
@@ -1104,14 +1117,16 @@ class OverlayService : Service() {
             tv.text = sp
         }
 
+        // Dòng Wi-Fi: chỉ nói về mạng Wi-Fi thật, 4G không làm nó sáng lên
         paint(statusWifiDot, statusWifiHalo, statusWifiText,
-            if (wifiOn) ok else bad, "Wi-Fi", if (wifiOn) "Bật" else "Tắt")
+            if (wifiNet) ok else bad, "Wi-Fi", if (wifiNet) "Đã nối" else "Chưa nối")
 
         val pulse: Boolean
         val (c, t) = when {
             linked -> { pulse = false; ok to "Đã nối" }
             !paired -> { pulse = false; bad to "Chưa ghép" }
-            !wifiOn -> { pulse = false; bad to "Đã ngắt" }
+            !wifiNet -> { pulse = false; bad to "Mất Wi-Fi" }
+            !wifiOn -> { pulse = false; bad to "Tắt gỡ lỗi" }
             else -> { pulse = true; warn to "Nối lại…" }
         }
         paint(statusLinkDot, statusLinkHalo, statusLinkText, c, "ADB", t)
@@ -1715,12 +1730,15 @@ class OverlayService : Service() {
     private fun debugInfo(): String {
         val ver = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "?"
         val wifiOn = runCatching { WifiAdbMonitor.isWifiAdbEnabled(this) }.getOrDefault(false)
+        val wifiNet = runCatching { WifiState.isConnected(this) }.getOrDefault(false)
+        val mobile = runCatching { WifiState.hasMobile(this) }.getOrDefault(false)
         val paired = runCatching { AdbLinkStore.isPaired(this) }.getOrDefault(false)
         val linked = runCatching { ZynAdbConnectionManager.get(applicationContext).isConnected }.getOrDefault(false)
         val w = TouchWatcher.current
         fun yn(b: Boolean) = if (b) "có" else "không"
         return buildString {
             append("ZynTap $ver · Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) · ${Build.MANUFACTURER} ${Build.MODEL}\n")
+            append("Wi-Fi đã kết nối: ${yn(wifiNet)} · Dữ liệu di động: ${yn(mobile)}\n")
             append("Gỡ lỗi Wi-Fi bật: ${yn(wifiOn)} · Đã ghép nối: ${yn(paired)} · ADB đang nối: ${yn(linked)}\n")
             append("Helper bơm cảm ứng: ${if (w == null) "chưa chạy" else if (w.proxyReady) "sẵn sàng (bơm được)" else "đang chạy nhưng chưa bơm được (dùng input tap)"}\n")
             append("Vòng helper: ${w?.stage ?: "chưa chạy"}\n")
@@ -1744,6 +1762,25 @@ class OverlayService : Service() {
         const val ACTION_SHOW = "com.zyntap.app.overlay.SHOW"
         const val ACTION_HIDE = "com.zyntap.app.overlay.HIDE"
         const val ACTION_STOP = "com.zyntap.app.overlay.STOP"
+        const val ACTION_TOGGLE_PANEL = "com.zyntap.app.overlay.TOGGLE_PANEL"
+
+        /** Dịch vụ menu nổi đang chạy trong tiến trình này. */
+        @Volatile var running = false
+            private set
+
+        /** App gần nhất đã mở bằng ZynTap (để nút Quick Settings mở lại). */
+        fun lastTarget(context: Context): String? =
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_TARGET, null)
+
+        /** Bật/tắt bảng menu khi menu nổi đang chạy. */
+        fun togglePanel(context: Context) {
+            val intent = Intent(context, OverlayService::class.java).setAction(ACTION_TOGGLE_PANEL)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
         private const val NOTIF_ID = 1001
         private const val GHOST_SHRINK = 0.06f
         private const val PANEL_MAX_W_FRAC = 0.94f
