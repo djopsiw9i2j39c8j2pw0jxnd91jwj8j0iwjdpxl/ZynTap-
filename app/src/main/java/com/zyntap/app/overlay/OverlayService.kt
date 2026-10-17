@@ -916,6 +916,8 @@ class OverlayService : Service() {
             orientation = LinearLayout.VERTICAL
             // Lề trái nhỏ hơn lề phải để cụm tab dịch sang trái một chút
             setPadding(dp(6), dp(14), dp(12), dp(12))
+            // Cho phép khung trạng thái lấn vào vùng padding phải (không bị cắt phẳng mép)
+            clipToPadding = false
         }
         col.addView(buildHeader())
         // Không còn đường kẻ dưới logo; chừa khoảng trống bằng đúng chiều cao cũ (1dp kẻ + 11dp)
@@ -988,12 +990,12 @@ class OverlayService : Service() {
         tabNames.forEachIndexed { i, name ->
             val t = TextView(this).apply {
                 text = name
-                scaledTextSize(14f)
+                scaledTextSize(13f)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(12), 0, dp(10), 0)
-                compoundDrawablePadding = dp(10)
+                setPadding(dp(10), 0, dp(6), 0)
+                compoundDrawablePadding = dp(8)
                 androidx.core.content.ContextCompat.getDrawable(this@OverlayService, tabIcons[i])?.mutate()?.let { ic ->
                     ic.setBounds(0, 0, dp(18), dp(18))
                     setCompoundDrawablesRelative(ic, null, null, null)
@@ -1005,13 +1007,16 @@ class OverlayService : Service() {
                 LinearLayout.LayoutParams.MATCH_PARENT, tabH,
             ).apply { if (i < tabNames.lastIndex) bottomMargin = tabGap })
         }
-        col.addView(box)
-        // Đẩy khung trạng thái xuống đáy cột
-        col.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
-        // Dịch riêng khung trạng thái sang phải một chút (chỉ thêm lề trái, mép phải giữ nguyên để không bị cắt), không đụng tới tab
-        col.addView(buildStatus(), LinearLayout.LayoutParams(
+        // Tab thu gọn chiều ngang: mép trái thẳng hàng với khung trạng thái bên dưới
+        col.addView(box, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
         ).apply { marginStart = dp(7) })
+        // Đẩy khung trạng thái xuống đáy cột
+        col.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
+        // Dịch nguyên khung trạng thái sang phải một chút (giữ nguyên kích thước), không đụng tới tab
+        col.addView(buildStatus(), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { marginStart = dp(5); marginEnd = -dp(5) })
         select(initialTab.coerceIn(0, tabNames.lastIndex), animate = false)
         return col
     }
