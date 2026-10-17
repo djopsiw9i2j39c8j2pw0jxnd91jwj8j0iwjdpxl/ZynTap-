@@ -143,11 +143,19 @@ public final class InputProxy {
     /** Các vùng tròn {x, y, r} (pixel màn hình hiện tại), phẳng. Chỉ đọc/ghi dưới LOCK. */
     private static float[] swallowZones = new float[0];
     /**
-     * Buff lực vuốt: hệ số nhân quãng di chuyển của ngón thật so với chỗ chạm xuống (1 = tắt). Hệ số được chốt
-     * MỘT lần lúc ngón chạm xuống ([fingerGain]) nên ngón đang đè (vd. ngón giữ nút main) không bị đổi giữa chừng.
+     * Trợ vuốt tâm: các vùng tròn (nút main bật trợ vuốt), mỗi vùng 9 số:
+     * x, y, r, mode (0 kéo tâm / 1 ghìm tâm / 2 buff lực), tốc độ (px/s), giới hạn lệch (px), trễ (ms), buff (%), ngưỡng vuốt (px).
+     * Chỉ ngón thật CHẠM XUỐNG trong vùng mới được can thiệp (chốt một lần lúc chạm xuống); ngón khác không bị đụng tới.
      */
-    private static float boostGain = 1f;
-    private static final float[] fingerGain = new float[REAL_SLOTS];
+    private static float[] assistZones = new float[0];
+    private static final int[] aMode = new int[REAL_SLOTS];     // -1 = không can thiệp
+    private static final float[] aSpeed = new float[REAL_SLOTS];
+    private static final float[] aMax = new float[REAL_SLOTS];
+    private static final float[] aDelay = new float[REAL_SLOTS];
+    private static final float[] aGain = new float[REAL_SLOTS];
+    private static final float[] aSlop = new float[REAL_SLOTS];
+    private static final long[] aMoveT = new long[REAL_SLOTS];  // lúc ngón bắt đầu vuốt ra khỏi ngưỡng; 0 = chưa
+    static { java.util.Arrays.fill(aMode, -1); }
     private static final float[] downX = new float[REAL_SLOTS];
     private static final float[] downY = new float[REAL_SLOTS];
     private static final int[] lastRepX = new int[REAL_SLOTS];
@@ -252,6 +260,9 @@ public final class InputProxy {
         Thread reader = new Thread(InputProxy::readLoop, "zyn-reader");
         reader.setDaemon(true);
         reader.start();
+        Thread ticker = new Thread(InputProxy::assistTicker, "zyn-assist");
+        ticker.setDaemon(true);
+        ticker.start();
         Thread dog = new Thread(InputProxy::watchdog, "zyn-dog");
         dog.setDaemon(true);
         dog.start();
@@ -284,21 +295,14 @@ public final class InputProxy {
                     synchronized (LOCK) { swallowZones = z; }
                     break;
                 }
-                case "BOOST": {
-                    float g = Math.max(1f, Math.min(10f, Float.parseFloat(t[1])));
-                    synchronized (LOCK) { boostGain = g; }
+                case "ASSIST": {
+                    // ASSIST x y r mode speedPxS maxPx delayMs gainPct slopPx [...lặp]  (không tham số = xoá hết)
+                    int n = (t.length - 1) / 9;
+                    float[] z = new float[n * 9];
+                    for (int i = 0; i < z.length; i++) z[i] = Float.parseFloat(t[1 + i]);
+                    synchronized (LOCK) { assistZones = z; }
                     break;
                 }
-                case "SWIPE": {
-                    // SWIPE id x1 y1 x2 y2 durMs delayMs : vuốt lặp đi lặp lại cho tới SWIPESTOP id
-                    startSwipe(t[1], Float.parseFloat(t[2]), Float.parseFloat(t[3]), Float.parseFloat(t[4]),
-                            Float.parseFloat(t[5]), Math.max(30, Math.min(3000, Integer.parseInt(t[6]))),
-                            Math.max(0, Math.min(2000, Integer.parseInt(t[7]))));
-                    break;
-                }
-                case "SWIPESTOP":
-                    stopSwipe(t[1]);
-                    break;
                 case "TAP": {
                     final String id = t[1];
                     final float x = Float.parseFloat(t[2]), y = Float.parseFloat(t[3]);
@@ -491,6 +495,69 @@ public final class InputProxy {
         return false;
     }
 
+    /** Gọi dưới LOCK lúc ngón thật vừa chạm xuống: nằm trong vùng trợ vuốt nào thì chốt cách can thiệp. */
+    private static void captureAssist(int s, float x, float y) {
+        aMode[s] = -1;
+        aMoveT[s] = 0;
+        float[] z = assistZones;
+        for (int i = 0; i + 8 < z.length; i += 9) {
+            float dx = x - z[i], dy = y - z[i + 1];
+            if (dx * dx + dy * dy <= z[i + 2] * z[i + 2]) {
+                aMode[s] = (int) z[i + 3];
+                aSpeed[s] = z[i + 4];
+                aMax[s] = z[i + 5];
+                aDelay[s] = z[i + 6];
+                aGain[s] = Math.max(1f, z[i + 7] / 100f);
+                aSlop[s] = Math.max(1f, z[i + 8]);
+                return;
+            }
+        }
+    }
+
+    /**
+     * Gọi dưới LOCK. Ngón đã chốt can thiệp -> toạ độ gửi cho hệ thống:
+     *  - buff lực (2): quãng vuốt tính từ chỗ chạm xuống nhân hệ số, đúng hướng ngón vuốt (360°);
+     *  - kéo tâm (0) / ghìm tâm (1): cộng thêm độ lệch lên / xuống tăng dần theo thời gian vuốt (tới giới hạn).
+     * Chưa vuốt quá ngưỡng thì giữ nguyên ngón thật.
+     */
+    private static P assistPointer(int s, P p) {
+        int m = aMode[s];
+        if (m < 0) return p;
+        float dx = p.x - downX[s], dy = p.y - downY[s];
+        float d = (float) Math.sqrt(dx * dx + dy * dy);
+        if (aMoveT[s] == 0) {
+            if (d < aSlop[s]) return p;
+            aMoveT[s] = SystemClock.uptimeMillis();
+        }
+        P bp = p.copy();
+        if (m == 2) {
+            if (d <= aSlop[s]) return p;
+            float k = (aSlop[s] + (d - aSlop[s]) * aGain[s]) / d;
+            bp.x = clampX(downX[s] + dx * k);
+            bp.y = clampY(downY[s] + dy * k);
+        } else {
+            float el = SystemClock.uptimeMillis() - aMoveT[s] - aDelay[s];
+            float off = el > 0 ? Math.min(aMax[s], aSpeed[s] * el / 1000f) : 0f;
+            bp.y = clampY(p.y + (m == 1 ? off : -off));
+        }
+        return bp;
+    }
+
+    /** Có ngón đang bị kéo/ghìm theo thời gian (cần nhịp cập nhật dù ngón đứng yên). Gọi dưới LOCK. */
+    private static boolean driftActive() {
+        for (int s = 0; s < REAL_SLOTS; s++) {
+            if (rawActive[s] && aMode[s] >= 0 && aMode[s] != 2 && aMoveT[s] != 0) return true;
+        }
+        return false;
+    }
+
+    private static void assistTicker() {
+        while (!stopping) {
+            SystemClock.sleep(8);
+            synchronized (LOCK) { if (driftActive()) sync(); }
+        }
+    }
+
     private static float clampX(float v) { return Math.max(0f, Math.min(scrW - 1f, v)); }
     private static float clampY(float v) { return Math.max(0f, Math.min(scrH - 1f, v)); }
 
@@ -505,28 +572,19 @@ public final class InputProxy {
                 if (!reported[s]) {
                     reported[s] = true;
                     swallowed[s] = inSwallowZone(p.x, p.y); // quyết định MỘT lần lúc ngón chạm xuống
-                    fingerGain[s] = boostGain;
                     downX[s] = p.x; downY[s] = p.y;
+                    captureAssist(s, p.x, p.y);
                     lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
                     out("F " + s + " 1 " + lastRepX[s] + " " + lastRepY[s]);
                 } else {
                     lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
                 }
-                if (!swallowed[s]) {
-                    if (fingerGain[s] > 1f) {
-                        // Buff lực vuốt (360°): đẩy ngón ảo đi xa hơn theo ĐÚNG hướng ngón thật vuốt, tính từ chỗ chạm xuống
-                        P bp = p.copy();
-                        bp.x = clampX(downX[s] + (p.x - downX[s]) * fingerGain[s]);
-                        bp.y = clampY(downY[s] + (p.y - downY[s]) * fingerGain[s]);
-                        want.put(s, bp);
-                    } else {
-                        want.put(s, p);
-                    }
-                }
+                if (!swallowed[s]) want.put(s, assistPointer(s, p));
             } else if (reported[s] && !rawActive[s]) {
                 reported[s] = false;
                 swallowed[s] = false;
-                fingerGain[s] = 1f;
+                aMode[s] = -1;
+                aMoveT[s] = 0;
                 lastRealUpAt = SystemClock.uptimeMillis();
                 out("F " + s + " 0 " + lastRepX[s] + " " + lastRepY[s]);
             }
@@ -779,87 +837,6 @@ public final class InputProxy {
         }
     }
 
-    // ---- vuốt lặp (kéo tâm / ghìm tâm) -----------------------------------------------------------
-    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean> SWIPES =
-            new java.util.concurrent.ConcurrentHashMap<>();
-
-    private static void stopSwipe(String id) {
-        java.util.concurrent.atomic.AtomicBoolean on = SWIPES.remove(id);
-        if (on != null) on.set(false);
-    }
-
-    private static void startSwipe(final String id, final float x1, final float y1, final float x2, final float y2,
-                                   final int dur, final int delay) {
-        final java.util.concurrent.atomic.AtomicBoolean on = new java.util.concurrent.atomic.AtomicBoolean(true);
-        java.util.concurrent.atomic.AtomicBoolean old = SWIPES.put(id, on);
-        if (old != null) old.set(false);
-        Thread th = new Thread(() -> {
-            try {
-                while (on.get() && !stopping) {
-                    String err = swipeOnce(x1, y1, x2, y2, dur, on);
-                    if (err != null) {
-                        if (err.equals("passive")) { out("ERR " + id + " passive"); break; }
-                        log("vuốt lỗi (" + err + ")");
-                        SystemClock.sleep(RETRY_PAUSE_MS * 4);
-                    }
-                    // nghỉ giữa hai lần vuốt, vẫn dừng ngay được khi nhả nút
-                    long end = SystemClock.uptimeMillis() + Math.max(delay, MIN_RELEASE_GAP_MS);
-                    while (on.get() && !stopping && SystemClock.uptimeMillis() < end) SystemClock.sleep(2);
-                }
-            } finally {
-                SWIPES.remove(id, on);
-            }
-        }, "zyn-swipe-" + id);
-        th.setDaemon(true);
-        th.start();
-    }
-
-    /** Một lần vuốt từ (x1,y1) tới (x2,y2) trong dur ms. null = xong (hoặc bị dừng); khác null = lý do lỗi. */
-    private static String swipeOnce(float x1, float y1, float x2, float y2, int dur,
-                                    java.util.concurrent.atomic.AtomicBoolean on) {
-        int sid = -1;
-        Tap tap = null;
-        try {
-            synchronized (LOCK) {
-                if (!injecting) return "passive";
-                sid = allocSynthId();
-                if (sid < 0) return "busy";
-                P p = lastReal != null ? lastReal.copy() : defaultPointer();
-                p.x = clampX(x1); p.y = clampY(y1);
-                tap = new Tap(p);
-                synth.put(sid, tap);
-                int errs = injectErrors;
-                sync();
-                if (injectErrors != errs || !shown.containsKey(sid)) {
-                    synth.remove(sid);
-                    sync();
-                    return injecting ? "inject" : "passive";
-                }
-            }
-            long t0 = SystemClock.uptimeMillis();
-            for (;;) {
-                if (!on.get() || stopping) break;
-                long el = SystemClock.uptimeMillis() - t0;
-                float f = Math.min(1f, el / (float) dur);
-                synchronized (LOCK) {
-                    if (!synth.containsKey(sid)) break;   // ngón thật chen vào làm vuốt bị nhường -> kết thúc lượt này
-                    tap.p.x = clampX(x1 + (x2 - x1) * f);
-                    tap.p.y = clampY(y1 + (y2 - y1) * f);
-                    sync();
-                }
-                if (f >= 1f) break;
-                SystemClock.sleep(8);
-            }
-            synchronized (LOCK) {
-                if (synth.remove(sid) != null) sync();   // UP (nếu còn hiện)
-            }
-            return null;
-        } catch (Throwable ex) {
-            synchronized (LOCK) { if (sid >= 0) { synth.remove(sid); sync(); } }
-            return String.valueOf(ex);
-        }
-    }
-
     private static P defaultPointer() {
         P p = new P();
         p.pressure = maxPressure > 0 ? 0.5f : 1f;
@@ -876,7 +853,6 @@ public final class InputProxy {
             down = true;
         }
         stopping = true;
-        for (String k : new ArrayList<>(SWIPES.keySet())) stopSwipe(k);
         // Chốt chặn cuối: dù bước dọn dưới đây kẹt (khoá LOCK, bộ phát treo...) tiến trình vẫn phải chết,
         // nếu không helper mồ côi giữ grab cảm ứng và lần mở app sau không bơm được.
         Thread killer = new Thread(() -> {
