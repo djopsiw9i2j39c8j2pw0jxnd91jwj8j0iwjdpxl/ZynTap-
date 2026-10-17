@@ -399,16 +399,6 @@ class TouchWatcher(
     /** Helper đã grab cảm ứng và đang phát lại luồng chạm (click của app đi qua [tap]). */
     val proxyReady get() = link?.injecting == true
 
-    /**
-     * Gửi lệnh kéo/ghìm/buff (PULL / BUFF / FXSTOP) cho helper. Chặn khi ghi -> gọi từ luồng nền.
-     * @return false nếu helper chưa bơm được (chưa READY / thụ động) hoặc ghi lỗi.
-     */
-    fun sendFx(line: String): Boolean {
-        val l = link ?: return false
-        if (!l.injecting) return false
-        return try { l.send(line); true } catch (_: IOException) { false }
-    }
-
     /** Đang ở chế độ đọc thô `cat` (helper đã bị bỏ sau nhiều lần thất bại). */
     @Volatile private var inCatMode = false
 
@@ -422,6 +412,21 @@ class TouchWatcher(
         val l = link
         val passive = l != null && l.ready && !l.injecting
         return inCatMode || passive
+    }
+
+    /**
+     * Vùng tròn (x, y, bán kính — pixel) mà ngón thật đặt xuống thì helper chỉ BÁO cho app chứ không phát xuống
+     * hệ thống: nút main chỉ đè lên điểm nhấn (không bật chạm xuyên) vẫn nhận ngón như nút thường, không để ngón lọt
+     * xuống app dưới. Nhớ lại để gửi lại khi helper (khởi động lại) báo READY.
+     */
+    @Volatile private var zonesLine = "ZONE"
+
+    fun setSwallowZones(zones: List<Triple<Int, Int, Int>>) {
+        val line = if (zones.isEmpty()) "ZONE" else "ZONE " + zones.joinToString(" ") { "${it.first} ${it.second} ${it.third}" }
+        if (line == zonesLine) return
+        zonesLine = line
+        val l = link ?: return
+        scope.launch(Dispatchers.IO) { runCatching { l.send(line) } }
     }
 
     /** Kết nối tới helper: gửi lệnh, nhận kết quả click. */
@@ -706,6 +711,7 @@ class TouchWatcher(
                             }
                             line.startsWith("READY") -> {
                                 sawReady = true; l.ready = true; l.injecting = line.contains("inj=1")
+                                runCatching { l.send(zonesLine) }
                                 setStage("Helper READY: ${line.trim()}", log = false)
                                 if (l.injecting) { reinjectGap = REINJECT_MIN_MS; DebugLog.i("Bơm", "Helper sẵn sàng: $line") }
                                 else DebugLog.e("Bơm", "Helper chạy nhưng KHÔNG bơm được ($line) — grab cảm ứng thất bại hoặc không tạo được bộ phát")

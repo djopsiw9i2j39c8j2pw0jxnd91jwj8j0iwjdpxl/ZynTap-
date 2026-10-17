@@ -289,13 +289,7 @@ class MainButtonOverlay(
         pointsScreen = Rect(s)
         pointsCache = repo.buttons.filter { it.pointScript.isNotBlank() }.flatMap { b ->
             PointScriptParser.parse(b.pointScript, s.width(), s.height()).steps
-                .mapNotNull {
-                    when (it) {
-                        is PointStep.Tap -> it.x to it.y
-                        is PointStep.Pull -> it.x to it.y
-                        is PointStep.Wait -> null
-                    }
-                }
+                .filterIsInstance<PointStep.Tap>().map { it.x to it.y }
         }
         return pointsCache
     }
@@ -325,6 +319,21 @@ class MainButtonOverlay(
         p.flags = if (through) p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         else p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
         p.alpha = if (through) PASS_THROUGH_ALPHA else 1f
+        pushSwallowZones()
+    }
+
+    /**
+     * Nút main CHỈ đè lên điểm nhấn (người dùng không bật "chạm xuyên"): cửa sổ nút vẫn phải NOT_TOUCHABLE để click
+     * bơm rơi xuống app dưới nút, nhưng ngón thật đặt lên nút KHÔNG được lọt xuống theo. Helper nuốt ngón đặt trong
+     * vùng tròn của các nút này (vẫn báo cho watcher để kích hoạt nút như bình thường).
+     */
+    private fun pushSwallowZones() {
+        val zones = entries.mapNotNull { (id, e) ->
+            val b = repo.find(id) ?: return@mapNotNull null
+            if (b.passThrough || !isPassThrough(b)) return@mapNotNull null
+            Triple(e.params.x + e.params.width / 2, e.params.y + e.params.height / 2, dp(b.sizeDp) / 2)
+        }
+        watcher.setSwallowZones(zones)
     }
 
     private fun refreshWatcher() {
@@ -467,6 +476,7 @@ class MainButtonOverlay(
             b.x = if (maxX > 0) e.params.x / maxX.toFloat() else 0.5f
             b.y = if (maxY > 0) e.params.y / maxY.toFloat() else 0.5f
             runCatching { wm.updateViewLayout(e.view, e.params) }
+            pushSwallowZones() // kích thước/vị trí vừa đổi
         }
     }
 

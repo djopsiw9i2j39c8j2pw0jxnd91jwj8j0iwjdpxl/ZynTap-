@@ -21,8 +21,6 @@ class MainTouchGate {
         else -> Action.NONE
     }
 
-    fun isPressed(id: Int) = pressed.containsKey(id)
-
     fun cancel(id: Int) { pressed.remove(id) }
     fun clear() { pressed.clear() }
 }
