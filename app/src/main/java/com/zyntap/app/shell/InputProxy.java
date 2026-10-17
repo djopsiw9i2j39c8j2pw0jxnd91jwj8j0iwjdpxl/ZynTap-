@@ -14,6 +14,7 @@ import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -63,10 +64,22 @@ public final class InputProxy {
     private static final int EVIOCGRAB = 0x40044590;
 
     private static final int REAL_SLOTS = 16;          // ngón thật: pointer id 0..15
+    private static final int SYNTH_BASE = 16;          // click của app: pointer id 16..23
     private static final int SYNTH_COUNT = 8;
     private static final long WATCHDOG_MS = 3000;
     /** Số lần phát sự kiện thất bại liên tiếp thì coi bộ phát đã hỏng và nhả grab NGAY (tránh liệt cảm ứng toàn máy). */
     private static final int MAX_INJECT_FAILS = 4;
+
+    // ---- click thông minh ---------------------------------------------------------------------
+    /** Click giữ ngắn hơn mức này game dễ không kịp thấy (delay 1ms vẫn bị nâng lên mức này). */
+    private static final int MIN_HOLD_MS = 12;
+    /** Click đã giữ đủ lâu thì dù bị ngón thật chen vào cắt sớm vẫn coi là đã tới nơi (không click lại, tránh đúp). */
+    private static final int DELIVERED_HOLD_MS = 25;
+    /** Khoảng nhả tối thiểu giữa 2 click liên tiếp: delay 1ms vẫn phải ra 2 lần chạm tách bạch, không dính cùng khung hình. */
+    private static final int MIN_RELEASE_GAP_MS = 12;
+    /** Click thất bại (hệ thống từ chối / bị cắt quá sớm) thì click lại thêm tối đa chừng này lần. */
+    private static final int MAX_TAP_RETRY = 1;
+    private static final int RETRY_PAUSE_MS = 8;
 
     // ---- cấu hình (từ tham số dòng lệnh) ----------------------------------------------------
     private static String devPath = "";
@@ -121,29 +134,49 @@ public final class InputProxy {
     private static final int[] lastRepY = new int[REAL_SLOTS];
     private static int curSlot = 0;
 
-    /**
-     * Một pointer hệ thống đang thấy. Giống MacroTouch (GhostTouch.Takeover): xếp theo THỨ TỰ CHẠM XUỐNG
-     * (ngón nào xuống sau thì ở index cuối, id = số nhỏ nhất còn trống), KHÔNG xếp theo slot/id.
-     * Trước đây xếp theo id (ngón thật 0..15 luôn đứng trước click 16+) nên khi click xuống trước,
-     * ngón thật chèn vào index 0 làm ngón chủ "nhảy" -> game đơ khi kéo/xoay cam.
-     */
-    private static final class Ptr {
-        int key, pid, tid;
-        float x, y;
+    /** Một pointer đã/đang gửi cho hệ thống. */
+    private static final class P {
+        float x, y, pressure, size, major, minor, toolMajor;
+        P copy() {
+            P p = new P();
+            p.x = x; p.y = y; p.pressure = pressure; p.size = size;
+            p.major = major; p.minor = minor; p.toolMajor = toolMajor;
+            return p;
+        }
+        boolean same(P o) { return x == o.x && y == o.y && pressure == o.pressure && major == o.major; }
     }
 
-    private static final int SYNTH_KEY = 100;                           // key của click app: 100..107 (ngón thật: key = slot)
-    private static final ArrayList<Ptr> shown = new ArrayList<>();      // hệ thống đang thấy, theo thứ tự chạm xuống
-    private static final HashMap<Integer, float[]> synth = new HashMap<>(); // click của app đang giữ: key -> {x, y}
+    /**
+     * Hệ thống đang thấy. Xếp theo THỨ TỰ CHẠM XUỐNG (không theo id): chỉ số pointer của mỗi ngón giữ nguyên
+     * suốt cử chỉ. Trước đây xếp theo id nên ngón thật (id 0..15) chen lên trước click (id 16+) làm chỉ số
+     * pointer của click/ngón thật đổi chỗ giữa chừng -> game theo dõi theo chỉ số bị lẫn.
+     */
+    private static final LinkedHashMap<Integer, P> shown = new LinkedHashMap<>();
+
+    /** Một click của app đang giữ. */
+    private static final class Tap {
+        final P p;
+        volatile long downAt = 0;   // uptime lúc đang chạm xuống thật sự; 0 = đang bị nhấc tạm (ngón thật chen vào)
+        volatile boolean done = false; // đã bị ngón thật cắt SAU khi giữ đủ lâu -> coi như đã tới nơi
+        Tap(P p) { this.p = p; }
+    }
+
+    private static final HashMap<Integer, Tap> synth = new HashMap<>();   // click của app đang giữ
+    private static int nextSynth = 0;           // xoay vòng id click, không dùng lại id vừa nhả
+    private static long lastSynthUpAt = 0;      // uptime lúc click gần nhất vừa nhả (chỉ đụng dưới LOCK)
+    private static int injectErrors = 0;        // tổng số lần phát sự kiện lỗi (chỉ đụng dưới LOCK)
+    private static long lastYieldLog = 0;
     private static long downTime = 0;
     private static long lastRealUpAt = 0;   // uptime lúc ngón thật gần nhất vừa nhả (chỉ đụng dưới LOCK)
-    private static boolean dirty = false;   // có SYN_REPORT chưa đồng bộ (gộp cả lô đọc thành 1 lần bơm)
-    private static int deviceId = 0;        // như MacroTouch: deviceId 0 + source cảm ứng
+    private static P lastReal = null;       // áp lực / kích cỡ của ngón thật gần nhất (để clone)
+    private static int deviceId = 0;
 
     private static FileInputStream devIn;
     private static boolean injecting = false;
     private static boolean grabbed = false;
     private static volatile boolean stopping = false;
+    /** Chỉ bật ngay trước khi đóng fd: trong lúc chờ nhả grab, luồng đọc vẫn phải tiếp tục phát ngón thật. */
+    private static volatile boolean closed = false;
     private static volatile long lastPing = SystemClock.uptimeMillis();
     private static final ExecutorService TAPS = Executors.newSingleThreadExecutor();
 
@@ -183,7 +216,7 @@ public final class InputProxy {
         // SIGTERM / SIGHUP (adb đóng, bị kill mềm): vẫn huỷ ngón giả + nhả grab. SIGKILL thì kernel tự nhả grab.
         Runtime.getRuntime().addShutdownHook(new Thread(() -> { urgentRelease = true; shutdown(); }, "zyn-hook"));
         devIn = new FileInputStream(devPath);
-        deviceId = 0;
+        deviceId = findDeviceId(devName);
 
         // Chuẩn bị bộ phát; nếu không có thì không grab (grab mà không phát lại được = mất cảm ứng).
         Injector inj = null;
@@ -226,7 +259,7 @@ public final class InputProxy {
                 case "TAP": {
                     final String id = t[1];
                     final float x = Float.parseFloat(t[2]), y = Float.parseFloat(t[3]);
-                    final int hold = Math.max(5, Math.min(2000, Integer.parseInt(t[4])));
+                    final int hold = Math.max(MIN_HOLD_MS, Math.min(2000, Integer.parseInt(t[4])));
                     final int gap = t.length > 5 ? Math.max(0, Math.min(500, Integer.parseInt(t[5]))) : 0;
                     TAPS.execute(() -> doTap(id, x, y, hold, gap));
                     break;
@@ -257,12 +290,13 @@ public final class InputProxy {
 
     // ---- ngón thật -----------------------------------------------------------------------------
     private static void readLoop() {
-        try { android.os.Process.setThreadPriority(-8); } catch (Throwable ignored) { } // bơm kịp nhịp cảm ứng
         byte[] buf = new byte[4800]; // chia hết cho 16 và 24
         byte[] acc = new byte[9600];
         int n = 0;
         try {
-            while (!stopping) {
+            // Chạy tới khi fd thật sự bị đóng (closed), KHÔNG dừng ngay khi stopping: lúc shutdown() còn chờ nhả grab,
+            // nếu ngừng đọc thì ngón thật không được phát nữa trong khi grab vẫn giữ = đơ cảm ứng tới 1.5s.
+            while (!closed) {
                 int r = devIn.read(buf);
                 if (r < 0) break;
                 if (r == 0) continue;
@@ -281,11 +315,11 @@ public final class InputProxy {
                     off += recSize;
                 }
                 if (off > 0) { System.arraycopy(acc, off, acc, 0, n - off); n -= off; }
-                synchronized (LOCK) { if (dirty) sync(); }
             }
         } catch (IOException e) {
-            log("read: " + e);
+            if (!closed) log("read: " + e);
         }
+        if (!closed) urgentRelease = true; // tấm cảm ứng không còn đọc được: chờ ngón nhấc cũng vô nghĩa
         shutdown();
     }
 
@@ -312,7 +346,6 @@ public final class InputProxy {
                         break;
                     case ABS_MT_TRACKING_ID:
                         if (curSlot >= REAL_SLOTS) break;
-                        if (dirty) sync(); // chốt trạng thái cũ trước khi ngón này nhấc / chạm lại
                         if (value == -1) {
                             rawActive[curSlot] = false;
                             tid[curSlot] = -1;
@@ -348,9 +381,8 @@ public final class InputProxy {
                 if (code == SYN_DROPPED) {
                     // Mất đồng bộ: coi như mọi ngón đã nhả, đợi ngón mới
                     for (int i = 0; i < REAL_SLOTS; i++) { rawActive[i] = false; tid[i] = -1; }
-                    dirty = true;
                 } else if (code == SYN_REPORT) {
-                    dirty = true; // gộp cả lô đọc được thành 1 lần bơm (xem readLoop) -> không bị dồn khi hệ thống bận
+                    sync();
                 }
             }
         }
@@ -377,57 +409,45 @@ public final class InputProxy {
         }
     }
 
+    /** Pixel màn hình ứng với 1 đơn vị thô của trục "to" (xấp xỉ, dùng cho touchMajor/minor). */
+    private static float pxPerRaw() {
+        boolean swap = (rot & 1) == 1;
+        float s = swap ? (float) scrW / (maxY + 1f) : (float) scrW / (maxX + 1f);
+        return s;
+    }
+
+    private static P realPointer(int s) {
+        P p = new P();
+        p.x = clampX(mapX(rawX[s], rawY[s]));
+        p.y = clampY(mapY(rawX[s], rawY[s]));
+        p.pressure = maxPressure > 0 ? Math.min(1f, rawP[s] / (float) maxPressure) : 1f;
+        if (maxPressure > 0 && p.pressure <= 0f) p.pressure = 0.05f;
+        float k = pxPerRaw();
+        p.major = maxMajor > 0 ? rawMaj[s] * k : 0f;
+        p.minor = rawMin[s] > 0 ? rawMin[s] * k : p.major;
+        p.toolMajor = p.major;
+        p.size = maxMajor > 0 ? Math.min(1f, rawMaj[s] / (float) maxMajor) : 0f;
+        return p;
+    }
+
     private static float clampX(float v) { return Math.max(0f, Math.min(scrW - 1f, v)); }
     private static float clampY(float v) { return Math.max(0f, Math.min(scrH - 1f, v)); }
 
-    private static boolean real(int s) { return rawActive[s] && hasX[s] && hasY[s]; }
-
-    private static int indexOfKey(int key) {
-        for (int i = 0; i < shown.size(); i++) if (shown.get(i).key == key) return i;
-        return -1;
-    }
-
-    private static int allocPid() {
-        for (int id = 0; id < 32; id++) {
-            boolean used = false;
-            for (Ptr p : shown) if (p.pid == id) { used = true; break; }
-            if (!used) return id;
-        }
-        return 31;
-    }
-
-    private static void addPointer(int key, float x, float y) {
-        if (shown.size() >= 31) return;
-        Ptr p = new Ptr();
-        p.key = key; p.pid = allocPid(); p.x = x; p.y = y;
-        p.tid = key < REAL_SLOTS ? tid[key] : 0;
-        shown.add(p);
-        if (shown.size() == 1) {
-            downTime = SystemClock.uptimeMillis();
-            emit(MotionEvent.ACTION_DOWN, 0);
-        } else {
-            emit(MotionEvent.ACTION_POINTER_DOWN, shown.size() - 1);
-        }
-    }
-
-    private static void removeAt(int idx) {
-        emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, idx);
-        shown.remove(idx);
-    }
-
-    /** Gọi dưới LOCK sau mỗi lô SYN_REPORT hoặc khi click của app đổi trạng thái. */
+    /** Gọi dưới LOCK sau mỗi SYN_REPORT hoặc khi click của app đổi trạng thái. */
     private static void sync() {
-        dirty = false;
+        TreeMap<Integer, P> want = new TreeMap<>();
         for (int s = 0; s < REAL_SLOTS; s++) {
-            if (real(s)) {
-                float px = clampX(mapX(rawX[s], rawY[s])), py = clampY(mapY(rawX[s], rawY[s]));
+            if (rawActive[s] && hasX[s] && hasY[s]) {
+                P p = realPointer(s);
+                want.put(s, p);
+                lastReal = p;
                 // báo cho phần "chạm xuyên" của app (toạ độ pixel)
                 if (!reported[s]) {
                     reported[s] = true;
-                    lastRepX[s] = (int) px; lastRepY[s] = (int) py;
+                    lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
                     out("F " + s + " 1 " + lastRepX[s] + " " + lastRepY[s]);
                 } else {
-                    lastRepX[s] = (int) px; lastRepY[s] = (int) py;
+                    lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
                 }
             } else if (reported[s] && !rawActive[s]) {
                 reported[s] = false;
@@ -437,50 +457,101 @@ public final class InputProxy {
         }
         if (!injecting) return; // chế độ thụ động: hệ thống vẫn tự nhận ngón thật
 
-        // 1) pointer biến mất (ngón nhấc, hoặc ngón đổi tracking id) -> UP
-        for (int i = shown.size() - 1; i >= 0; i--) {
-            Ptr p = shown.get(i);
-            boolean alive = p.key >= SYNTH_KEY ? synth.containsKey(p.key) : (real(p.key) && tid[p.key] == p.tid);
-            if (!alive) removeAt(i);
+        // 0) NGÓN THẬT MỚI chạm xuống trong lúc màn hình chỉ có click của app (chưa có ngón thật nào):
+        //    nếu để nguyên thì click là "ngón đầu" của cử chỉ, ngón thật chỉ là ngón phụ. Click nhả ra là
+        //    game mất ngón đầu và bỏ rơi ngón thật tới khi nhấc tay (đúng lỗi "bấm main -> click -> điều khiển bị đơ").
+        //    => Nhấc click ngay để ngón thật thành ngón ĐẦU; click (nếu chưa giữ đủ lâu) sẽ chạm lại ngay sau đó
+        //    như một ngón phụ - đúng kiểu "điều khiển trước, click sau" vốn rất mượt.
+        boolean newReal = false;
+        for (Integer id : want.keySet()) {
+            if (!shown.containsKey(id)) { newReal = true; break; }
         }
-        // 2) pointer mới -> DOWN, xếp cuối (ngón thật trước, click của app sau)
-        for (int s = 0; s < REAL_SLOTS; s++) {
-            if (real(s) && indexOfKey(s) < 0) addPointer(s, clampX(mapX(rawX[s], rawY[s])), clampY(mapY(rawX[s], rawY[s])));
-        }
-        for (Map.Entry<Integer, float[]> e : synth.entrySet()) {
-            if (indexOfKey(e.getKey()) < 0) addPointer(e.getKey(), e.getValue()[0], e.getValue()[1]);
-        }
-        // 3) di chuyển (chỉ khi lệch >= 0.5px, tránh bơm dồn vì nhiễu áp lực)
-        boolean moved = false;
-        for (Ptr p : shown) {
-            float x, y;
-            if (p.key >= SYNTH_KEY) {
-                float[] c = synth.get(p.key);
-                if (c == null) continue;
-                x = c[0]; y = c[1];
-            } else {
-                x = clampX(mapX(rawX[p.key], rawY[p.key])); y = clampY(mapY(rawX[p.key], rawY[p.key]));
+        if (newReal) {
+            boolean realShown = false, synthShown = false;
+            for (Integer id : shown.keySet()) {
+                if (id >= SYNTH_BASE) synthShown = true; else realShown = true;
             }
-            if (Math.abs(x - p.x) >= 0.5f || Math.abs(y - p.y) >= 0.5f) { p.x = x; p.y = y; moved = true; }
+            if (synthShown && !realShown) yieldSynthToReal();
         }
-        if (moved && !shown.isEmpty()) emit(MotionEvent.ACTION_MOVE, 0);
+
+        for (Map.Entry<Integer, Tap> e : synth.entrySet()) want.put(e.getKey(), e.getValue().p);
+
+        // 1) pointer biến mất -> UP
+        for (Integer id : new ArrayList<>(shown.keySet())) {
+            if (!want.containsKey(id)) {
+                emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, id);
+                shown.remove(id);
+                if (id >= SYNTH_BASE) lastSynthUpAt = SystemClock.uptimeMillis();
+            }
+        }
+        // 2) pointer mới -> DOWN (ngón thật id nhỏ nên được xếp trước click khi cùng xuất hiện trong một lượt)
+        for (Map.Entry<Integer, P> e : want.entrySet()) {
+            if (!shown.containsKey(e.getKey())) {
+                if (shown.isEmpty()) downTime = SystemClock.uptimeMillis();
+                shown.put(e.getKey(), e.getValue().copy());
+                if (e.getKey() >= SYNTH_BASE) {
+                    Tap tap = synth.get(e.getKey());
+                    if (tap != null) tap.downAt = SystemClock.uptimeMillis();
+                }
+                emit(shown.size() == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN, e.getKey());
+            }
+        }
+        // 3) di chuyển
+        boolean moved = false;
+        for (Map.Entry<Integer, P> e : shown.entrySet()) {
+            P w = want.get(e.getKey());
+            if (w != null && !w.same(e.getValue())) { e.setValue(w.copy()); moved = true; }
+        }
+        if (moved) emit(MotionEvent.ACTION_MOVE, -1);
     }
 
-    private static void emit(int baseAction, int actionIndex) {
+    /**
+     * Gọi dưới LOCK. Nhấc mọi click đang hiện (màn hình chưa có ngón thật nào) để ngón thật sắp đặt xuống làm ngón đầu.
+     * Click đã giữ >= DELIVERED_HOLD_MS thì coi là đã tới nơi (xong, không chạm lại); chưa đủ thì giữ trong [synth]
+     * để bước DOWN ngay sau đó chạm lại nó như ngón phụ (click lại cho chắc, không bị xịt).
+     */
+    private static void yieldSynthToReal() {
+        long now = SystemClock.uptimeMillis();
+        for (Integer id : new ArrayList<>(shown.keySet())) {
+            if (id < SYNTH_BASE) continue;
+            emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, id);
+            shown.remove(id);
+            lastSynthUpAt = now;
+            Tap tap = synth.get(id);
+            if (tap == null) continue;
+            if (now - tap.downAt >= DELIVERED_HOLD_MS) {
+                tap.done = true;
+                synth.remove(id);
+            } else {
+                tap.downAt = 0;
+            }
+        }
+        if (now - lastYieldLog > 1000) {
+            lastYieldLog = now;
+            log("ngón thật chạm lúc đang click -> nhường ngón đầu cho ngón thật");
+        }
+    }
+
+    private static void emit(int baseAction, int pointerId) {
         int n = shown.size();
         if (n == 0) return;
         MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[n];
         MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[n];
-        for (int i = 0; i < n; i++) {
-            Ptr p = shown.get(i);
+        int idx = 0, actionIndex = 0;
+        for (Map.Entry<Integer, P> e : shown.entrySet()) {
             MotionEvent.PointerProperties pp = new MotionEvent.PointerProperties();
-            pp.id = p.pid;
+            pp.id = e.getKey();
             pp.toolType = MotionEvent.TOOL_TYPE_FINGER;
             MotionEvent.PointerCoords pc = new MotionEvent.PointerCoords();
+            P p = e.getValue();
             pc.x = p.x; pc.y = p.y;
-            pc.pressure = 1f;
-            pc.size = 1f;
-            props[i] = pp; coords[i] = pc;
+            pc.pressure = p.pressure;
+            pc.size = p.size;
+            pc.touchMajor = p.major; pc.touchMinor = p.minor;
+            pc.toolMajor = p.toolMajor; pc.toolMinor = p.minor;
+            props[idx] = pp; coords[idx] = pc;
+            if (e.getKey() == pointerId) actionIndex = idx;
+            idx++;
         }
         int action = baseAction;
         if (baseAction == MotionEvent.ACTION_POINTER_DOWN || baseAction == MotionEvent.ACTION_POINTER_UP) {
@@ -494,6 +565,7 @@ public final class InputProxy {
             injectFails = 0;
         } catch (Throwable t) {
             log("inject fail: " + t);
+            injectErrors++;
             if (++injectFails >= MAX_INJECT_FAILS && injecting) {
                 // Bộ phát hỏng mà grab vẫn còn = cảm ứng chết cả máy. Nhả grab ngay (đóng fd), huỷ ngón kẹt.
                 injecting = false;
@@ -508,7 +580,40 @@ public final class InputProxy {
 
     // ---- click của app --------------------------------------------------------------------------
     private static void doTap(String id, float x, float y, int hold, int gap) {
-        int key = -1;
+        String err = null;
+        for (int attempt = 0; attempt <= MAX_TAP_RETRY; attempt++) {
+            err = tapOnce(x, y, hold, gap);
+            if (err == null) {
+                out(attempt == 0 ? "OK " + id : "OK " + id + " r" + attempt); // "r1" = đã phải click lại 1 lần
+                return;
+            }
+            // passive: không bơm được (app lùi về input tap). Đang thoát: khỏi thử lại.
+            if (err.equals("passive") || stopping) break;
+            log("click lỗi (" + err + ") -> click lại lần " + (attempt + 1));
+            SystemClock.sleep(RETRY_PAUSE_MS);
+        }
+        out("ERR " + id + " " + err);
+    }
+
+    /** Id click kế tiếp, xoay vòng để không dùng lại ngay id vừa nhả (game dễ gộp UP+DOWN cùng id trong một khung). */
+    private static int allocSynthId() {
+        for (int k = 0; k < SYNTH_COUNT; k++) {
+            int i = (nextSynth + k) % SYNTH_COUNT;
+            if (!synth.containsKey(SYNTH_BASE + i)) {
+                nextSynth = (i + 1) % SYNTH_COUNT;
+                return SYNTH_BASE + i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Một lần click. Trả null nếu click đã tới hệ thống đủ lâu để game thấy; ngược lại trả lý do thất bại
+     * (hệ thống từ chối sự kiện, hết id...). "passive" = không bơm được, không nên thử lại.
+     */
+    private static String tapOnce(float x, float y, int hold, int gap) {
+        int sid = -1;
+        Tap tap = null;
         try {
             // Click đến ngay sau khi ngón thật vừa nhả (chế độ Thả + chạm xuyên): game đang bận xử lý ngón thật
             // (vd. nút bắn gây khung hình nặng) nên DOWN+UP quá sát/quá ngắn bị nuốt. Chờ cho đủ khoảng cách.
@@ -521,25 +626,62 @@ public final class InputProxy {
                 }
                 if (wait > 0) SystemClock.sleep(Math.min(wait, gap));
             }
+            // Delay giữa các click cỡ 1ms: vẫn phải có khoảng nhả tối thiểu sau click trước, nếu không UP và DOWN
+            // dính vào cùng một khung hình và game gộp/nuốt mất lần chạm.
+            long relWait;
+            synchronized (LOCK) { relWait = lastSynthUpAt + MIN_RELEASE_GAP_MS - SystemClock.uptimeMillis(); }
+            if (relWait > 0) SystemClock.sleep(Math.min(relWait, MIN_RELEASE_GAP_MS));
+
             synchronized (LOCK) {
-                if (!injecting) { out("ERR " + id + " passive"); return; }
-                for (int i = 0; i < SYNTH_COUNT; i++) {
-                    if (!synth.containsKey(SYNTH_KEY + i)) { key = SYNTH_KEY + i; break; }
+                if (!injecting) return "passive";
+                sid = allocSynthId();
+                if (sid < 0) return "busy";
+                P p = lastReal != null ? lastReal.copy() : defaultPointer();
+                p.x = clampX(x); p.y = clampY(y);
+                tap = new Tap(p);
+                synth.put(sid, tap);
+                int errs = injectErrors;
+                sync();
+                if (injectErrors != errs || !shown.containsKey(sid)) {
+                    synth.remove(sid);
+                    sync();
+                    return injecting ? "inject" : "passive";
                 }
-                if (key < 0) { out("ERR " + id + " busy"); return; }
-                synth.put(key, new float[]{clampX(x), clampY(y)});
-                sync();
             }
-            SystemClock.sleep(hold);
+
+            // Giữ đủ lâu. Nếu ngón thật chen vào làm click bị nhấc tạm (downAt = 0) thì chờ nó chạm lại rồi giữ tiếp.
+            long deadline = SystemClock.uptimeMillis() + hold + 600L;
+            for (;;) {
+                long remain;
+                synchronized (LOCK) {
+                    if (tap.done || stopping) break;
+                    remain = tap.downAt == 0 ? 2 : tap.downAt + hold - SystemClock.uptimeMillis();
+                }
+                if (remain <= 0 || SystemClock.uptimeMillis() > deadline) break;
+                SystemClock.sleep(Math.min(remain, 20));
+            }
+
             synchronized (LOCK) {
-                synth.remove(key);
-                sync();
+                boolean delivered = tap.done;           // bị ngón thật cắt sau khi đã giữ đủ lâu
+                boolean wasShown = shown.containsKey(sid);
+                int errs = injectErrors;
+                synth.remove(sid);
+                sync();                                  // UP (nếu còn hiện)
+                if (delivered) return null;
+                if (!wasShown || injectErrors != errs) return "inject";
             }
-            out("OK " + id);
-        } catch (Throwable t) {
-            synchronized (LOCK) { if (key >= 0) { synth.remove(key); sync(); } }
-            out("ERR " + id + " " + t);
+            return null;
+        } catch (Throwable ex) {
+            synchronized (LOCK) { if (sid >= 0) { synth.remove(sid); sync(); } }
+            return String.valueOf(ex);
         }
+    }
+
+    private static P defaultPointer() {
+        P p = new P();
+        p.pressure = maxPressure > 0 ? 0.5f : 1f;
+        p.size = maxMajor > 0 ? 0.1f : 0f;
+        return p;
     }
 
     // ---- thoát an toàn --------------------------------------------------------------------------
@@ -571,12 +713,13 @@ public final class InputProxy {
             synchronized (LOCK) {
                 synth.clear();
                 if (injecting && !shown.isEmpty()) {
-                    emit(MotionEvent.ACTION_CANCEL, 0);
+                    emit(MotionEvent.ACTION_CANCEL, -1);
                     shown.clear();
                 }
             }
         } catch (Throwable ignored) {
         }
+        closed = true;
         try { if (devIn != null) devIn.close(); } catch (Throwable ignored) { } // đóng fd = nhả grab
         try { OUT.println("LOG bye"); } catch (Throwable ignored) { }
         Runtime.getRuntime().halt(0);
