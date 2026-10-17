@@ -399,6 +399,16 @@ class TouchWatcher(
     /** Helper đã grab cảm ứng và đang phát lại luồng chạm (click của app đi qua [tap]). */
     val proxyReady get() = link?.injecting == true
 
+    /**
+     * Gửi lệnh kéo/ghìm/buff (PULL / BUFF / FXSTOP) cho helper. Chặn khi ghi -> gọi từ luồng nền.
+     * @return false nếu helper chưa bơm được (chưa READY / thụ động) hoặc ghi lỗi.
+     */
+    fun sendFx(line: String): Boolean {
+        val l = link ?: return false
+        if (!l.injecting) return false
+        return try { l.send(line); true } catch (_: IOException) { false }
+    }
+
     /** Đang ở chế độ đọc thô `cat` (helper đã bị bỏ sau nhiều lần thất bại). */
     @Volatile private var inCatMode = false
 

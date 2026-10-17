@@ -20,6 +20,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 
 /** Per-main, ordered script editor. Text is persisted, never executed as shell. */
@@ -42,6 +43,14 @@ class PointsTab(
     private lateinit var xField: EditText
     private lateinit var yField: EditText
     private lateinit var delayField: EditText
+    private lateinit var typeField: TextView
+    private lateinit var pointLabel: TextView
+    private lateinit var powerBar: SeekBar
+    private lateinit var powerValue: TextView
+    private lateinit var powerRow: View
+    /** null = điểm click; còn lại = kéo tâm / ghìm tâm / buff lực kéo (chạy liên tục khi giữ nút main). */
+    private var kind: PullKind? = null
+    private var power = PointScriptParser.DEFAULT_POWER
     private lateinit var status: TextView
     private var selectedId: Int? = null
     private var loading = false
@@ -126,7 +135,7 @@ class PointsTab(
         status = label("", 10.5f).apply { maxLines = 2 }
         page.addView(status, LinearLayout.LayoutParams(-1, dp(30)))
         buildInputs(page)
-        page.addView(label("Chạm X/Y → kéo ghim → chạm ghim → Enter.\nDelay chờ tại dòng đó, trước điểm tiếp theo.", 10.5f), LinearLayout.LayoutParams(-1, dp(34)).apply { topMargin = dp(6) })
+        page.addView(label("Chạm X/Y → kéo ghim → chạm ghim → Enter.\nDelay chờ tại dòng đó, trước điểm tiếp theo.\nKéo tâm / ghìm tâm / buff chạy liên tục tới khi nhả nút main, ở mọi chế độ (nhấn · giữ · thả); kéo và ghìm dùng chung 1 kênh, buff chạy song song. Buff chỉ áp cho ngón thật cùng nửa màn hình với điểm.", 10.5f).apply { gravity = Gravity.TOP }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
         root.addView(ScrollView(ctx).apply {
             isFillViewport = true; isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -136,8 +145,22 @@ class PointsTab(
     }
 
     private fun buildInputs(page: LinearLayout) {
+        val typeRow = row()
+        typeRow.addView(label("Loại điểm"), LinearLayout.LayoutParams(dp(78), dp(42)))
+        typeField = TextView(ctx).apply {
+            scaledTextSize(14f); setTextColor(fg); gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), 0, dp(12), 0)
+            background = RippleDrawable(ColorStateList.valueOf(0x2219D3FF), round(0xFF142036.toInt()), round(-1))
+            setOnClickListener {
+                leaveInput()
+                host.dropdown.show(this, KIND_LABELS, kindIndex()) { index -> pickKind(index) }
+            }
+        }
+        typeRow.addView(typeField, LinearLayout.LayoutParams(0, dp(42), 1f))
+        page.addView(typeRow)
         val pointRow = row()
-        pointRow.addView(label("Click point"), LinearLayout.LayoutParams(dp(78), dp(42)))
+        pointLabel = label("Click point")
+        pointRow.addView(pointLabel, LinearLayout.LayoutParams(dp(78), dp(42)))
         xField = field("X"); yField = field("Y")
         pointRow.addView(xField, LinearLayout.LayoutParams(0, dp(42), 1f))
         pointRow.addView(yField, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(8) })
@@ -166,7 +189,9 @@ class PointsTab(
                 if (isEnter(action, event)) { appendPoint(); true } else false
             }
         }
-        page.addView(pointRow)
+        page.addView(pointRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        page.addView(buildPowerRow(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+        pickKind(kindIndex())
         val delayRow = row()
         delayRow.addView(label("Delay"), LinearLayout.LayoutParams(dp(78), dp(42)))
         delayField = field("Nhập delay (ms)").apply {
@@ -182,6 +207,52 @@ class PointsTab(
         delayRow.addView(delayField, LinearLayout.LayoutParams(0, dp(42), 1f))
         delayRow.addView(label("ms"), LinearLayout.LayoutParams(dp(30), dp(42)).apply { marginStart = dp(8) })
         page.addView(delayRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+    }
+
+    private fun kindIndex() = when (kind) { null -> 0; PullKind.UP -> 1; PullKind.DOWN -> 2; PullKind.BUFF -> 3 }
+
+    private fun pickKind(index: Int) {
+        kind = when (index) { 1 -> PullKind.UP; 2 -> PullKind.DOWN; 3 -> PullKind.BUFF; else -> null }
+        typeField.text = "${KIND_LABELS[kindIndex()]}     ▾"
+        pointLabel.text = when (kind) { null -> "Click point"; PullKind.UP -> "Điểm kéo"; PullKind.DOWN -> "Điểm ghìm"; PullKind.BUFF -> "Điểm buff" }
+        powerRow.visibility = if (kind == null) View.GONE else View.VISIBLE
+        refreshPowerText()
+    }
+
+    private fun refreshPowerText() {
+        powerValue.text = if (kind == PullKind.BUFF) "$power  (×${"%.2f".format(java.util.Locale.US, 1f + power * 0.05f)})" else "$power"
+    }
+
+    private fun buildPowerRow(): View {
+        val box = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        val head = row().apply { setPadding(dp(2), dp(4), dp(2), dp(2)) }
+        head.addView(label("Lực kéo"), LinearLayout.LayoutParams(0, -2, 1f))
+        powerValue = TextView(ctx).apply {
+            setTextColor(fg); scaledTextSize(12.5f); setTypeface(typeface, Typeface.BOLD)
+        }
+        head.addView(powerValue)
+        box.addView(head)
+        powerBar = SeekBar(ctx).apply {
+            min = PointScriptParser.MIN_POWER; max = PointScriptParser.MAX_POWER; progress = power
+            progressTintList = ColorStateList.valueOf(cyan)
+            progressBackgroundTintList = ColorStateList.valueOf(0xFF2A3A5C.toInt())
+            thumbTintList = ColorStateList.valueOf(0xFFFFFFFF.toInt())
+            // Kéo thanh trượt không được làm menu thu lại / cuộn trang
+            setOnTouchListener { v, e ->
+                if (e.actionMasked == MotionEvent.ACTION_DOWN) { leaveInput(); v.parent?.requestDisallowInterceptTouchEvent(true) }
+                false
+            }
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    power = p; refreshPowerText()
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }
+        box.addView(powerBar, LinearLayout.LayoutParams(-1, dp(32)))
+        powerRow = box
+        return box
     }
 
     private fun isEnter(action: Int, event: KeyEvent?) =
@@ -205,7 +276,7 @@ class PointsTab(
         if (x == null || y == null || x !in 0 until b.width() || y !in 0 until b.height()) {
             showStatus("X: 0..${b.width()-1} · Y: 0..${b.height()-1}", true); return
         }
-        append("$x, $y")
+        append(kind?.let { "${it.keyword} $x, $y, $power" } ?: "$x, $y")
         manualArmed = false
         leaveInput()
     }
@@ -240,7 +311,11 @@ class PointsTab(
         val b = bounds()
         val result = PointScriptParser.parse(editor.text.toString(), b.width(), b.height())
         val error = result.errors.firstOrNull()
-        showStatus(error ?: "${result.tapCount} điểm · ${result.steps.count { it is PointStep.Wait }} delay · Đã lưu", error != null)
+        showStatus(
+            error ?: "${result.tapCount} điểm" + (if (result.pullCount > 0) " · ${result.pullCount} kéo/buff" else "") +
+                " · ${result.steps.count { it is PointStep.Wait }} delay · Đã lưu",
+            error != null,
+        )
     }
 
     private fun select(id: Int?) {
@@ -251,13 +326,17 @@ class PointsTab(
         loading = false
         val button = selected()
         mainField.text = button?.let { "${it.code}  ·  ${it.name}     ▾" } ?: "Chưa có main · Tạo ở tab 1"
-        listOf(editor, xField, yField, delayField).forEach { it.isEnabled = button != null }
+        listOf(editor, xField, yField, delayField, typeField, powerBar).forEach { it.isEnabled = button != null }
         if (button == null) showStatus("Mỗi main có kịch bản riêng", false) else validate()
     }
 
     fun enter() {
         visible = true; stopRuns()
         select(selectedId?.takeIf { repo.find(it) != null } ?: repo.buttons.firstOrNull()?.id)
+    }
+
+    private companion object {
+        val KIND_LABELS = listOf("Click", PullKind.UP.label, PullKind.DOWN.label, PullKind.BUFF.label)
     }
 
     fun leaveInput() {

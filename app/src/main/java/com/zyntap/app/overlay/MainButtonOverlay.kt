@@ -289,7 +289,13 @@ class MainButtonOverlay(
         pointsScreen = Rect(s)
         pointsCache = repo.buttons.filter { it.pointScript.isNotBlank() }.flatMap { b ->
             PointScriptParser.parse(b.pointScript, s.width(), s.height()).steps
-                .filterIsInstance<PointStep.Tap>().map { it.x to it.y }
+                .mapNotNull {
+                    when (it) {
+                        is PointStep.Tap -> it.x to it.y
+                        is PointStep.Pull -> it.x to it.y
+                        is PointStep.Wait -> null
+                    }
+                }
         }
         return pointsCache
     }

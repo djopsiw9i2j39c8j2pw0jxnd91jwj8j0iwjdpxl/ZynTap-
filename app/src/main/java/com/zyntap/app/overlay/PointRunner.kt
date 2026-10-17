@@ -27,6 +27,11 @@ class PointRunner(
     private val runs = mutableMapOf<Int, Run>()
     private val touches = MainTouchGate()
     private val timer = Executors.newSingleThreadScheduledExecutor()
+    /** Lệnh kéo/ghìm/buff gửi helper theo ĐÚNG thứ tự (bật rồi tắt không bao giờ đảo chỗ). */
+    private val fx = Executors.newSingleThreadExecutor()
+    /** Kéo/ghìm/buff đang bật theo từng nút main (chỉ đụng trên main thread). */
+    private class FxState { var pull: PointStep.Pull? = null; var buff: PointStep.Pull? = null }
+    private val fxStates = mutableMapOf<Int, FxState>()
     private val injectionLock = Mutex()
     private var lastReport = 0L
 
@@ -43,16 +48,19 @@ class PointRunner(
 
     fun touch(button: MainButton, down: Boolean) {
         val action = if (down) touches.down(button.id, button.mode) else touches.up(button.id)
+        // Kéo/ghìm/buff chạy suốt lúc đang giữ nút, mọi chế độ. Nhả nút = dừng ngay (trước khi chạy kịch bản chế độ "Thả").
+        if (!down) stopEffects(button.id)
         when (action) {
-            MainTouchGate.Action.ONCE -> start(button, false)
+            MainTouchGate.Action.ONCE -> start(button, false, skipEffects = !down)
             MainTouchGate.Action.LOOP -> start(button, true)
             MainTouchGate.Action.STOP -> stop(button.id)
-            MainTouchGate.Action.NONE -> Unit
+            MainTouchGate.Action.NONE -> if (down) startEffectsOnly(button)
         }
     }
 
     fun cancelTouch(id: Int) {
         touches.cancel(id)
+        stopEffects(id)
         stop(id)
     }
 
@@ -66,12 +74,59 @@ class PointRunner(
 
     fun stopAll() {
         touches.clear()
+        fxStates.keys.toList().forEach(::stopEffects)
         runs.keys.toList().forEach(::stop)
     }
 
-    private fun start(button: MainButton, repeat: Boolean) {
+    // ---- kéo tâm / ghìm tâm / buff lực kéo ------------------------------------------------------
+
+    /** Gửi lệnh cho helper trên luồng nền (có thứ tự). Helper chưa bơm được thì báo và cho phép bật lại lần sau. */
+    private fun sendFx(line: String, warn: Boolean = true, onFail: (() -> Unit)? = null) {
+        runCatching {
+            fx.execute {
+                val ok = TouchWatcher.current?.sendFx(line) == true
+                if (!ok) scope.launch {
+                    onFail?.invoke()
+                    if (warn) message("Kéo/ghìm/buff cần helper bơm đang chạy (chưa READY hoặc ROM không cho grab)")
+                }
+            }
+        }
+    }
+
+    /** Bật một điểm kéo/ghìm/buff cho nút [owner]. Trùng với cái đang chạy thì bỏ qua (kịch bản lặp không spam helper). */
+    private fun startEffect(owner: Int, step: PointStep.Pull) {
+        val st = fxStates.getOrPut(owner) { FxState() }
+        if (step.kind.isPull) {
+            if (st.pull == step) return
+            st.pull = step
+            sendFx("PULL $owner ${step.kind.dir} ${step.x} ${step.y} ${step.power}") { st.pull = null }
+        } else {
+            if (st.buff == step) return
+            st.buff = step
+            sendFx("BUFF $owner ${step.x} ${step.y} ${step.power}") { st.buff = null }
+        }
+    }
+
+    private fun stopEffects(owner: Int) {
+        if (fxStates.remove(owner) == null) return
+        sendFx("FXSTOP $owner", warn = false)
+    }
+
+    /** Chế độ "Thả" (và nút đang chạy dở): bật riêng các bước kéo/ghìm/buff ngay khi bắt đầu giữ, bỏ qua click + delay. */
+    private fun startEffectsOnly(button: MainButton) {
+        if (!touches.isPressed(button.id)) return
+        val b = bounds()
+        val script = PointScriptParser.parse(button.pointScript, b.width(), b.height())
+        if (script.errors.isNotEmpty()) return
+        script.steps.filterIsInstance<PointStep.Pull>().forEach { startEffect(button.id, it) }
+    }
+
+    private fun start(button: MainButton, repeat: Boolean, skipEffects: Boolean = false) {
         // A single physical press cannot enqueue an unbounded backlog.
-        if (runs[button.id]?.job?.isActive == true) return
+        if (runs[button.id]?.job?.isActive == true) {
+            if (!skipEffects) startEffectsOnly(button)   // lần chạy trước còn dở: ít nhất vẫn bật kéo/buff cho lần giữ này
+            return
+        }
         val screen = bounds()
         val script = PointScriptParser.parse(button.pointScript, screen.width(), screen.height())
         if (!script.valid) {
@@ -79,8 +134,14 @@ class PointRunner(
             return
         }
         val taps = script.steps.filterIsInstance<PointStep.Tap>()
-        if (taps.any { targetBlocked(it.x, it.y) }) {
+        val pulls = script.steps.filterIsInstance<PointStep.Pull>()
+        if (taps.any { targetBlocked(it.x, it.y) } || pulls.any { targetBlocked(it.x, it.y) }) {
             message("Điểm nhấn đang nằm dưới menu đang mở hoặc nút mở menu. Hãy thu menu hoặc dời nút mở menu.")
+            return
+        }
+        if (taps.isEmpty()) {
+            // Kịch bản chỉ có kéo/ghìm/buff: không có click để chạy, chỉ bật hiệu ứng suốt lúc giữ nút.
+            if (!skipEffects) startEffectsOnly(button)
             return
         }
         // Click 1 lần: giữ lâu hơn. Chạm xuyên: chờ ngón thật nhả đủ lâu rồi mới click (tránh game nuốt click đầu).
@@ -112,6 +173,7 @@ class PointRunner(
                         if (bounds() != screen) error("Màn hình đã đổi kích thước. Chọn lại tọa độ.")
                         when (step) {
                             is PointStep.Wait -> delay(step.millis)
+                            is PointStep.Pull -> if (!skipEffects && touches.isPressed(button.id)) startEffect(button.id, step)
                             is PointStep.Tap -> {
                                 if (targetBlocked(step.x, step.y)) error("Điểm nhấn trùng cửa sổ ZynTap")
                                 injectionLock.withLock {
@@ -238,5 +300,6 @@ class PointRunner(
         stopAll()
         scope.cancel()
         timer.shutdownNow()
+        fx.shutdown()   // để lệnh FXSTOP vừa xếp hàng còn kịp gửi
     }
 }
