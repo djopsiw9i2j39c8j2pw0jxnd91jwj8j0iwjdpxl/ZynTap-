@@ -1008,7 +1008,10 @@ class OverlayService : Service() {
         col.addView(box)
         // Đẩy khung trạng thái xuống đáy cột
         col.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
-        col.addView(buildStatus())
+        // Dịch riêng khung trạng thái sang phải một chút (giữ nguyên độ rộng), không đụng tới tab
+        col.addView(buildStatus(), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { marginStart = dp(7); marginEnd = -dp(7) })
         select(initialTab.coerceIn(0, tabNames.lastIndex), animate = false)
         return col
     }
@@ -1023,6 +1026,7 @@ class OverlayService : Service() {
     private var statusLinkText: TextView? = null
     private var statusPulse: android.animation.ObjectAnimator? = null
     private var statusPulsing = false
+    private var lastStatusKey = -1
 
     /**
      * Thẻ trạng thái gọn: mỗi dòng 1 hàng = chấm màu có quầng sáng + nhãn mờ + giá trị đậm
@@ -1062,6 +1066,7 @@ class OverlayService : Service() {
         ).apply { topMargin = dp(6) })
         statusWifiDot = wifi.dot; statusWifiHalo = wifi.halo; statusWifiText = wifi.text
         statusLinkDot = link.dot; statusLinkHalo = link.halo; statusLinkText = link.text
+        lastStatusKey = -1
         refreshStatus()
         return box
     }
@@ -1070,6 +1075,10 @@ class OverlayService : Service() {
         val wifiOn = WifiAdbMonitor.isWifiAdbEnabled(this)
         val paired = AdbLinkStore.isPaired(this)
         val linked = runCatching { ZynAdbConnectionManager.get(applicationContext).isConnected }.getOrDefault(false)
+        // Trạng thái không đổi thì khỏi vẽ lại (tránh tạo drawable/span mới mỗi nhịp)
+        val key = (if (wifiOn) 1 else 0) or (if (paired) 2 else 0) or (if (linked) 4 else 0)
+        if (key == lastStatusKey) return
+        lastStatusKey = key
         val ok = 0xFF34D399.toInt()
         val warn = 0xFFF5B544.toInt()
         val bad = 0xFFEF5B5B.toInt()
@@ -1664,6 +1673,7 @@ class OverlayService : Service() {
         statusPulse?.cancel(); statusPulse = null; statusPulsing = false
         statusWifiDot = null; statusWifiHalo = null; statusWifiText = null
         statusLinkDot = null; statusLinkHalo = null; statusLinkText = null
+        lastStatusKey = -1
         panelHidden = false
         if (::circles.isInitialized) circles.setMenuOpen(false)
         resetGhost()
