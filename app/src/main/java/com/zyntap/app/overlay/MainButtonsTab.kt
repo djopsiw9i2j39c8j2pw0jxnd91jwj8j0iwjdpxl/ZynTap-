@@ -474,7 +474,7 @@ class MainButtonsTab(
             boostBox.visibility = if (b.assistMode == MainButton.ASSIST_BOOST) View.VISIBLE else View.GONE
         }
         form.addView(switchRow("Bật trợ vuốt tâm",
-            "Giữ nút để tự vuốt, hoặc buff lực vuốt ngón thật.", b.assistEnabled) { on ->
+            "Vuốt từ TRONG nút ra: kéo/ghìm/buff hướng vuốt của bạn.", b.assistEnabled) { on ->
             b.assistEnabled = on
             syncAssistVisibility()
             onLive(); onCommit()
@@ -488,19 +488,14 @@ class MainButtonsTab(
             },
             LinearLayout.LayoutParams(match, dp(46)),
         )
-        pullBox.addView(slider("Tốc độ kéo", MainButton.MIN_ASSIST_SPEED, MainButton.MAX_ASSIST_SPEED, b.assistSpeed, " dp/s",
+        pullBox.addView(slider("Tốc độ lệch", MainButton.MIN_ASSIST_SPEED, MainButton.MAX_ASSIST_SPEED, b.assistSpeed, " dp/s",
             onValue = { b.assistSpeed = it; onLive() }, onStop = onCommit))
-        pullBox.addView(slider("Quãng mỗi lần vuốt", MainButton.MIN_ASSIST_LENGTH, MainButton.MAX_ASSIST_LENGTH, b.assistLength, " dp",
+        pullBox.addView(slider("Độ lệch tối đa", MainButton.MIN_ASSIST_LENGTH, MainButton.MAX_ASSIST_LENGTH, b.assistLength, " dp",
             onValue = { b.assistLength = it; onLive() }, onStop = onCommit))
-        pullBox.addView(slider("Delay mỗi lần kéo", MainButton.MIN_ASSIST_DELAY, MainButton.MAX_ASSIST_DELAY, b.assistDelay, " ms",
+        pullBox.addView(slider("Delay trước khi lệch", MainButton.MIN_ASSIST_DELAY, MainButton.MAX_ASSIST_DELAY, b.assistDelay, " ms",
             onValue = { b.assistDelay = it; onLive() }, onStop = onCommit))
-        boostBox.addView(slider("Lực buff (x100%)", MainButton.MIN_BOOST_GAIN, MainButton.MAX_BOOST_GAIN, b.boostGain, "%",
+        boostBox.addView(slider("Lực buff", MainButton.MIN_BOOST_GAIN, MainButton.MAX_BOOST_GAIN, b.boostGain, "%",
             onValue = { b.boostGain = it; onLive() }, onStop = onCommit))
-        boostBox.addView(switchRow("Chỉ buff khi giữ nút",
-            "Tắt: buff luôn bật cho mọi ngón mới chạm xuống.", b.boostHoldOnly) { on ->
-            b.boostHoldOnly = on
-            onLive(); onCommit()
-        })
         assistBox.addView(pullBox, LinearLayout.LayoutParams(match, ViewGroup.LayoutParams.WRAP_CONTENT))
         assistBox.addView(boostBox, LinearLayout.LayoutParams(match, ViewGroup.LayoutParams.WRAP_CONTENT))
         form.addView(assistBox, LinearLayout.LayoutParams(match, ViewGroup.LayoutParams.WRAP_CONTENT))

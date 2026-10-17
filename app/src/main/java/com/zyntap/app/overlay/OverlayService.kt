@@ -153,17 +153,11 @@ class OverlayService : Service() {
             { dragging -> setPanelGhost(dragging) }, // chỉ ẩn menu khi đang kéo ghim
         )
         circles.onDrag = { dragging -> setPanelGhost(dragging) } // kéo nút main -> menu ẩn, thả -> hiện
-        pointRunner.buttonCenter = { b -> circles.centerOf(b.id) }
         circles.onAction = { button, down ->
-            if (!pointPicker.isShowing && !editLock && !inputActive) {
-                circles.trackPress(button.id, down)
-                pointRunner.touch(button, down)
-            } else {
-                circles.trackPress(button.id, false)
-                pointRunner.cancelTouch(button.id)
-            }
+            if (!pointPicker.isShowing && !editLock && !inputActive) pointRunner.touch(button, down)
+            else pointRunner.cancelTouch(button.id)
         }
-        circles.onCancel = { id -> circles.trackPress(id, false); pointRunner.cancelTouch(id) }
+        circles.onCancel = { id -> pointRunner.cancelTouch(id) }
         startForegroundWithNotification()
     }
 

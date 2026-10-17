@@ -270,7 +270,7 @@ class MainButtonOverlay(
     // ---- chạm xuyên ---------------------------------------------------------
 
     /** Nút đang ở chế độ chạm xuyên (và không phải đang kéo chỉnh vị trí). */
-    private fun isPassThrough(b: MainButton) = (b.passThrough || b.assistPull || overlapsTapPoint(b)) && editingId != b.id
+    private fun isPassThrough(b: MainButton) = (b.passThrough || b.assistEnabled || overlapsTapPoint(b)) && editingId != b.id
 
     /**
      * Nút main đè lên BẤT KỲ điểm nhấn nào (của mọi nút) -> tự chạm xuyên (cờ đặt sẵn từ trước, không đổi lúc click),
@@ -330,38 +330,37 @@ class MainButtonOverlay(
     private fun pushSwallowZones() {
         val zones = entries.mapNotNull { (id, e) ->
             val b = repo.find(id) ?: return@mapNotNull null
-            if (b.passThrough || !isPassThrough(b)) return@mapNotNull null
+            if (b.passThrough || b.assistEnabled || !isPassThrough(b)) return@mapNotNull null
             Triple(e.params.x + e.params.width / 2, e.params.y + e.params.height / 2, dp(b.sizeDp) / 2)
         }
         watcher.setSwallowZones(zones)
-        updateBoost()
+        pushAssistZones()
     }
 
     // ---- trợ vuốt tâm ---------------------------------------------------------
 
-    /** Các nút main đang được giữ (để buff lực vuốt kiểu "chỉ khi giữ nút"). */
-    private val pressedIds = HashSet<Int>()
-
-    fun trackPress(id: Int, down: Boolean) {
-        if (down) pressedIds.add(id) else pressedIds.remove(id)
-        updateBoost()
-    }
-
-    /** Hệ số buff lực vuốt hiện tại gửi cho helper; menu mở / đang chỉnh nút thì tắt để không làm kéo nút bị lố. */
-    private fun updateBoost() {
-        var gain = 1f
-        if (!menuOpen && editingId == null) {
-            for (b in repo.buttons) {
-                if (b.assistBoost && (!b.boostHoldOnly || b.id in pressedIds)) gain = maxOf(gain, b.boostGain / 100f)
-            }
+    /**
+     * Nút bật trợ vuốt là cửa sổ xuyên (NOT_TOUCHABLE) và KHÔNG nuốt ngón: ngón đặt trong nút đi thẳng xuống app dưới
+     * như một cú vuốt bình thường, còn helper chỉ can thiệp (kéo/ghìm/buff) vào ngón NÀO chạm xuống trong vùng nút.
+     * Menu mở / đang chỉnh nút thì tắt vùng để kéo nút và thao tác menu không bị méo.
+     */
+    private fun pushAssistZones() {
+        val zones: List<List<Int>> = if (menuOpen) emptyList() else entries.mapNotNull { (id, e) ->
+            val b = repo.find(id) ?: return@mapNotNull null
+            if (!b.assistEnabled || editingId == id) return@mapNotNull null
+            listOf(
+                e.params.x + e.params.width / 2,
+                e.params.y + e.params.height / 2,
+                dp(b.sizeDp) / 2,
+                b.assistMode,
+                dp(b.assistSpeed),
+                dp(b.assistLength),
+                b.assistDelay,
+                b.boostGain,
+                dp(ASSIST_SLOP_DP),
+            )
         }
-        watcher.setBoost(gain)
-    }
-
-    /** Tâm nút trên màn hình (pixel), null nếu nút chưa lên màn hình. */
-    fun centerOf(id: Int): Pair<Int, Int>? {
-        val p = entries[id]?.params ?: return null
-        return (p.x + p.width / 2) to (p.y + p.height / 2)
+        watcher.setAssistZones(zones)
     }
 
     private fun refreshWatcher() {
@@ -439,7 +438,7 @@ class MainButtonOverlay(
         menuOpen = open
         entries.values.forEach { it.view.minPct = if (open) MainButton.MENU_MIN_ALPHA else 0 }
         if (!open) refreshTouchable() // script điểm nhấn có thể vừa đổi
-        updateBoost()
+        pushAssistZones()
     }
 
     private fun bind(v: MainButtonView, b: MainButton) {
@@ -636,5 +635,7 @@ class MainButtonOverlay(
         const val RING_PAD_DP = 8
         const val ATTACH_GRACE_MS = 1500L
         const val PASS_THROUGH_ALPHA = 0.8f
+        /** Ngón vuốt ra khỏi chỗ chạm xuống quá chừng này (dp) thì trợ vuốt mới bắt đầu can thiệp. */
+        const val ASSIST_SLOP_DP = 10
     }
 }
