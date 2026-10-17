@@ -69,6 +69,8 @@ object DebugLog {
         }
         installCrashHandler()
         i("App", "Khởi động ZynTap · Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) · ${Build.MANUFACTURER} ${Build.MODEL}")
+        // Mỗi lần cập nhật app là có 1 dòng "Cập nhật" trong log
+        UpdateLog.check(context)
     }
 
     private fun installCrashHandler() {
