@@ -1008,10 +1008,10 @@ class OverlayService : Service() {
         col.addView(box)
         // Đẩy khung trạng thái xuống đáy cột
         col.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
-        // Dịch riêng khung trạng thái sang phải một chút (giữ nguyên độ rộng), không đụng tới tab
+        // Dịch riêng khung trạng thái sang phải một chút (chỉ thêm lề trái, mép phải giữ nguyên để không bị cắt), không đụng tới tab
         col.addView(buildStatus(), LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
-        ).apply { marginStart = dp(7); marginEnd = -dp(7) })
+        ).apply { marginStart = dp(7) })
         select(initialTab.coerceIn(0, tabNames.lastIndex), animate = false)
         return col
     }
