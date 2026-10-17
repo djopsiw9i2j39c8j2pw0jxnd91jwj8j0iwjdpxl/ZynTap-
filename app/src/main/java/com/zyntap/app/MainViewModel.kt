@@ -16,6 +16,7 @@ import com.zyntap.app.data.PairState
 import com.zyntap.app.data.PendingAdbPairing
 import com.zyntap.app.data.WifiAdbMonitor
 import com.zyntap.app.data.WifiAdbPairing
+import com.zyntap.app.data.WifiState
 import com.zyntap.app.overlay.OverlayPermission
 import com.zyntap.app.overlay.OverlayService
 import com.zyntap.app.overlay.UsageAccess
@@ -64,6 +65,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var wifiAdbOn by mutableStateOf(WifiAdbMonitor.isWifiAdbEnabled(app))
         private set
 
+    /** Đang nối vào mạng Wi-Fi thật (không tính 4G) — khác với "gỡ lỗi Wi-Fi". */
+    var wifiConnected by mutableStateOf(WifiState.isConnected(app))
+        private set
+
+    /** Đang có dữ liệu di động (để báo rõ "đang dùng 4G, chưa có Wi-Fi"). */
+    var mobileData by mutableStateOf(WifiState.hasMobile(app))
+        private set
+
     /** Đã ghép nối thành công (trong phiên hoặc từ lần trước). */
     var pairedPersisted by mutableStateOf(AdbLinkStore.isPaired(app))
         private set
@@ -73,6 +82,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Đang dùng được: đã ghép nối VÀ gỡ lỗi Wi-Fi đang bật. */
     val isActive: Boolean get() = isPaired && wifiAdbOn
+
+    private val wifiListener: (Boolean) -> Unit = { connected ->
+        wifiConnected = connected
+        mobileData = WifiState.hasMobile(getApplication<Application>())
+    }
 
     init {
         viewModelScope.launch {
@@ -87,6 +101,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (enabled) verifyPairing()
         }
         WifiAdbMonitor.start(app)
+        // Theo dõi Wi-Fi thật (đồng thời ghi log mỗi lần nối / mất)
+        WifiState.addListener(wifiListener)
+        WifiState.start(app)
         // Nếu gỡ lỗi Wi-Fi đang bật sẵn thì dò cổng kết nối ngay
         if (WifiAdbMonitor.isWifiAdbEnabled(app)) {
             viewModelScope.launch {
@@ -97,6 +114,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 verifyPairing()
             }
         }
+    }
+
+    override fun onCleared() {
+        WifiState.removeListener(wifiListener)
+        super.onCleared()
     }
 
     private var verifying = false
@@ -125,6 +147,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshPairing() {
         pairedPersisted = AdbLinkStore.isPaired(getApplication<Application>())
         wifiAdbOn = WifiAdbMonitor.isWifiAdbEnabled(getApplication<Application>())
+        wifiConnected = WifiState.isConnected(getApplication<Application>())
+        mobileData = WifiState.hasMobile(getApplication<Application>())
     }
 
     fun refreshOverlayPermission() {
