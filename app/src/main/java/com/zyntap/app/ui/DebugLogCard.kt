@@ -216,6 +216,7 @@ private fun statusText(ctx: Context, vm: MainViewModel): String {
     val w = TouchWatcher.current
     return buildString {
         append("ZynTap ${BuildConfig.VERSION_NAME} · Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) · ${Build.MANUFACTURER} ${Build.MODEL}\n")
+        append("Wi-Fi đã kết nối: ${yn(vm.wifiConnected)} · Dữ liệu di động: ${yn(vm.mobileData)}\n")
         append("Gỡ lỗi Wi-Fi bật: ${yn(vm.wifiAdbOn)} · Đã ghép nối: ${yn(vm.isPaired)} · ADB đang nối: ${yn(linked)}\n")
         append("Menu nổi đang chạy: ${yn(OverlayService.wanted(ctx))} · Helper bơm: ${if (w == null) "chưa chạy" else if (w.proxyReady) "sẵn sàng" else "chưa bơm được"}\n")
         append("Vòng helper: ${w?.stage ?: "chưa chạy"}\n")

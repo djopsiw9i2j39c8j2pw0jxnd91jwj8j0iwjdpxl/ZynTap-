@@ -60,6 +60,8 @@ fun HomeScreen(vm: MainViewModel) {
                 active = vm.isActive,
                 wasPaired = vm.isPaired,
                 wifiAdbOn = vm.wifiAdbOn,
+                wifiConnected = vm.wifiConnected,
+                mobileData = vm.mobileData,
                 onClick = vm::openActivate,
             )
             Spacer(Modifier.height(14.dp))
@@ -83,10 +85,16 @@ fun HomeScreen(vm: MainViewModel) {
 }
 
 @Composable
-private fun StatusCard(active: Boolean, wasPaired: Boolean, wifiAdbOn: Boolean, onClick: () -> Unit) {
-    val dot by animateColorAsState(if (active) Zyn.Ok else Zyn.Warn, label = "status-dot")
+private fun StatusCard(
+    active: Boolean,
+    wasPaired: Boolean,
+    wifiAdbOn: Boolean,
+    wifiConnected: Boolean,
+    mobileData: Boolean,
+    onClick: () -> Unit,
+) {
     val shape = RoundedCornerShape(16.dp)
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(shape)
@@ -94,22 +102,42 @@ private fun StatusCard(active: Boolean, wasPaired: Boolean, wifiAdbOn: Boolean, 
             .border(1.dp, Zyn.Border, shape)
             .clickable(enabled = !active, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Wi-Fi THẬT: có nối vào mạng Wi-Fi hay không (4G không được tính)
+        StatusRow(
+            ok = wifiConnected,
+            title = "Wi-Fi",
+            text = when {
+                wifiConnected -> "Đã kết nối Wi-Fi"
+                mobileData -> "Chưa kết nối Wi-Fi — đang dùng dữ liệu di động"
+                else -> "Chưa kết nối Wi-Fi"
+            },
+        )
+        Spacer(Modifier.height(12.dp))
+        // ADB không dây (gỡ lỗi Wi-Fi + ghép nối)
+        StatusRow(
+            ok = active,
+            title = "ADB (gỡ lỗi Wi-Fi)",
+            text = when {
+                active -> "Đã ghép nối"
+                wifiAdbOn -> "Gỡ lỗi Wi-Fi đang bật — chưa ghép nối"
+                wasPaired && !wifiConnected -> "Cần nối Wi-Fi rồi bật lại gỡ lỗi Wi-Fi"
+                wasPaired -> "Gỡ lỗi Wi-Fi đang tắt — bật lại để dùng"
+                else -> "Chưa ghép nối"
+            },
+        )
+    }
+}
+
+@Composable
+private fun StatusRow(ok: Boolean, title: String, text: String) {
+    val dot by animateColorAsState(if (ok) Zyn.Ok else Zyn.Warn, label = "status-dot")
+    Row(verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(10.dp).background(dot, CircleShape))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text("Gỡ lỗi Wi-Fi", color = Zyn.Text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(
-                text = when {
-                    active -> "Đã ghép nối"
-                    wifiAdbOn -> "Gỡ lỗi Wi-Fi đang bật — chưa ghép nối"
-                    wasPaired -> "Gỡ lỗi Wi-Fi đang tắt — bật lại để dùng"
-                    else -> "Chưa ghép nối"
-                },
-                color = Zyn.TextDim,
-                fontSize = 13.sp,
-            )
+            Text(title, color = Zyn.Text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = text, color = Zyn.TextDim, fontSize = 13.sp)
         }
     }
 }
