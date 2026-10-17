@@ -99,6 +99,11 @@ public final class InputProxy {
     private static volatile boolean outThreadOn = false;
     private static volatile boolean urgentRelease = false;
     private static int injectFails = 0;   // chỉ đụng dưới LOCK
+    /** Hệ thống vừa từ chối/lỡ một sự kiện DOWN/UP -> luồng chạm bên hệ thống đã lệch khỏi [shown]. Chỉ đụng dưới LOCK. */
+    private static boolean desync = false;
+    private static long lastRebuildAt = 0;
+    /** Đang bỏ các sự kiện sau SYN_DROPPED cho tới SYN_REPORT kế tiếp. Chỉ đụng dưới LOCK. */
+    private static boolean dropping = false;
 
     private static void out(String line) {
         if (!outThreadOn) { OUT.println(line); return; }
@@ -339,6 +344,11 @@ public final class InputProxy {
 
     private static void onEvent(int type, int code, int value) {
         synchronized (LOCK) {
+            if (dropping) {
+                // Sau SYN_DROPPED gói đang dở đã hỏng: bỏ mọi sự kiện tới hết SYN_REPORT kế tiếp rồi đọc tiếp bình thường.
+                if (type == EV_SYN && code == SYN_REPORT) dropping = false;
+                return;
+            }
             if (type == EV_ABS) {
                 switch (code) {
                     case ABS_MT_SLOT:
@@ -379,8 +389,11 @@ public final class InputProxy {
                 }
             } else if (type == EV_SYN) {
                 if (code == SYN_DROPPED) {
-                    // Mất đồng bộ: coi như mọi ngón đã nhả, đợi ngón mới
-                    for (int i = 0; i < REAL_SLOTS; i++) { rawActive[i] = false; tid[i] = -1; }
+                    // Bộ đệm cảm ứng bị tràn (hệ thống/binder chậm). TRƯỚC ĐÂY xoá hết ngón ở đây -> ngón thật đang đè
+                    // bị coi là đã nhấc nhưng thực tế vẫn đang chạm = đơ tới khi nhấc tay. Giờ giữ nguyên trạng thái các
+                    // ngón, chỉ bỏ gói dở dang; ngón nào nhấc trong lúc tràn sẽ được cập nhật ở lần chạm kế tiếp.
+                    dropping = true;
+                    log("SYN_DROPPED: bộ đệm cảm ứng tràn -> giữ nguyên các ngón đang chạm");
                 } else if (code == SYN_REPORT) {
                     sync();
                 }
@@ -503,6 +516,31 @@ public final class InputProxy {
             if (w != null && !w.same(e.getValue())) { e.setValue(w.copy()); moved = true; }
         }
         if (moved) emit(MotionEvent.ACTION_MOVE, -1);
+
+        // 4) Hệ thống vừa từ chối một DOWN/UP: luồng bên đó đã lệch so với [shown] (ngón thật bị đơ tới khi nhấc tay).
+        if (desync) rebuildStream();
+    }
+
+    /**
+     * Gọi dưới LOCK. Huỷ luồng chạm đang dở bên hệ thống rồi chạm lại đúng các ngón đang hiện (cùng chỗ), để ngón thật
+     * và click tiếp tục như bình thường thay vì bị hệ thống bỏ qua cho tới khi nhấc tay.
+     */
+    private static void rebuildStream() {
+        long now = SystemClock.uptimeMillis();
+        if (now - lastRebuildAt < 30) return;   // chống lặp liên tục; lần sync sau thử lại
+        desync = false;
+        lastRebuildAt = now;
+        if (!injecting || shown.isEmpty()) return;
+        LinkedHashMap<Integer, P> keep = new LinkedHashMap<>();
+        for (Map.Entry<Integer, P> e : shown.entrySet()) keep.put(e.getKey(), e.getValue().copy());
+        log("inject lỗi -> dựng lại luồng chạm (" + keep.size() + " ngón) để ngón thật không bị đơ");
+        emit(MotionEvent.ACTION_CANCEL, -1);
+        shown.clear();
+        downTime = SystemClock.uptimeMillis();
+        for (Map.Entry<Integer, P> e : keep.entrySet()) {
+            shown.put(e.getKey(), e.getValue());
+            emit(shown.size() == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN, e.getKey());
+        }
     }
 
     /**
@@ -566,6 +604,7 @@ public final class InputProxy {
         } catch (Throwable t) {
             log("inject fail: " + t);
             injectErrors++;
+            if (baseAction != MotionEvent.ACTION_MOVE) desync = true;
             if (++injectFails >= MAX_INJECT_FAILS && injecting) {
                 // Bộ phát hỏng mà grab vẫn còn = cảm ứng chết cả máy. Nhả grab ngay (đóng fd), huỷ ngón kẹt.
                 injecting = false;
