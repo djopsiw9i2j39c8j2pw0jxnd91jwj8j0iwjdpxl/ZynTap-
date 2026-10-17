@@ -43,8 +43,7 @@ import java.util.concurrent.Executors;
  *
  * Giao thức (mỗi dòng, UTF-8):
  * <pre>
- *   app -> helper:  PING | ROT r w h | TAP id x y holdMs [gapMs] | PULL owner dir x y power | BUFF owner x y power | FXSTOP owner | QUIT
- *   (PULL = kéo/ghìm tâm liên tục bằng một ngón giả; BUFF = nhân quãng kéo của ngón thật; cả hai chạy tới khi FXSTOP)
+ *   app -> helper:  PING | ROT r w h | TAP id x y holdMs [gapMs] | QUIT
  *   (gapMs: click chờ cho tới khi ngón thật đã nhả ít nhất gapMs, để game kịp xử lý ngón thật trước)
  *   helper -> app:  READY grab=0|1 inj=0|1 dev=n | FAIL msg | F slot 1|0 x y | OK id | ERR id msg | LOG msg
  * </pre>
@@ -67,15 +66,6 @@ public final class InputProxy {
     private static final int REAL_SLOTS = 16;          // ngón thật: pointer id 0..15
     private static final int SYNTH_BASE = 16;          // click của app: pointer id 16..23
     private static final int SYNTH_COUNT = 8;
-    /** Ngón giả cho kéo/ghìm tâm liên tục (id 24, sau 8 id click). */
-    private static final int PULL_ID = SYNTH_BASE + SYNTH_COUNT;
-    private static final long PULL_FRAME_MS = 8;
-    /** Nhấc ngón kéo rồi chạm lại sau chừng này ms khi chạy hết đà (hết màn hình). */
-    private static final long PULL_RESTART_MS = 12;
-    /** Mất nhịp tim quá lâu thì tự dừng kéo/buff (tránh tâm quay mãi nếu ADB nghẽn). */
-    private static final long FX_DEADMAN_MS = 1000;
-    /** Vùng đệm sát mép: ngón buff không bị đẩy vào vùng cử chỉ mép màn hình. */
-    private static final float BUFF_EDGE = 24f;
     private static final long WATCHDOG_MS = 3000;
     /** Số lần phát sự kiện thất bại liên tiếp thì coi bộ phát đã hỏng và nhả grab NGAY (tránh liệt cảm ứng toàn máy). */
     private static final int MAX_INJECT_FAILS = 4;
@@ -145,24 +135,16 @@ public final class InputProxy {
     private static final int[] rawMaj = new int[REAL_SLOTS];
     private static final int[] rawMin = new int[REAL_SLOTS];
     private static final boolean[] reported = new boolean[REAL_SLOTS]; // đã báo F down
+    /**
+     * Ngón thật đặt xuống TRONG vùng nút main (nút chỉ đè lên điểm nhấn, không bật chạm xuyên): vẫn báo F cho app
+     * nhưng KHÔNG phát xuống hệ thống, để ngón không lọt xuống app bên dưới. Click bơm thì vẫn đi xuống dưới nút.
+     */
+    private static final boolean[] swallowed = new boolean[REAL_SLOTS];
+    /** Các vùng tròn {x, y, r} (pixel màn hình hiện tại), phẳng. Chỉ đọc/ghi dưới LOCK. */
+    private static float[] swallowZones = new float[0];
     private static final int[] lastRepX = new int[REAL_SLOTS];
     private static final int[] lastRepY = new int[REAL_SLOTS];
     private static int curSlot = 0;
-
-    // ---- kéo / ghìm tâm liên tục (ngón giả PULL_ID) + buff lực kéo — chỉ đụng dưới LOCK ----------
-    private static boolean pullOn = false, pullDown = false;
-    private static int pullOwner = 0, pullDir = -1;
-    private static float pullX0 = 0, pullY0 = 0, pullSpeed = 0, pullTravel = 0;
-    private static long pullLastT = 0, pullNextDownAt = 0;
-    private static P pullP = null;
-
-    private static boolean buffOn = false, buffRight = true;
-    private static int buffOwner = 0;
-    private static float buffGain = 1f;
-    /** 0: không buff · 1: đang nhân quãng kéo · 2: hết buff nhưng giữ độ lệch để ngón không bị giật ngược tới khi nhấc. */
-    private static final int[] buffState = new int[REAL_SLOTS];
-    private static final float[] ancX = new float[REAL_SLOTS], ancY = new float[REAL_SLOTS];
-    private static final float[] offX = new float[REAL_SLOTS], offY = new float[REAL_SLOTS];
 
     /** Một pointer đã/đang gửi cho hệ thống. */
     private static final class P {
@@ -265,9 +247,6 @@ public final class InputProxy {
         Thread dog = new Thread(InputProxy::watchdog, "zyn-dog");
         dog.setDaemon(true);
         dog.start();
-        Thread pullThread = new Thread(InputProxy::pullLoop, "zyn-pull");
-        pullThread.setDaemon(true);
-        pullThread.start();
 
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in, "UTF-8"));
         String line;
@@ -289,34 +268,20 @@ public final class InputProxy {
                         scrH = Math.max(1, Integer.parseInt(t[3]));
                     }
                     break;
+                case "ZONE": {
+                    // ZONE x y r [x y r ...]  (không tham số = xoá hết vùng)
+                    int n = (t.length - 1) / 3;
+                    float[] z = new float[n * 3];
+                    for (int i = 0; i < z.length; i++) z[i] = Float.parseFloat(t[1 + i]);
+                    synchronized (LOCK) { swallowZones = z; }
+                    break;
+                }
                 case "TAP": {
                     final String id = t[1];
                     final float x = Float.parseFloat(t[2]), y = Float.parseFloat(t[3]);
                     final int hold = Math.max(MIN_HOLD_MS, Math.min(2000, Integer.parseInt(t[4])));
                     final int gap = t.length > 5 ? Math.max(0, Math.min(500, Integer.parseInt(t[5]))) : 0;
                     TAPS.execute(() -> doTap(id, x, y, hold, gap));
-                    break;
-                }
-                case "PULL": {
-                    // PULL owner dir x y power
-                    final int owner = Integer.parseInt(t[1]);
-                    final int dir = Integer.parseInt(t[2]) < 0 ? -1 : 1;
-                    final float x = Float.parseFloat(t[3]), y = Float.parseFloat(t[4]);
-                    final int power = Math.max(1, Math.min(100, Integer.parseInt(t[5])));
-                    synchronized (LOCK) { startPull(owner, dir, x, y, power); }
-                    break;
-                }
-                case "BUFF": {
-                    // BUFF owner x y power
-                    final int owner = Integer.parseInt(t[1]);
-                    final float x = Float.parseFloat(t[2]);
-                    final int power = Math.max(1, Math.min(100, Integer.parseInt(t[4])));
-                    synchronized (LOCK) { startBuff(owner, x, power); }
-                    break;
-                }
-                case "FXSTOP": {
-                    final int owner = t.length > 1 ? Integer.parseInt(t[1]) : 0;
-                    synchronized (LOCK) { stopFx(owner); }
                     break;
                 }
                 case "QUIT":
@@ -493,6 +458,16 @@ public final class InputProxy {
         return p;
     }
 
+    /** Gọi dưới LOCK. */
+    private static boolean inSwallowZone(float x, float y) {
+        float[] z = swallowZones;
+        for (int i = 0; i + 2 < z.length; i += 3) {
+            float dx = x - z[i], dy = y - z[i + 1];
+            if (dx * dx + dy * dy <= z[i + 2] * z[i + 2]) return true;
+        }
+        return false;
+    }
+
     private static float clampX(float v) { return Math.max(0f, Math.min(scrW - 1f, v)); }
     private static float clampY(float v) { return Math.max(0f, Math.min(scrH - 1f, v)); }
 
@@ -503,20 +478,19 @@ public final class InputProxy {
             if (rawActive[s] && hasX[s] && hasY[s]) {
                 P p = realPointer(s);
                 lastReal = p;
-                // báo cho phần "chạm xuyên" của app (toạ độ pixel THẬT, chưa buff)
+                // báo cho phần "chạm xuyên" của app (toạ độ pixel)
                 if (!reported[s]) {
                     reported[s] = true;
+                    swallowed[s] = inSwallowZone(p.x, p.y); // quyết định MỘT lần lúc ngón chạm xuống
                     lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
                     out("F " + s + " 1 " + lastRepX[s] + " " + lastRepY[s]);
-                    // ngón mới chạm xuống lúc đang buff và cùng nửa màn hình với điểm buff -> buff luôn từ điểm chạm
-                    if (buffOn && inBuffHalf(p.x)) { buffState[s] = 1; ancX[s] = p.x; ancY[s] = p.y; offX[s] = 0; offY[s] = 0; }
                 } else {
                     lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
                 }
-                want.put(s, buffState[s] != 0 ? buffed(s, p) : p);
+                if (!swallowed[s]) want.put(s, p);
             } else if (reported[s] && !rawActive[s]) {
-                buffState[s] = 0; offX[s] = 0; offY[s] = 0;
                 reported[s] = false;
+                swallowed[s] = false;
                 lastRealUpAt = SystemClock.uptimeMillis();
                 out("F " + s + " 0 " + lastRepX[s] + " " + lastRepY[s]);
             }
@@ -541,14 +515,13 @@ public final class InputProxy {
         }
 
         for (Map.Entry<Integer, Tap> e : synth.entrySet()) want.put(e.getKey(), e.getValue().p);
-        if (pullDown && pullP != null) want.put(PULL_ID, pullP);
 
         // 1) pointer biến mất -> UP
         for (Integer id : new ArrayList<>(shown.keySet())) {
             if (!want.containsKey(id)) {
                 emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, id);
                 shown.remove(id);
-                if (id >= SYNTH_BASE && id != PULL_ID) lastSynthUpAt = SystemClock.uptimeMillis();
+                if (id >= SYNTH_BASE) lastSynthUpAt = SystemClock.uptimeMillis();
             }
         }
         // 2) pointer mới -> DOWN (ngón thật id nhỏ nên được xếp trước click khi cùng xuất hiện trong một lượt)
@@ -608,7 +581,6 @@ public final class InputProxy {
             if (id < SYNTH_BASE) continue;
             emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, id);
             shown.remove(id);
-            if (id == PULL_ID) continue;   // pullDown vẫn bật -> bước DOWN ngay sau đó chạm lại như ngón phụ
             lastSynthUpAt = now;
             Tap tap = synth.get(id);
             if (tap == null) continue;
@@ -622,141 +594,6 @@ public final class InputProxy {
         if (now - lastYieldLog > 1000) {
             lastYieldLog = now;
             log("ngón thật chạm lúc đang click -> nhường ngón đầu cho ngón thật");
-        }
-    }
-
-    // ---- kéo / ghìm / buff ----------------------------------------------------------------------
-    private static boolean inBuffHalf(float x) {
-        return (x >= scrW / 2f) == buffRight;
-    }
-
-    private static float clampBuffX(float v, float rawX) {
-        float lo = Math.min(rawX, BUFF_EDGE), hi = Math.max(rawX, scrW - 1f - BUFF_EDGE);
-        return Math.max(lo, Math.min(hi, v));
-    }
-
-    private static float clampBuffY(float v, float rawY) {
-        float lo = Math.min(rawY, BUFF_EDGE), hi = Math.max(rawY, scrH - 1f - BUFF_EDGE);
-        return Math.max(lo, Math.min(hi, v));
-    }
-
-    /** Vị trí ngón thật sau buff: thật + độ lệch giữ lại + (thật - điểm neo) * (gain - 1). Gọi dưới LOCK. */
-    private static P buffed(int s, P raw) {
-        P o = raw.copy();
-        float k = buffState[s] == 1 ? buffGain - 1f : 0f;
-        o.x = clampBuffX(raw.x + offX[s] + (raw.x - ancX[s]) * k, raw.x);
-        o.y = clampBuffY(raw.y + offY[s] + (raw.y - ancY[s]) * k, raw.y);
-        return o;
-    }
-
-    private static void startBuff(int owner, float x, int power) {
-        if (!injecting) return;
-        float gain = 1f + power * 0.05f;
-        boolean right = x >= scrW / 2f;
-        if (buffOn && buffOwner == owner && buffGain == gain && buffRight == right) return;
-        float oldGain = buffGain;
-        boolean wasOn = buffOn;
-        buffOn = true; buffOwner = owner; buffGain = gain; buffRight = right;
-        for (int s = 0; s < REAL_SLOTS; s++) {
-            if (!(rawActive[s] && hasX[s] && hasY[s] && reported[s])) { buffState[s] = 0; continue; }
-            P p = realPointer(s);
-            if (!inBuffHalf(p.x)) { buffState[s] = 0; offX[s] = 0; offY[s] = 0; continue; }
-            if (wasOn && buffState[s] == 1) {   // đổi lực giữa chừng: chốt phần đã nhân vào độ lệch để ngón không giật
-                offX[s] += (p.x - ancX[s]) * (oldGain - 1f);
-                offY[s] += (p.y - ancY[s]) * (oldGain - 1f);
-            }
-            ancX[s] = p.x; ancY[s] = p.y;
-            buffState[s] = 1;
-        }
-        log("buff lực kéo bật: x" + String.format(java.util.Locale.US, "%.2f", gain)
-                + (right ? " (nửa phải)" : " (nửa trái)"));
-    }
-
-    private static void stopBuff() {
-        if (!buffOn) return;
-        buffOn = false;
-        for (int s = 0; s < REAL_SLOTS; s++) {
-            if (buffState[s] != 1) continue;
-            P p = realPointer(s);
-            offX[s] += (p.x - ancX[s]) * (buffGain - 1f);
-            offY[s] += (p.y - ancY[s]) * (buffGain - 1f);
-            buffState[s] = 2;   // giữ độ lệch tới khi nhấc ngón, không để ngón nhảy ngược khi nhả nút
-        }
-        log("buff lực kéo tắt");
-    }
-
-    private static void startPull(int owner, int dir, float x, float y, int power) {
-        if (!injecting) return;
-        float speed = power / 100f * scrH * 1.6f;
-        float x0 = clampX(x), y0 = clampY(y);
-        if (pullOn && pullOwner == owner && pullDir == dir && pullX0 == x0 && pullY0 == y0 && pullSpeed == speed) return;
-        boolean wasDown = pullDown;
-        pullOn = true; pullOwner = owner; pullDir = dir; pullX0 = x0; pullY0 = y0; pullSpeed = speed;
-        pullNextDownAt = 0;
-        if (wasDown) { pullDown = false; sync(); }   // đổi thông số giữa chừng: nhấc ngón cũ, vòng sau chạm lại ở điểm mới
-        log((dir < 0 ? "kéo tâm" : "ghìm tâm") + " bật tại (" + (int) x0 + "," + (int) y0 + ") lực " + power);
-    }
-
-    private static void stopPull() {
-        boolean was = pullOn;
-        pullOn = false;
-        if (pullDown) { pullDown = false; if (injecting) sync(); }
-        if (was) log("kéo/ghìm tâm tắt");
-    }
-
-    /** Gọi dưới LOCK. owner = 0: dừng tất cả. */
-    private static void stopFx(int owner) {
-        if (owner == 0 || (pullOn && pullOwner == owner)) stopPull();
-        if (owner == 0 || (buffOn && buffOwner == owner)) stopBuff();
-    }
-
-    /** Một nhịp kéo/ghìm: ngón giả đi đều theo hướng, hết đà thì nhấc rồi chạm lại ở điểm đầu. Gọi dưới LOCK. */
-    private static void pullStep(long now) {
-        if (!injecting) { stopPull(); return; }
-        // Chốt an toàn: không còn ngón thật nào chạm (app lỡ quên FXSTOP) thì dừng ngay.
-        boolean any = false;
-        for (int i = 0; i < REAL_SLOTS; i++) any |= rawActive[i];
-        if (!any) { stopPull(); return; }
-        if (!pullDown) {
-            if (now < pullNextDownAt) return;
-            P base = lastReal != null ? lastReal.copy() : defaultPointer();
-            base.x = pullX0; base.y = pullY0;
-            pullP = base;
-            pullTravel = 0f; pullLastT = now; pullDown = true;
-            sync();
-            return;
-        }
-        float dt = Math.min(50L, now - pullLastT) / 1000f;
-        pullLastT = now;
-        pullTravel += pullSpeed * dt;
-        float y = pullY0 + pullDir * pullTravel;
-        float margin = 6f;
-        if (y < margin || y > scrH - 1f - margin) {
-            pullDown = false;
-            pullNextDownAt = now + PULL_RESTART_MS;
-            sync();
-            return;
-        }
-        pullP.y = y;
-        sync();
-    }
-
-    private static void pullLoop() {
-        while (!stopping) {
-            long t0 = SystemClock.uptimeMillis();
-            boolean pulling;
-            synchronized (LOCK) {
-                if ((pullOn || buffOn) && t0 - lastPing > FX_DEADMAN_MS) {
-                    log("mất nhịp tim -> dừng kéo/buff (lỗi kết nối ADB)");
-                    stopPull(); stopBuff();
-                } else if (pullOn) {
-                    pullStep(t0);
-                }
-                pulling = pullOn;
-            }
-            if (!pulling) { SystemClock.sleep(10); continue; }
-            long spent = SystemClock.uptimeMillis() - t0;
-            if (spent < PULL_FRAME_MS) SystemClock.sleep(PULL_FRAME_MS - spent);
         }
     }
 
@@ -941,7 +778,6 @@ public final class InputProxy {
             }
             synchronized (LOCK) {
                 synth.clear();
-                pullOn = false; pullDown = false; buffOn = false;
                 if (injecting && !shown.isEmpty()) {
                     emit(MotionEvent.ACTION_CANCEL, -1);
                     shown.clear();
