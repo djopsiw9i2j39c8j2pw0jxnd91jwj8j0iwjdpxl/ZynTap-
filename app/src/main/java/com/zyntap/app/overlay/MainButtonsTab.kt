@@ -176,9 +176,7 @@ class MainButtonsTab(
     // ---- thanh nút ---------------------------------------------------------
 
     private fun subtitle(b: MainButton) =
-        "${b.code}  •  ${if (b.assistEnabled) MainButton.ASSIST_LABELS[b.assistMode] else MainButton.modeLabel(b.mode)}" +
-            (if (b.delayActive) "  •  Delay ${MainButton.secondsText(b.delayMs)}s" else "") +
-            "  •  ${b.sizeDp}dp  •  ${b.alphaPct}%"
+        "${b.code}  •  ${if (b.assistEnabled) MainButton.ASSIST_LABELS[b.assistMode] else MainButton.modeLabel(b.mode)}  •  ${b.sizeDp}dp  •  ${b.alphaPct}%"
 
     private inner class Bar(val b: MainButton) {
         val slot = RevealLayout(ctx)
@@ -452,71 +450,16 @@ class MainButtonsTab(
         }
         form.addView(nameRow, LinearLayout.LayoutParams(match, dp(46)))
 
-        // Delay Mode: ô nhập thời gian chỉ hiện khi công tắc bật (khai báo trước ô Chế độ vì ô đó cũng cập nhật nó)
-        val delayBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        val delayNote = TextView(ctx).apply {
-            text = "Chế độ Giữ không dùng được Delay Mode — hãy chọn Nhấn hoặc Thả."
-            setTextColor(0xFFF5B544.toInt())
-            scaledTextSize(11.5f)
-            setPadding(dp(2), dp(8), 0, 0)
-        }
-        fun syncDelayVisibility() {
-            delayBox.visibility = if (b.delayEnabled) View.VISIBLE else View.GONE
-            delayNote.visibility = if (b.mode == MainButton.MODE_HOLD) View.VISIBLE else View.GONE
-        }
-
         // Chế độ (dropdown nổi dùng chung)
         form.addView(fieldLabel("Chế độ"))
         form.addView(
             DropdownField(ctx, host.dropdown, MainButton.MODE_LABELS, b.mode) { i ->
                 b.mode = i
-                syncDelayVisibility()
                 onLive()
                 onCommit()
             },
             LinearLayout.LayoutParams(match, dp(46)),
         )
-
-        // Delay Mode
-        form.addView(switchRow("Delay Mode",
-            "Sau mỗi click, nút bị khoá và đếm ngược; hết giờ mới bấm tiếp được. Chỉ cho chế độ Nhấn / Thả.", b.delayEnabled) { on ->
-            b.delayEnabled = on
-            syncDelayVisibility()
-            onLive(); onCommit()
-        })
-        delayBox.addView(fieldLabel("Thời gian delay (giây)"))
-        val delayRow = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), 0, dp(12), 0)
-            background = ripple(round(0xFF142036.toInt(), 12, 0xFF1E2B44.toInt()), 12)
-            isClickable = true
-        }
-        val delayText = TextView(ctx).apply {
-            text = "${MainButton.secondsText(b.delayMs)} giây"
-            setTextColor(0xFFE8EEFA.toInt())
-            scaledTextSize(14.5f)
-        }
-        delayRow.addView(delayText, LinearLayout.LayoutParams(0, wrap, 1f))
-        delayRow.addView(ImageView(ctx).apply {
-            setImageResource(R.drawable.ic_pencil)
-            setColorFilter(0xFF8D9DBA.toInt())
-        }, LinearLayout.LayoutParams(dp(16), dp(16)))
-        delayRow.setOnClickListener {
-            host.prompt.show("Delay ${b.code} (giây, 0.1 – 600)", MainButton.secondsText(b.delayMs), 6, numeric = true) { v ->
-                val sec = v.replace(',', '.').toDoubleOrNull()
-                if (sec != null) {
-                    b.delayMs = Math.round(sec * 1000).toInt().coerceIn(MainButton.MIN_DELAY_MS, MainButton.MAX_DELAY_MS)
-                    delayText.text = "${MainButton.secondsText(b.delayMs)} giây"
-                    onLive()
-                    onCommit()
-                }
-            }
-        }
-        delayBox.addView(delayRow, LinearLayout.LayoutParams(match, dp(46)))
-        delayBox.addView(delayNote)
-        form.addView(delayBox, LinearLayout.LayoutParams(match, wrap))
-        syncDelayVisibility()
 
         // Chạm xuyên
         form.addView(passThroughRow(b, onChange = { onLive(); onCommit() }))
