@@ -850,12 +850,9 @@ class TouchWatcher(
         private const val STUCK_MS = 15_000L
         private const val OPEN_TIMEOUT_MS = 8_000L
         private const val CMD_TIMEOUT_MS = 8_000L
-        /** Thời gian giữ của một click (ms): đủ để game/app nhận trọn DOWN rồi UP. */
-        const val TAP_HOLD_MS = 40L
-        /** Click 1 lần (Nhấn/Thả): giữ lâu hơn để game chắc chắn thấy ngón (≥ vài khung hình, kể cả khi game tụt FPS). */
-        const val TAP_HOLD_ONCE_MS = 90L
-        /** Chạm xuyên: click chờ tới khi ngón thật đã nhả ít nhất chừng này ms (game kịp xử lý ngón thật trước). */
-        const val TAP_GAP_AFTER_UP_MS = 100L
+        const val TAP_HOLD_MS = 30L
+        const val TAP_HOLD_ONCE_MS = 30L
+        const val TAP_GAP_AFTER_UP_MS = 30L
         private val PATH_RE = Regex("^/dev/input/event\\d+$")
     }
 }
