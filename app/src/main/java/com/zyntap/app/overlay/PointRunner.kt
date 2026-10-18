@@ -165,81 +165,20 @@ class PointRunner(
 
     private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap, holdMs: Long, gapMs: Long) {
         currentCoroutineContext().ensureActive()
-        // Ưu tiên click qua helper: chèn vào CÙNG luồng chạm với ngón thật (helper đã grab cảm ứng),
-        // nhờ vậy ngón thật đang vuốt/giữ không bị mất. Helper luôn tự nhả (UP) dù coroutine bị huỷ giữa chừng.
-        var helperError: String? = null
+        // Strict proxy-only policy: never fall back to `input tap`; it injects a separate gesture
+        // and can cancel a physical finger gesture on some Android builds.
         val watcher = TouchWatcher.current
-        try {
-            if (watcher?.tap(point.x, point.y, holdMs, gapMs) == true) return
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: IllegalStateException) {
-            helperError = e.message ?: "helper lỗi"
-        }
-
-        // Once a click has been sent to a live helper and that attempt errors, its input state is
-        // uncertain until the helper is restarted. Never switch that same attempt to `input tap`:
-        // it creates a second, independent touch stream and can cancel a finger the helper is relaying.
-        // Treat helper errors as a fail-closed condition, request a clean helper restart, and let the
-        // next user action retry. A missing/passive helper may still use the legacy fallback below.
-        if (watcher != null && (helperError != null || !watcher.inputTapAllowed())) {
-            if (helperError == null) {
-                val ready = withTimeoutOrNull(HELPER_WAIT_MS) {
-                    while (!watcher.proxyReady) delay(40)
-                    true
-                } == true
-                if (ready) {
-                    try {
-                        if (watcher.tap(point.x, point.y, holdMs, gapMs)) return
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: IllegalStateException) {
-                        helperError = e.message ?: "helper lỗi"
-                    }
-                }
-            }
-            if (helperError != null) {
-                watcher.requestReinject("helper click lỗi; không chuyển sang luồng input tap riêng")
-            }
-            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}) vì helper chưa bơm được${helperError?.let { " ($it)" } ?: ""} — không chuyển sang `input tap` khi trạng thái cảm ứng chưa chắc chắn")
+        if (watcher == null) {
+            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}): InputProxy chưa chạy; không dùng phương thức dự phòng")
             return
         }
-
-        // Tới đây: helper thụ động (ROM không cho grab) / đã bỏ helper hẳn / chưa có TouchWatcher -> không còn cách nào khác.
-        if (helperError != null) {
-            DebugLog.w("Bơm", "Click qua helper lỗi ($helperError) -> click lại bằng `input tap` để không bị xịt")
-        } else {
-            TouchWatcher.current?.requestReinject("click phải lùi về input tap (helper chưa READY / chưa grab)")
-            DebugLog.w("Bơm", "Helper chưa bơm được (${if (TouchWatcher.current == null) "chưa chạy" else "chưa READY/không grab được"}) -> click bằng `input tap` (chậm hơn, không chung luồng với ngón thật)")
-        }
-        // Only validated integer coordinates enter the command. Never execute editor text.
-        val stream = manager.openStream("shell:input tap ${point.x} ${point.y}; echo ZYN_EXIT:\$?")
-        run.stream = stream
-        val timedOut = java.util.concurrent.atomic.AtomicBoolean(false)
-        var timeout: java.util.concurrent.ScheduledFuture<*>? = null
         try {
-            timeout = timer.schedule({ timedOut.set(true); runCatching { stream.close() } }, 8, TimeUnit.SECONDS)
-            currentCoroutineContext().ensureActive()
-            val output = StringBuilder()
-            stream.openInputStream().use { input ->
-                val buffer = ByteArray(1024)
-                while (true) {
-                    currentCoroutineContext().ensureActive()
-                    val count = try { input.read(buffer) } catch (error: java.io.IOException) {
-                        // libadb may signal normal remote EOF with IOException after the success marker.
-                        if (output.contains("ZYN_EXIT:0")) break else throw error
-                    }
-                    if (count < 0) break
-                    if (output.length < 8192) output.append(String(buffer, 0, count, Charsets.UTF_8))
-                    if (output.contains("ZYN_EXIT:0")) break
-                }
-            }
-            check(!timedOut.get()) { "ADB phản hồi quá lâu" }
-            check(output.contains("ZYN_EXIT:0")) { output.toString().take(180).ifBlank { "ADB không xác nhận click" } }
-        } finally {
-            timeout?.cancel(false)
-            runCatching { stream.close() }
-            if (run.stream === stream) run.stream = null
+            if (watcher.tap(point.x, point.y, holdMs, gapMs)) return
+            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}): InputProxy chưa sẵn sàng hoặc không bơm được; sẽ không chuyển sang input tap")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}): InputProxy lỗi (${e.message ?: e.javaClass.simpleName}); không dùng fallback")
         }
     }
 

@@ -322,7 +322,7 @@ object TouchDeviceFinder {
  * CHẾ ĐỘ PROXY (mặc định): thay vì `cat`, chạy helper [com.zyntap.app.shell.InputProxy] (app_process,
  * quyền shell). Helper `EVIOCGRAB` tấm cảm ứng rồi phát lại ngón thật + click của app thành MỘT luồng
  * chạm duy nhất (click của app là pointer thêm, mang áp lực/kích cỡ clone từ ngón thật) -> click của app
- * không làm mất ngón thật. Nếu helper không chạy được 3 lần liền thì lùi về `cat` + `input tap` như cũ.
+ * không làm mất ngón thật. Nếu helper không chạy được 3 lần liền thì theo dõi thụ động và bỏ click; không dùng `input tap` fallback.
  */
 class TouchWatcher(
     context: Context,
@@ -358,7 +358,7 @@ class TouchWatcher(
     }
 
     /**
-     * Ép chạy lại helper bơm (lỗi -> bơm lại -> lặp). Gọi khi click phải lùi về `input tap` hoặc helper không phản hồi.
+     * Ép chạy lại helper bơm (lỗi -> bơm lại -> lặp). Gọi khi click sẽ bị bỏ (không fallback) hoặc helper không phản hồi.
      * Đóng luồng helper hiện tại, xoá bộ đếm thất bại và thử lại gần như ngay. Có giãn nhịp để không bơm lại liên tục.
      */
     fun requestReinject(reason: String) {
@@ -408,11 +408,8 @@ class TouchWatcher(
      * helper chạy được nhưng ROM không cho grab/bơm (thụ động), hoặc đã bỏ helper và đang đọc thô bằng cat.
      * Helper đang khởi động lại / click lỗi thoáng qua thì KHÔNG được dùng.
      */
-    fun inputTapAllowed(): Boolean {
-        val l = link
-        val passive = l != null && l.ready && !l.injecting
-        return inCatMode || passive
-    }
+    fun inputTapAllowed(): Boolean = false // Strict proxy-only: never inject a separate input tap.
+
 
     /**
      * Vùng tròn (x, y, bán kính — pixel) mà ngón thật đặt xuống thì helper chỉ BÁO cho app chứ không phát xuống
@@ -479,7 +476,7 @@ class TouchWatcher(
 
     /**
      * Click tại ([x], [y]) (pixel màn hình hiện tại) qua helper: chèn vào cùng luồng với ngón thật.
-     * @return false nếu helper chưa sẵn sàng / đang ở chế độ thụ động -> bên gọi tự lùi về `input tap`.
+     * @return false nếu helper chưa sẵn sàng / đang ở chế độ thụ động -> caller phải bỏ click, không fallback.
      * @throws IllegalStateException nếu đã gửi mà helper không xác nhận.
      */
     suspend fun tap(x: Int, y: Int, holdMs: Long = TAP_HOLD_MS, gapMs: Long = 0L): Boolean {
@@ -496,7 +493,7 @@ class TouchWatcher(
         }
         when (result) {
             TAP_OK -> return true
-            TAP_PASSIVE -> return false // helper không bơm được -> bên gọi lùi về input tap
+            TAP_PASSIVE -> return false // helper không bơm được -> caller bỏ click, không fallback
             TAP_TIMEOUT -> {
                 DebugLog.e("Bơm", "Helper không phản hồi click ($x,$y) trong ${holdMs * 2 + gapMs + 3_000L}ms")
                 requestReinject("helper không phản hồi click")
@@ -594,7 +591,7 @@ class TouchWatcher(
                     }
                     if (!ok) {
                         DebugLog.e("Bơm", "Helper bơm cảm ứng thoát mà chưa READY (lần $proxyFails/$MAX_PROXY_FAILS) trên ${dev.path} — ROM chặn app_process/grab hoặc sai node cảm ứng")
-                        if (proxyFails >= MAX_PROXY_FAILS) DebugLog.e("Bơm", "Bỏ helper, lùi về đọc thô `cat` + click bằng `input tap` (không bơm chung luồng được)")
+                        if (proxyFails >= MAX_PROXY_FAILS) DebugLog.e("Bơm", "Bỏ helper, chuyển sang theo dõi thụ động; click bị bỏ, không dùng input tap")
                     }
                     if (!ok) { device = null; clearCachedDevice() } // lần sau dò lại đường dẫn cảm ứng
                     delay(if (fastRetry) FAST_RETRY_MS else RETRY_MS)
@@ -851,7 +848,7 @@ class TouchWatcher(
 
     /**
      * Diệt helper cũ còn sống sót (app bị tắt/kill khi helper đang chạy, ADB đứt không báo...). Helper cũ
-     * giữ EVIOCGRAB nên helper mới không grab được -> click phải lùi về `input tap`. Mẫu `[c]om...` để
+     * giữ EVIOCGRAB nên helper mới không grab được -> click sẽ bị bỏ (không fallback). Mẫu `[c]om...` để
      * lệnh `sh -c` của chính nó không tự khớp mẫu.
      */
     private suspend fun killStaleHelpers(manager: ZynAdbConnectionManager) {
