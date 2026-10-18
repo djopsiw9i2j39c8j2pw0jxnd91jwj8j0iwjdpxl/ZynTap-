@@ -46,7 +46,11 @@ class ZynTileService : TileService() {
             DebugLog.i("Nút nhanh", "Tắt hẳn menu nổi từ bảng cài đặt nhanh")
             OverlayService.stop(this)
             // Tile vừa bấm xong -> hiện trạng thái tắt ngay, không chờ dịch vụ dừng
-            qsTile?.let { it.state = Tile.STATE_INACTIVE; it.updateTile() }
+            qsTile?.let {
+                it.state = Tile.STATE_INACTIVE
+                if (Build.VERSION.SDK_INT >= 29) it.subtitle = "Đã tắt"
+                it.updateTile()
+            }
             return
         }
 
@@ -112,13 +116,7 @@ class ZynTileService : TileService() {
         tile.state = if (on) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         tile.label = "ZynTap"
         if (Build.VERSION.SDK_INT >= 29) {
-            tile.subtitle = if (on) "Đang bật · bấm để tắt" else {
-                val pkg = OverlayService.lastTarget(this)
-                val name = pkg?.let { runCatching {
-                    packageManager.getApplicationLabel(packageManager.getApplicationInfo(it, 0)).toString()
-                }.getOrNull() }
-                if (name != null) "Bấm để bật · $name" else "Bấm để bật"
-            }
+            tile.subtitle = if (on) "Đang bật" else "Đã tắt"
         }
         tile.updateTile()
     }
