@@ -103,27 +103,22 @@ private fun StatusCard(
             .clickable(enabled = !active, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
     ) {
-        // Wi-Fi THẬT: có nối vào mạng Wi-Fi hay không (4G không được tính)
+        // Gộp Wi-Fi + ADB thành MỘT trạng thái: xanh khi cả hai đã sẵn sàng, vàng kèm lý do còn thiếu
+        val ready = active && wifiConnected
         StatusRow(
-            ok = wifiConnected,
-            title = "Wi-Fi",
+            ok = ready,
+            title = if (ready) "Sẵn sàng" else "Chưa sẵn sàng",
             text = when {
-                wifiConnected -> "Đã kết nối Wi-Fi"
-                mobileData -> "Chưa kết nối Wi-Fi — đang dùng dữ liệu di động"
-                else -> "Chưa kết nối Wi-Fi"
-            },
-        )
-        Spacer(Modifier.height(12.dp))
-        // ADB không dây (gỡ lỗi Wi-Fi + ghép nối)
-        StatusRow(
-            ok = active,
-            title = "ADB (gỡ lỗi Wi-Fi)",
-            text = when {
-                active -> "Đã ghép nối"
-                wifiAdbOn -> "Gỡ lỗi Wi-Fi đang bật — chưa ghép nối"
-                wasPaired && !wifiConnected -> "Cần nối Wi-Fi rồi bật lại gỡ lỗi Wi-Fi"
-                wasPaired -> "Gỡ lỗi Wi-Fi đang tắt — bật lại để dùng"
-                else -> "Chưa ghép nối"
+                ready -> "Đã kết nối Wi-Fi · ADB đã ghép nối"
+                !wifiConnected && wasPaired ->
+                    if (mobileData) "Chưa kết nối Wi-Fi (đang dùng dữ liệu di động) — nối Wi-Fi rồi bật lại gỡ lỗi Wi-Fi"
+                    else "Chưa kết nối Wi-Fi — nối Wi-Fi rồi bật lại gỡ lỗi Wi-Fi"
+                !wifiConnected ->
+                    if (mobileData) "Chưa kết nối Wi-Fi — đang dùng dữ liệu di động"
+                    else "Chưa kết nối Wi-Fi"
+                wifiAdbOn -> "Đã nối Wi-Fi · Gỡ lỗi Wi-Fi đang bật, chưa ghép nối ADB"
+                wasPaired -> "Đã nối Wi-Fi · Gỡ lỗi Wi-Fi đang tắt, bật lại để dùng"
+                else -> "Đã nối Wi-Fi · Chưa ghép nối ADB"
             },
         )
     }
