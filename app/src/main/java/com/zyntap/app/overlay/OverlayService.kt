@@ -158,7 +158,7 @@ class OverlayService : Service() {
         circles.onDrag = { dragging -> setPanelGhost(dragging) } // kéo nút main -> menu ẩn, thả -> hiện
         circles.onAction = { button, down ->
             if (!pointPicker.isShowing && !editLock && !inputActive) pointRunner.touch(button, down)
-            else pointRunner.cancelTouch(button.id)
+            else { pointRunner.cancelTouch(button.id); false }
         }
         circles.onCancel = { id -> pointRunner.cancelTouch(id) }
         startForegroundWithNotification()

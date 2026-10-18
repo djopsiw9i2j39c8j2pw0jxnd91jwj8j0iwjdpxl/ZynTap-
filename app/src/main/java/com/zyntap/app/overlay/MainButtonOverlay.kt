@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.DashPathEffect
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Rect
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -60,7 +61,48 @@ class MainButtonView(context: Context) : View(context) {
             invalidate()
         }
 
+    // ---- Delay Mode: hiệu ứng đếm ngược -------------------------------------
+    // Tất cả tính theo đồng hồ hệ thống (không dùng ValueAnimator) nên không bị ảnh hưởng bởi
+    // "tỉ lệ thời lượng hoạt ảnh" của máy (tiết kiệm pin / tuỳ chọn nhà phát triển có thể đặt = 0).
+    private var cdEnd = 0L          // uptimeMillis lúc hết khoá; 0 = không đếm
+    private var cdTotal = 1L
+    private var flashAt = 0L        // lúc nút vừa mở khoá lại (nháy xanh + nảy)
+    private var rejectAt = 0L       // lúc chạm trúng nút đang khoá (rung + nháy đỏ)
+
+    /** Bắt đầu đếm ngược [totalMs] ms: lớp đen quét dần + vòng tiến độ + số giây còn lại. */
+    fun startCountdown(totalMs: Long) {
+        cdTotal = totalMs.coerceAtLeast(1L)
+        cdEnd = SystemClock.uptimeMillis() + cdTotal
+        flashAt = 0L
+        invalidate()
+    }
+
+    /** Dừng đếm ngược ngay, không nháy (đổi cài đặt, vào chỉnh sửa, xoá nút...). */
+    fun cancelCountdown() {
+        cdEnd = 0L; flashAt = 0L; rejectAt = 0L
+        invalidate()
+    }
+
+    /** Chạm vào nút khi đang khoá: rung ngang + vòng đỏ nháy lên. */
+    fun reject() {
+        rejectAt = SystemClock.uptimeMillis()
+        invalidate()
+    }
+
     private val d = UiScale.density(resources)
+    private val cdRect = RectF()
+    private val cdDark = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = 0xFF000000.toInt() }
+    private val cdTrack = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 3f * d; color = 0xFFFFFFFF.toInt() }
+    private val cdArc = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; strokeWidth = 3f * d; strokeCap = Paint.Cap.ROUND; color = AMBER
+    }
+    private val cdFx = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2.5f * d }
+    private val cdText = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFFFFF.toInt()
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+        setShadowLayer(3f * d, 0f, 0f, 0xCC000000.toInt())
+    }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1.5f * d }
     private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -114,7 +156,25 @@ class MainButtonView(context: Context) : View(context) {
         val r = minOf(width, height) / 2f - ringPad
         if (r <= 0f) return
         val a = maxOf(fillPct, minPct) / 100f
-        if (a <= 0f && !editing) return // 0% và menu đóng: nút vô hình hoàn toàn (vẫn nhận chạm)
+        val now = SystemClock.uptimeMillis()
+
+        // Delay Mode: tính trạng thái từng hiệu ứng (hết giờ thì chuyển sang nháy "mở khoá")
+        var remain = 0L
+        if (cdEnd != 0L) {
+            remain = cdEnd - now
+            if (remain <= 0L) { cdEnd = 0L; remain = 0L; flashAt = now }
+        }
+        val counting = cdEnd != 0L
+        val flashT = if (flashAt != 0L) (now - flashAt) / FLASH_MS.toFloat() else 1f
+        val flashing = flashT < 1f
+        val rejectT = if (rejectAt != 0L) (now - rejectAt) / REJECT_MS.toFloat() else 1f
+        val rejecting = rejectT < 1f
+        val fx = counting || flashing || rejecting
+        if (a <= 0f && !editing) return // 0% và menu đóng: nút vô hình hoàn toàn, kể cả lúc Delay Mode đang đếm (vẫn nhận chạm)
+
+        canvas.save()
+        if (rejecting) canvas.translate(kotlin.math.sin(rejectT * Math.PI * 5).toFloat() * (1f - rejectT) * 4f * d, 0f) // rung
+        if (flashing) { val pop = 1f + 0.09f * kotlin.math.sin(flashT * Math.PI).toFloat(); canvas.scale(pop, pop, cx, cy) } // nảy
 
         // thân nút: gradient xanh, độ đặc theo [fillPct]
         val key = r
@@ -130,8 +190,8 @@ class MainButtonView(context: Context) : View(context) {
         edge.alpha = if (a <= 0f) 0 else (255 * (0.2f + 0.4f * a)).toInt()
         canvas.drawCircle(cx, cy, r - edge.strokeWidth / 2f, edge)
 
-        // tên nút, tự co cỡ chữ cho vừa trong vòng tròn
-        val lay = fitLabel(r)
+        // tên nút, tự co cỡ chữ cho vừa trong vòng tròn (đang đếm ngược thì nhường chỗ cho con số)
+        val lay = if (counting) null else fitLabel(r)
         if (lay != null) {
             text.alpha = if (a <= 0f) 0 else (255 * (0.55f + 0.45f * a)).toInt()
             canvas.save()
@@ -150,6 +210,47 @@ class MainButtonView(context: Context) : View(context) {
             canvas.drawCircle(cx, cy, rr, ring)
             canvas.restore()
         }
+
+        // ---- Delay Mode ----
+        if (counting) {
+            val frac = (remain / cdTotal.toFloat()).coerceIn(0f, 1f) // 1 -> 0
+            val start = -90f + 360f * (1f - frac)                    // mép quét, đi thuận chiều kim đồng hồ từ 12h
+            val sweep = 360f * frac
+            // lớp đen phủ phần chưa hết giờ; phần đã qua sáng dần lên như kim đồng hồ quét
+            cdRect.set(cx - r, cy - r, cx + r, cy + r)
+            cdDark.alpha = 165
+            canvas.drawArc(cdRect, start, sweep, true, cdDark)
+            // vòng tiến độ nằm trong viền
+            val ir = r - 3.5f * d
+            cdRect.set(cx - ir, cy - ir, cx + ir, cy + ir)
+            cdTrack.alpha = 45
+            canvas.drawCircle(cx, cy, ir, cdTrack)
+            canvas.drawArc(cdRect, start, sweep, false, cdArc)
+            // số đếm ngược
+            val t = remainText(remain)
+            cdText.textSize = minOf(r * 0.72f, r * 1.7f / maxOf(t.length, 2))
+            canvas.drawText(t, cx, cy - (cdText.ascent() + cdText.descent()) / 2f, cdText)
+        }
+        if (flashing) { // vừa mở khoá lại: vòng xanh loe ra rồi mờ dần
+            val e = 1f - (1f - flashT) * (1f - flashT)
+            cdFx.color = READY_GREEN
+            cdFx.alpha = (255 * (1f - flashT)).toInt()
+            canvas.drawCircle(cx, cy, r + ringPad * 0.9f * e, cdFx)
+        }
+        if (rejecting) { // chạm khi đang khoá: vòng đỏ
+            cdFx.color = DENY_RED
+            cdFx.alpha = (230 * (1f - rejectT)).toInt()
+            canvas.drawCircle(cx, cy, r - cdFx.strokeWidth / 2f, cdFx)
+        }
+        canvas.restore()
+        if (fx) postInvalidateOnAnimation() // còn hiệu ứng thì vẽ tiếp khung sau
+    }
+
+    /** >= 1 phút: "m:ss"; >= 10 giây: số giây nguyên; dưới 10 giây: 1 số lẻ ("2.4"). Luôn làm tròn lên, không hiện "0.0". */
+    private fun remainText(ms: Long): String = when {
+        ms >= 60_000L -> { val s = ((ms + 999L) / 1000L).toInt(); "${s / 60}:${(s % 60).toString().padStart(2, '0')}" }
+        ms >= 10_000L -> ((ms + 999L) / 1000L).toString()
+        else -> { val tenths = ((ms + 99L) / 100L).toInt().coerceAtLeast(1); "${tenths / 10}.${tenths % 10}" }
     }
 
     /**
@@ -210,6 +311,11 @@ class MainButtonView(context: Context) : View(context) {
     private companion object {
         const val CYAN = 0xFF19D3FF.toInt()
         const val BLUE = 0xFF2A6BFF.toInt()
+        const val AMBER = 0xFFFFB020.toInt()
+        const val READY_GREEN = 0xFF3DDC84.toInt()
+        const val DENY_RED = 0xFFFF4D4D.toInt()
+        const val FLASH_MS = 420L
+        const val REJECT_MS = 320L
     }
 }
 
@@ -227,7 +333,8 @@ class MainButtonOverlay(
     private val screenBounds: () -> Rect,
     private val newParams: (width: Int, height: Int, flags: Int) -> WindowManager.LayoutParams,
 ) {
-    var onAction: ((MainButton, Boolean) -> Unit)? = null
+    /** (nút, true = chạm xuống / false = nhả) -> true nếu lần chạm này vừa khởi chạy 1 click thật. */
+    var onAction: ((MainButton, Boolean) -> Boolean)? = null
     var onCancel: ((Int) -> Unit)? = null
 
     private class Entry(val view: MainButtonView, val params: WindowManager.LayoutParams, var addedAt: Long)
@@ -265,6 +372,59 @@ class MainButtonOverlay(
         }
         repo.buttons.forEach { if (!entries.containsKey(it.id)) addView(it) }
         refreshWatcher()
+    }
+
+    // ---- Delay Mode ---------------------------------------------------------
+
+    /** Nút -> thời điểm (uptimeMillis) hết khoá. Hết hạn thì tự bị xoá khi hỏi tới. */
+    private val lockedUntil = HashMap<Int, Long>()
+
+    /** Nút có lần chạm xuống đã bị chặn (đang khoá) -> lần nhả tương ứng cũng bỏ qua. */
+    private val rejected = HashSet<Int>()
+
+    private fun isLocked(id: Int): Boolean {
+        val until = lockedUntil[id] ?: return false
+        if (SystemClock.uptimeMillis() < until) return true
+        lockedUntil.remove(id)
+        return false
+    }
+
+    private fun lock(b: MainButton) {
+        lockedUntil[b.id] = SystemClock.uptimeMillis() + b.delayMs
+        entries[b.id]?.view?.startCountdown(b.delayMs.toLong())
+    }
+
+    private fun clearLock(id: Int) {
+        lockedUntil.remove(id)
+        rejected.remove(id)
+        entries[id]?.view?.cancelCountdown()
+    }
+
+    /**
+     * Cửa chung cho mọi lần chạm vào nút (cả chạm trực tiếp lẫn chạm xuyên qua watcher).
+     * Không bật Delay Mode -> chuyển thẳng cho [onAction]. Bật thì:
+     *  - đang khoá: chặn lần chạm (và cả lần nhả của nó), nút rung + nháy đỏ;
+     *  - Nhấn: khoá ngay khi click vừa chạy; Thả: khoá khi click chạy lúc nhả ngón.
+     * Chỉ khoá khi click thật sự được khởi chạy (menu mở / script lỗi thì không tính là 1 lần click).
+     * @return false nếu lần chạm bị chặn.
+     */
+    private fun fire(b: MainButton, down: Boolean): Boolean {
+        if (!b.delayActive) { onAction?.invoke(b, down); return true }
+        if (down) {
+            if (isLocked(b.id)) {
+                rejected.add(b.id)
+                entries[b.id]?.view?.reject()
+                return false
+            }
+            rejected.remove(b.id)
+            val started = onAction?.invoke(b, true) == true
+            if (started && b.mode == MainButton.MODE_TAP) lock(b)
+            return true
+        }
+        if (rejected.remove(b.id)) return false
+        val started = onAction?.invoke(b, false) == true
+        if (started && b.mode == MainButton.MODE_RELEASE) lock(b)
+        return true
     }
 
     // ---- chạm xuyên ---------------------------------------------------------
@@ -392,13 +552,12 @@ class MainButtonOverlay(
             val id = buttonAt(x, y) ?: return
             val b = repo.find(id) ?: return
             watched[slot] = id
-            entries[id]?.view?.pressedVisual = true
-            onAction?.invoke(b, true)
+            entries[id]?.view?.pressedVisual = fire(b, true)
         } else {
             val id = watched.remove(slot) ?: return
             entries[id]?.view?.pressedVisual = watched.containsValue(id)
             val b = repo.find(id) ?: return
-            if (!watched.containsValue(id)) onAction?.invoke(b, false)
+            if (!watched.containsValue(id)) fire(b, false)
         }
     }
 
@@ -449,6 +608,7 @@ class MainButtonOverlay(
     }
 
     private fun removeView(id: Int) {
+        clearLock(id)
         onCancel?.invoke(id)
         watched.entries.removeAll { it.value == id }
         val e = entries.remove(id) ?: return
@@ -469,6 +629,7 @@ class MainButtonOverlay(
     }
 
     fun onRemoved(id: Int) {
+        clearLock(id)
         onCancel?.invoke(id)
         watched.entries.removeAll { it.value == id }
         if (editingId == id) editingId = null
@@ -481,6 +642,7 @@ class MainButtonOverlay(
 
     /** Tên/độ mờ/size vừa đổi trong menu -> cập nhật ngay trên nút thật. */
     fun onChanged(b: MainButton) {
+        clearLock(b.id) // đổi cài đặt (bật/tắt Delay, đổi thời gian, đổi chế độ...) -> bỏ lượt đếm cũ
         onCancel?.invoke(b.id)
         watched.entries.removeAll { it.value == b.id }
         val e = entries[b.id] ?: return
@@ -510,7 +672,7 @@ class MainButtonOverlay(
 
     /** Vào/ra trạng thái chỉnh sửa của một nút (null = không nút nào đang chỉnh). */
     fun setEditing(id: Int?) {
-        if (id != null) onCancel?.invoke(id)
+        if (id != null) { clearLock(id); onCancel?.invoke(id) }
         editingId = id
         entries.forEach { (k, e) ->
             e.view.editing = k == id
@@ -585,8 +747,7 @@ class MainButtonOverlay(
                     downX = e.rawX; downY = e.rawY
                     startX = p.x; startY = p.y
                     moved = false
-                    v.pressedVisual = true
-                    if (!editing) onAction?.invoke(b, true)
+                    v.pressedVisual = if (editing) true else fire(b, true)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -614,7 +775,7 @@ class MainButtonOverlay(
                     if (pointerId == e.getPointerId(e.actionIndex)) {
                         pointerId = -1
                         v.pressedVisual = false
-                        if (editing) { if (moved) { repo.save(); onDrag?.invoke(false) } } else onAction?.invoke(b, false)
+                        if (editing) { if (moved) { repo.save(); onDrag?.invoke(false) } } else fire(b, false)
                     }
                     true
                 }

@@ -41,15 +41,16 @@ class PointRunner(
         if (now - lastReport > 1500) { lastReport = now; report(text) }
     }
 
-    fun touch(button: MainButton, down: Boolean) {
+    /** @return true nếu lần chạm này vừa khởi chạy 1 lần click (Nhấn/Thả) — Delay Mode dựa vào đây để biết có khoá nút hay không. */
+    fun touch(button: MainButton, down: Boolean): Boolean {
         // Trợ vuốt tâm do helper can thiệp thẳng vào ngón thật vuốt từ trong nút ra: nút không chạy click/script.
-        if (button.assistEnabled) return
+        if (button.assistEnabled) return false
         val action = if (down) touches.down(button.id, button.mode) else touches.up(button.id)
-        when (action) {
+        return when (action) {
             MainTouchGate.Action.ONCE -> start(button, false)
-            MainTouchGate.Action.LOOP -> start(button, true)
-            MainTouchGate.Action.STOP -> stop(button.id)
-            MainTouchGate.Action.NONE -> Unit
+            MainTouchGate.Action.LOOP -> { start(button, true); false }
+            MainTouchGate.Action.STOP -> { stop(button.id); false }
+            MainTouchGate.Action.NONE -> false
         }
     }
 
@@ -71,19 +72,19 @@ class PointRunner(
         runs.keys.toList().forEach(::stop)
     }
 
-    private fun start(button: MainButton, repeat: Boolean) {
+    private fun start(button: MainButton, repeat: Boolean): Boolean {
         // A single physical press cannot enqueue an unbounded backlog.
-        if (runs[button.id]?.job?.isActive == true) return
+        if (runs[button.id]?.job?.isActive == true) return false
         val screen = bounds()
         val script = PointScriptParser.parse(button.pointScript, screen.width(), screen.height())
         if (!script.valid) {
             message(script.errors.firstOrNull() ?: "${button.code}: chưa có điểm nhấn ở tab 2")
-            return
+            return false
         }
         val taps = script.steps.filterIsInstance<PointStep.Tap>()
         if (taps.any { targetBlocked(it.x, it.y) }) {
             message("Điểm nhấn đang nằm dưới menu đang mở hoặc nút mở menu. Hãy thu menu hoặc dời nút mở menu.")
-            return
+            return false
         }
         // Click 1 lần: giữ lâu hơn. Chạm xuyên: chờ ngón thật nhả đủ lâu rồi mới click (tránh game nuốt click đầu).
         val holdMs = if (repeat) TouchWatcher.TAP_HOLD_MS else TouchWatcher.TAP_HOLD_ONCE_MS
@@ -154,6 +155,7 @@ class PointRunner(
                 if (runs[button.id] === run) runs.remove(button.id)
             }
         }
+        return true
     }
 
     private companion object {

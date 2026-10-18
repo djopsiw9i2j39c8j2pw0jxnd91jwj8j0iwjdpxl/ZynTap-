@@ -31,8 +31,14 @@ class MainButton(
     var assistDelay: Int = DEFAULT_ASSIST_DELAY,
     /** Buff lực vuốt: hệ số nhân quãng vuốt của ngón thật, tính theo % (200 = x2). */
     var boostGain: Int = DEFAULT_BOOST_GAIN,
+    /** Delay Mode: bật thì sau mỗi lần click, nút bị khoá [delayMs] ms (chỉ chế độ Nhấn / Thả). */
+    var delayEnabled: Boolean = false,
+    var delayMs: Int = DEFAULT_DELAY_MS,
 ) {
     val code: String get() = "main$id"
+
+    /** Delay Mode đang có hiệu lực: chỉ với Nhấn/Thả và khi không dùng trợ vuốt tâm. */
+    val delayActive: Boolean get() = delayEnabled && !assistEnabled && mode != MODE_HOLD
 
 
     companion object {
@@ -67,6 +73,23 @@ class MainButton(
         const val MIN_BOOST_GAIN = 100
         const val MAX_BOOST_GAIN = 500
         const val DEFAULT_BOOST_GAIN = 200
+
+        const val MIN_DELAY_MS = 100
+        const val MAX_DELAY_MS = 600_000   // 10 phút
+        const val DEFAULT_DELAY_MS = 3000
+
+        /** 3000 -> "3", 1500 -> "1.5", 250 -> "0.25" (giây, bỏ số 0 thừa). */
+        fun delaySecondsText(ms: Int): String {
+            val t = String.format(java.util.Locale.US, "%.2f", ms / 1000.0).trimEnd('0').trimEnd('.')
+            return t.ifEmpty { "0" }
+        }
+
+        /** Đọc số giây người dùng gõ ("1.5" hoặc "1,5") -> ms đã kẹp trong khoảng cho phép; null nếu không phải số. */
+        fun parseDelaySeconds(text: String): Int? {
+            val sec = text.trim().replace(',', '.').toDoubleOrNull() ?: return null
+            if (sec.isNaN() || sec.isInfinite()) return null
+            return Math.round(sec * 1000.0).coerceIn(MIN_DELAY_MS.toLong(), MAX_DELAY_MS.toLong()).toInt()
+        }
 
         fun modeLabel(mode: Int) = MODE_LABELS.getOrElse(mode) { MODE_LABELS[0] }
     }
@@ -127,7 +150,9 @@ class MainButtonRepo(context: Context) {
                     .put("assistSpeed", b.assistSpeed)
                     .put("assistLength", b.assistLength)
                     .put("assistDelay", b.assistDelay)
-                    .put("boostGain", b.boostGain),
+                    .put("boostGain", b.boostGain)
+                    .put("delayEnabled", b.delayEnabled)
+                    .put("delayMs", b.delayMs),
             )
         }
         return arr
@@ -177,6 +202,9 @@ class MainButtonRepo(context: Context) {
                             .coerceIn(MainButton.MIN_ASSIST_DELAY, MainButton.MAX_ASSIST_DELAY),
                         boostGain = o.optInt("boostGain", MainButton.DEFAULT_BOOST_GAIN)
                             .coerceIn(MainButton.MIN_BOOST_GAIN, MainButton.MAX_BOOST_GAIN),
+                        delayEnabled = o.optBoolean("delayEnabled", false),
+                        delayMs = o.optInt("delayMs", MainButton.DEFAULT_DELAY_MS)
+                            .coerceIn(MainButton.MIN_DELAY_MS, MainButton.MAX_DELAY_MS),
                         x = o.optDouble("x", 0.8).toFloat().coerceIn(0f, 1f),
                         y = o.optDouble("y", 0.5).toFloat().coerceIn(0f, 1f),
                     ),

@@ -176,7 +176,9 @@ class MainButtonsTab(
     // ---- thanh nút ---------------------------------------------------------
 
     private fun subtitle(b: MainButton) =
-        "${b.code}  •  ${if (b.assistEnabled) MainButton.ASSIST_LABELS[b.assistMode] else MainButton.modeLabel(b.mode)}  •  ${b.sizeDp}dp  •  ${b.alphaPct}%"
+        "${b.code}  •  ${if (b.assistEnabled) MainButton.ASSIST_LABELS[b.assistMode] else MainButton.modeLabel(b.mode)}" +
+            (if (b.delayActive) "  •  Delay ${MainButton.delaySecondsText(b.delayMs)}s" else "") +
+            "  •  ${b.sizeDp}dp  •  ${b.alphaPct}%"
 
     private inner class Bar(val b: MainButton) {
         val slot = RevealLayout(ctx)
@@ -450,16 +452,66 @@ class MainButtonsTab(
         }
         form.addView(nameRow, LinearLayout.LayoutParams(match, dp(46)))
 
+        // Delay Mode: công tắc + ô nhập thời gian (chỉ hiện khi bật). Chỉ dùng được với chế độ Nhấn / Thả.
+        val delayBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        val delayTimeBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        fun syncDelayVisibility() {
+            delayBox.visibility = if (b.mode != MainButton.MODE_HOLD && !b.assistEnabled) View.VISIBLE else View.GONE
+            delayTimeBox.visibility = if (b.delayEnabled) View.VISIBLE else View.GONE
+        }
+
         // Chế độ (dropdown nổi dùng chung)
         form.addView(fieldLabel("Chế độ"))
         form.addView(
             DropdownField(ctx, host.dropdown, MainButton.MODE_LABELS, b.mode) { i ->
                 b.mode = i
+                syncDelayVisibility()
                 onLive()
                 onCommit()
             },
             LinearLayout.LayoutParams(match, dp(46)),
         )
+
+        delayBox.addView(switchRow("Delay Mode",
+            "Mỗi lần click, nút bị khoá và đếm ngược; hết giờ mới bấm tiếp được. Chỉ dùng cho Nhấn / Thả.", b.delayEnabled) { on ->
+            b.delayEnabled = on
+            syncDelayVisibility()
+            onLive(); onCommit()
+        })
+        delayTimeBox.addView(fieldLabel("Thời gian khoá (giây)"))
+        val delayRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(12), 0)
+            background = ripple(round(0xFF142036.toInt(), 12, 0xFF1E2B44.toInt()), 12)
+            isClickable = true
+        }
+        val delayText = TextView(ctx).apply {
+            text = "${MainButton.delaySecondsText(b.delayMs)} giây"
+            setTextColor(0xFFE8EEFA.toInt())
+            scaledTextSize(14.5f)
+            maxLines = 1
+        }
+        delayRow.addView(delayText, LinearLayout.LayoutParams(0, wrap, 1f))
+        delayRow.addView(ImageView(ctx).apply {
+            setImageResource(R.drawable.ic_pencil)
+            setColorFilter(0xFF8D9DBA.toInt())
+        }, LinearLayout.LayoutParams(dp(16), dp(16)))
+        delayRow.setOnClickListener {
+            host.prompt.show(
+                "Thời gian khoá ${b.code} (giây, ${MainButton.delaySecondsText(MainButton.MIN_DELAY_MS)}–${MainButton.MAX_DELAY_MS / 1000})",
+                MainButton.delaySecondsText(b.delayMs), 7, numeric = true,
+            ) { v ->
+                val ms = MainButton.parseDelaySeconds(v) ?: return@show
+                b.delayMs = ms
+                delayText.text = "${MainButton.delaySecondsText(ms)} giây"
+                onLive(); onCommit()
+            }
+        }
+        delayTimeBox.addView(delayRow, LinearLayout.LayoutParams(match, dp(46)))
+        delayBox.addView(delayTimeBox, LinearLayout.LayoutParams(match, wrap))
+        form.addView(delayBox, LinearLayout.LayoutParams(match, wrap))
+        syncDelayVisibility()
 
         // Chạm xuyên
         form.addView(passThroughRow(b, onChange = { onLive(); onCommit() }))
@@ -477,6 +529,7 @@ class MainButtonsTab(
             "Vuốt từ TRONG nút ra: kéo/ghìm/buff hướng vuốt của bạn.", b.assistEnabled) { on ->
             b.assistEnabled = on
             syncAssistVisibility()
+            syncDelayVisibility()
             onLive(); onCommit()
         })
         assistBox.addView(fieldLabel("Chế độ trợ vuốt"))
