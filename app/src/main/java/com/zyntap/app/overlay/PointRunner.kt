@@ -177,10 +177,12 @@ class PointRunner(
             helperError = e.message ?: "helper lỗi"
         }
 
-        if (watcher != null && !watcher.inputTapAllowed()) {
-            // Helper đang khởi động lại / click lỗi thoáng qua. TUYỆT ĐỐI không lùi về `input tap` ở đây: nó là luồng chạm
-            // riêng nên hệ thống huỷ luôn ngón thật đang đè (đơ màn hình). Chờ helper sẵn sàng một chút rồi thử lại qua
-            // helper; vẫn không được thì bỏ click này còn hơn làm mất ngón thật.
+        // Once a click has been sent to a live helper and that attempt errors, its input state is
+        // uncertain until the helper is restarted. Never switch that same attempt to `input tap`:
+        // it creates a second, independent touch stream and can cancel a finger the helper is relaying.
+        // Treat helper errors as a fail-closed condition, request a clean helper restart, and let the
+        // next user action retry. A missing/passive helper may still use the legacy fallback below.
+        if (watcher != null && (helperError != null || !watcher.inputTapAllowed())) {
             if (helperError == null) {
                 val ready = withTimeoutOrNull(HELPER_WAIT_MS) {
                     while (!watcher.proxyReady) delay(40)
@@ -196,7 +198,10 @@ class PointRunner(
                     }
                 }
             }
-            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}) vì helper chưa bơm được${helperError?.let { " ($it)" } ?: ""} — không dùng `input tap` để khỏi cắt ngón thật")
+            if (helperError != null) {
+                watcher.requestReinject("helper click lỗi; không chuyển sang luồng input tap riêng")
+            }
+            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}) vì helper chưa bơm được${helperError?.let { " ($it)" } ?: ""} — không chuyển sang `input tap` khi trạng thái cảm ứng chưa chắc chắn")
             return
         }
 
