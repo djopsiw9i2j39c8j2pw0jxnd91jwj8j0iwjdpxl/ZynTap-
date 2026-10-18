@@ -12,7 +12,7 @@ App Android viết bằng Kotlin + Jetpack Compose. Build APK hoàn toàn trên 
 
 ## Đổi phiên bản (cập nhật không phải gỡ cài lại)
 
-Phiên bản mặc định: **1.00.20**. Có 3 cách đổi:
+Phiên bản mặc định: **1.00.25**. Có 3 cách đổi:
 
 - Sửa dòng `appVersion=1.00.17` trong `gradle.properties`, rồi đẩy code lên.
 - Vào Actions → **Run workflow** → gõ phiên bản (vd `1.00.02`).
@@ -80,12 +80,10 @@ Tọa độ dùng pixel màn hình hiện tại, không tự scale khi xoay màn
 Bản 1.00.11: build release thành công; 25 unit test parser/gesture pass. Chưa kiểm thử tương tác giao diện,
 IME, ADB Wi-Fi và giữ ngón thật trên thiết bị Android vật lý.
 
-Backend dùng `ZynAdbConnectionManager` có sẵn và lệnh `input tap` của Android, không yêu cầu Accessibility/root mới.
-Mỗi tap có chi phí xử lý ADB/khởi động lệnh; `300ms` là thời gian chờ yêu cầu giữa các bước, không bảo đảm chu kỳ tap chính xác 300ms.
-Một lệnh tap đã gửi tới Android có thể hoàn tất dù vừa nhả ngón; các bước chưa gửi sẽ bị hủy.
-Khả năng giữ ngón vật lý đồng thời phát tap phần mềm phụ thuộc InputDispatcher/ROM. Nếu hệ thống phát ACTION_CANCEL,
-app dừng an toàn, không giả vờ tiếp tục giữ. Vì vậy chưa thể bảo đảm đa chạm thật hoạt động trên mọi máy chỉ với `input tap`.
-Không dùng text editor làm shell: chỉ tọa độ nguyên đã validate được đưa vào lệnh click.
+Click đi qua helper `shell/InputProxy.java` (ngón ảo chạy song song với ngón thật trong cùng một luồng chạm), không còn lệnh `input tap`
+(xem "Thay đổi 1.00.25"). `300ms` là thời gian chờ yêu cầu giữa các bước, không bảo đảm chu kỳ tap chính xác 300ms.
+Click lỗi / helper chưa sẵn sàng thì chỉ bỏ click đó, không có đường lui nào khác.
+Không dùng text editor làm shell: chỉ tọa độ nguyên đã validate được đưa vào lệnh `TAP x y hold gap` gửi cho helper.
 
 
 Code: `overlay/MainButton.kt` (dữ liệu + lưu), `MainButtonsTab.kt` (giao diện tab 1), `MainButtonOverlay.kt` (nút tròn nổi),
@@ -119,11 +117,39 @@ app/src/main/res/   icon launcher, logo trong suốt (drawable-nodpi/logo_transp
   - Lúc đang chỉnh nút (kéo vị trí) nút vẫn nhận chạm bình thường; chỉnh xong mới xuyên lại.
   - Chưa kiểm thử trên máy thật: bộ giải mã input_event nhị phân + ánh xạ toạ độ/xoay màn hình, luồng ADB + cửa sổ phủ cần thử trên thiết bị.
 
+## Thay đổi 1.00.25 — click chung một luồng, bỏ hẳn `input tap`
+
+Các mục cũ bên dưới (1.00.14, 1.00.20) nhắc tới `input tap`, id 16..23, clone ngón gốc, nhường ngón: **đã bị thay bởi mục này**.
+
+- **Bỏ id số cho click**: lệnh helper giờ là `TAP x y holdMs [gapMs]` (không còn số thứ tự, không còn `OK id` / `ERR id` trả về).
+  Mã pointer không còn chia sẵn (ngón thật 0..15 / click 16..23) mà **helper tự cấp id nhỏ nhất đang trống** (0, 1, 2...) cho mọi ngón, thật hay ảo,
+  giữ nguyên tới khi nhấc — đúng cách InputReader của Android làm. Game/engine chỉ nhận pointer id < 10 giờ thấy được click.
+- **Không ép ngón thật lên đầu, không nhường nữa**: ngón nào chạm xuống trước thì đứng trước, ngón nào sau thì đứng sau.
+  Xoá `yieldSynthToReal`, `DELIVERED_HOLD_MS`, trạng thái "nhấc tạm / chạm lại" của click. Click ảo và ngón thật chạy **song song trong cùng một luồng**
+  (cùng danh sách `shown`, cùng `MotionEvent`); thứ tự phát đúng kiểu InputReader: UP -> MOVE -> DOWN.
+- **Bỏ clone ngón gốc**: xoá `lastReal`; click dùng thông số cố định (`tapPointer`). `TouchDevice` vẫn giữ max áp lực/độ lớn chỉ để phát lại ngón THẬT cho đúng.
+- **Xử lý chung cùng lúc**: không còn luồng riêng + `sleep` cho từng click. Một luồng `zyn-pump` giữ giờ DOWN/UP của click và nhịp trợ vuốt,
+  mọi thay đổi đi qua cùng `sync()` dưới cùng khoá với ngón thật. Click xếp hàng FIFO (tối đa 16), mỗi lúc chỉ một ngón ảo, cách nhau >= 10ms.
+- **Loại hẳn `input tap`**: xoá nhánh `shell:input tap` trong `PointRunner`, `inputTapAllowed()`, `inCatMode`, cơ chế click lại / retry (ở cả app lẫn helper).
+  Click lỗi (helper chưa READY, thụ động, bộ phát từ chối, hết chỗ pointer, hàng đợi đầy, ADB gửi lỗi) thì **chỉ bỏ click đó**, ghi Debug log (giãn nhịp),
+  và ép bơm lại helper nếu helper chưa sẵn sàng. Nếu helper không chạy được 3 lần liền vẫn lùi về đọc thô `cat` để nút main nhận ngón, nhưng lúc đó không click được.
+- **Sửa lỗi kẹt/đơ khi vuốt sau khi click (EVIOCGRAB)** — các nguyên nhân tìm được trong code:
+  1. Luồng đọc cảm ứng phải chờ `injectInputEvent` (cuộc gọi binder đồng bộ, có thể chậm cả chục ms khi game nặng) vì nó chạy NGAY trong lúc giữ khoá.
+     Click đang chạy thì mỗi click lại chen vào khoá -> bộ đệm kernel tràn (`SYN_DROPPED`) -> ngón thật giật/đơ. Giờ sự kiện được dựng nhanh dưới khoá rồi
+     xếp vào hàng đợi, luồng `zyn-inject` phát lần lượt đúng thứ tự; các `MOVE` liên tiếp được gộp lại. Khi thoát, hàng đợi được phát cạn trước khi nhả grab.
+  2. Mất gói (`SYN_DROPPED`) có thể làm mất lệnh nhấc ngón -> ngón "ma" dính hệ thống tới khi nhấc tay. Giờ `BTN_TOUCH=0` dọn hết ngón kẹt, và slot đổi
+     tracking id mà không thấy nhả thì nhả ngón cũ rồi chạm lại.
+  3. Lệnh `ROT` (xoay màn hình) giờ áp dụng ngay (`sync()`), không chờ sự kiện cảm ứng kế tiếp.
+- **Kiểm thử**: logic helper được chạy trong bộ giả lập (bộ kiểm tra chuỗi sự kiện theo luật của InputDispatcher) với 10 kịch bản: ngón thật + click chen vào,
+  click trước ngón thật sau, cấp id nhỏ nhất, 2s vuốt 240Hz + click lặp, bộ phát chậm 30ms, hệ thống từ chối sự kiện -> dựng lại luồng, giãn cách click,
+  chạm xuyên + gap, dọn ngón kẹt, nhiều ngón. **Chưa chạy trên máy Android thật**: `EVIOCGRAB`, hàm inject theo từng bản Android, và việc game cụ thể phản ứng ra sao
+  với thứ tự pointer "chạm trước đứng trước" cần thử trên thiết bị. Phần Kotlin chưa được biên dịch ở môi trường này (không có Android SDK) — build trên GitHub Actions để xác nhận.
+
 ## Thay đổi 1.00.20 — bơm lại helper tự động
 
 - Helper bơm lỗi / chưa READY -> tự **ép bơm lại, lặp** (giãn dần 8s -> 120s nếu vẫn lỗi, về 8s khi bơm được).
 - Helper không báo READY sau 10s -> đóng và chạy lại, không đứng im.
-- Lùi về `cat` + `input tap` chỉ tạm 30s rồi tự thử bơm lại (trước đây bỏ hẳn sau 3 lần lỗi).
+- Lùi về `cat` chỉ tạm 30s rồi tự thử bơm lại (trước đây bỏ hẳn sau 3 lần lỗi).
 - Debug log ghi từng bước vòng helper (chờ ADB, dò cảm ứng, chạy helper, READY...) và dòng "Vòng helper" trong báo cáo.
 
 ## Thay đổi 1.00.17
