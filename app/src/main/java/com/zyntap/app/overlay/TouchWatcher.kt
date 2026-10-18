@@ -28,8 +28,6 @@ import java.io.IOException
 import java.io.OutputStream
 import java.net.URLDecoder
 import java.net.URLEncoder
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 
 /** Một ngón chạm đã được đổi sang toạ độ pixel của màn hình hiện tại. */
 interface TouchSink {
@@ -42,8 +40,8 @@ interface TouchSink {
 
 /**
  * Thông số cảm ứng: node `/dev/input/eventN` + khoảng giá trị thô của trục X/Y.
- * Phần còn lại là thông số "ngón gốc" để clone cho click của app: tên thiết bị (tìm deviceId thật),
- * khoảng áp lực và khoảng độ lớn vùng chạm (0 = máy không báo trục đó).
+ * Phần còn lại giúp helper phát lại ngón thật cho đúng: tên thiết bị (tìm deviceId thật),
+ * khoảng áp lực và khoảng độ lớn vùng chạm (0 = máy không báo trục đó). Click của app KHÔNG clone gì từ ngón thật.
  */
 data class TouchDevice(
     val path: String,
@@ -321,8 +319,11 @@ object TouchDeviceFinder {
  *
  * CHẾ ĐỘ PROXY (mặc định): thay vì `cat`, chạy helper [com.zyntap.app.shell.InputProxy] (app_process,
  * quyền shell). Helper `EVIOCGRAB` tấm cảm ứng rồi phát lại ngón thật + click của app thành MỘT luồng
- * chạm duy nhất (click của app là pointer thêm, mang áp lực/kích cỡ clone từ ngón thật) -> click của app
- * không làm mất ngón thật. Nếu helper không chạy được 3 lần liền thì theo dõi thụ động và bỏ click; không dùng `input tap` fallback.
+ * chạm duy nhất: click của app là một ngón ảo chạy song song với ngón thật, ngón nào chạm trước đứng trước,
+ * không ai phải nhường ai, không clone thông số từ ngón thật, mã pointer do helper tự cấp.
+ *
+ * KHÔNG CÓ `input tap`: click chỉ đi qua helper. Helper chưa sẵn sàng / bơm lỗi thì click đó bị bỏ, không có đường lui.
+ * Nếu helper không chạy được 3 lần liền thì chỉ lùi về đọc thô `cat` để nút main vẫn biết ngón đặt ở đâu (chưa click được).
  */
 class TouchWatcher(
     context: Context,
@@ -358,7 +359,7 @@ class TouchWatcher(
     }
 
     /**
-     * Ép chạy lại helper bơm (lỗi -> bơm lại -> lặp). Gọi khi click sẽ bị bỏ (không fallback) hoặc helper không phản hồi.
+     * Ép chạy lại helper bơm (lỗi -> bơm lại -> lặp). Gọi khi click bị bỏ vì helper chưa sẵn sàng hoặc ADB gửi lỗi.
      * Đóng luồng helper hiện tại, xoá bộ đếm thất bại và thử lại gần như ngay. Có giãn nhịp để không bơm lại liên tục.
      */
     fun requestReinject(reason: String) {
@@ -399,18 +400,6 @@ class TouchWatcher(
     /** Helper đã grab cảm ứng và đang phát lại luồng chạm (click của app đi qua [tap]). */
     val proxyReady get() = link?.injecting == true
 
-    /** Đang ở chế độ đọc thô `cat` (helper đã bị bỏ sau nhiều lần thất bại). */
-    @Volatile private var inCatMode = false
-
-    /**
-     * `input tap` là một luồng chạm RIÊNG, không chung với ngón thật: chen vào lúc ngón thật đang đè là hệ thống
-     * huỷ ngón thật (đơ màn hình). Vì vậy CHỈ cho phép khi thật sự không còn đường nào chung luồng:
-     * helper chạy được nhưng ROM không cho grab/bơm (thụ động), hoặc đã bỏ helper và đang đọc thô bằng cat.
-     * Helper đang khởi động lại / click lỗi thoáng qua thì KHÔNG được dùng.
-     */
-    fun inputTapAllowed(): Boolean = false // Strict proxy-only: never inject a separate input tap.
-
-
     /**
      * Vùng tròn (x, y, bán kính — pixel) mà ngón thật đặt xuống thì helper chỉ BÁO cho app chứ không phát xuống
      * hệ thống: nút main chỉ đè lên điểm nhấn (không bật chạm xuyên) vẫn nhận ngón như nút thường, không để ngón lọt
@@ -440,11 +429,9 @@ class TouchWatcher(
         scope.launch(Dispatchers.IO) { runCatching { l.send(line) } }
     }
 
-    /** Kết nối tới helper: gửi lệnh, nhận kết quả click. */
+    /** Kết nối tới helper: chỉ gửi lệnh một chiều (click không có số thứ tự, không chờ phản hồi). */
     private class ProxyLink(val stream: AdbStream) {
         private val out: OutputStream = stream.openOutputStream()
-        private val pending = ConcurrentHashMap<Int, CompletableDeferred<Int>>()
-        private val ids = AtomicInteger()
         @Volatile var injecting = false
         /** Helper đã báo READY (dù có bơm được hay không). */
         @Volatile var ready = false
@@ -455,55 +442,28 @@ class TouchWatcher(
                 out.flush()
             }
         }
-
-        /** @return TAP_OK / TAP_PASSIVE / TAP_FAILED (helper còn sống nhưng click lỗi) / TAP_TIMEOUT (helper không trả lời). */
-        suspend fun tap(x: Int, y: Int, holdMs: Long, gapMs: Long): Int {
-            val id = ids.incrementAndGet()
-            val done = CompletableDeferred<Int>()
-            pending[id] = done
-            try {
-                withContext(Dispatchers.IO) { send("TAP $id $x $y $holdMs $gapMs") }
-                // Helper có thể tự click lại 1 lần (thêm 1 lần giữ + nghỉ ngắn) nên chờ rộng hơn một lần giữ
-                return withTimeoutOrNull(holdMs * 2 + gapMs + 3_000L) { done.await() } ?: TAP_TIMEOUT
-            } finally {
-                pending.remove(id)
-            }
-        }
-
-        fun finish(id: Int, code: Int) { pending.remove(id)?.complete(code) }
-        fun failAll() { pending.values.forEach { it.complete(TAP_FAILED) }; pending.clear() }
     }
 
     /**
-     * Click tại ([x], [y]) (pixel màn hình hiện tại) qua helper: chèn vào cùng luồng với ngón thật.
-     * @return false nếu helper chưa sẵn sàng / đang ở chế độ thụ động -> caller phải bỏ click, không fallback.
-     * @throws IllegalStateException nếu đã gửi mà helper không xác nhận.
+     * Click tại ([x], [y]) (pixel màn hình hiện tại) qua helper: một ngón ảo chạy song song với ngón thật trong
+     * CÙNG một luồng chạm. Bắn rồi quên: helper lo giữ/nhả và tự cấp mã pointer; ở đây chỉ chờ đúng khoảng giữ + nhả
+     * tối thiểu để bước kế tiếp của kịch bản không dồn click.
+     *
+     * Click lỗi thì CHỈ BỎ click đó: không thử lại, không có đường lui nào khác (không `input tap`).
+     * @return true nếu đã gửi cho helper; false nếu click bị bỏ (helper chưa sẵn sàng / thụ động / ADB lỗi).
      */
     suspend fun tap(x: Int, y: Int, holdMs: Long = TAP_HOLD_MS, gapMs: Long = 0L): Boolean {
         val l = link ?: return false
         if (!l.injecting) return false
-        var result = l.tap(x, y, holdMs, gapMs)
-        if (result == TAP_FAILED) {
-            // Click thông minh: helper còn sống nhưng báo click không vào được (đã tự thử lại 1 lần bên trong)
-            // -> app click lại thêm 1 lần nữa cho chắc, không để xịt.
-            DebugLog.w("Bơm", "Helper báo click ($x,$y) thất bại -> click lại thêm 1 lần")
-            delay(CLICK_RETRY_PAUSE_MS)
-            if (!l.injecting) return false
-            result = l.tap(x, y, holdMs, 0L)
+        try {
+            withContext(Dispatchers.IO) { l.send("TAP $x $y $holdMs $gapMs") }
+        } catch (e: IOException) {
+            DebugLog.w("Bơm", "Gửi click ($x,$y) cho helper lỗi, bỏ click này", e)
+            requestReinject("gửi click cho helper lỗi (ADB đứt?)")
+            return false
         }
-        when (result) {
-            TAP_OK -> return true
-            TAP_PASSIVE -> return false // helper không bơm được -> caller bỏ click, không fallback
-            TAP_TIMEOUT -> {
-                DebugLog.e("Bơm", "Helper không phản hồi click ($x,$y) trong ${holdMs * 2 + gapMs + 3_000L}ms")
-                requestReinject("helper không phản hồi click")
-                error("Helper chạm không phản hồi")
-            }
-            else -> {
-                DebugLog.e("Bơm", "Helper click ($x,$y) thất bại cả 2 lần")
-                error("Helper bơm click lỗi")
-            }
-        }
+        delay(holdMs + TAP_RELEASE_GAP_MS)
+        return true
     }
 
     @Suppress("DEPRECATION")
@@ -519,7 +479,6 @@ class TouchWatcher(
 
     fun stop() {
         setStage("đã dừng", log = false)
-        inCatMode = false
         if (current === this) current = null
         job?.cancel()
         job = null
@@ -580,7 +539,6 @@ class TouchWatcher(
                     delay(RETRY_MS * 3); continue
                 }
                 if (proxyFails < MAX_PROXY_FAILS) {
-                    inCatMode = false
                     killStaleHelpers(manager)
                     setStage("Đang chạy helper bơm trên ${dev.path} (chờ READY)")
                     val ok = runProxy(manager, dev)
@@ -591,16 +549,15 @@ class TouchWatcher(
                     }
                     if (!ok) {
                         DebugLog.e("Bơm", "Helper bơm cảm ứng thoát mà chưa READY (lần $proxyFails/$MAX_PROXY_FAILS) trên ${dev.path} — ROM chặn app_process/grab hoặc sai node cảm ứng")
-                        if (proxyFails >= MAX_PROXY_FAILS) DebugLog.e("Bơm", "Bỏ helper, chuyển sang theo dõi thụ động; click bị bỏ, không dùng input tap")
+                        if (proxyFails >= MAX_PROXY_FAILS) DebugLog.e("Bơm", "Bỏ helper, lùi về đọc thô `cat` (nút main vẫn nhận ngón nhưng KHÔNG click được vì không bơm chung luồng được)")
                     }
                     if (!ok) { device = null; clearCachedDevice() } // lần sau dò lại đường dẫn cảm ứng
                     delay(if (fastRetry) FAST_RETRY_MS else RETRY_MS)
                     fastRetry = false
                     continue
                 }
-                inCatMode = true
                 // Lùi về đọc thô: chỉ tạm thời. Sau PROXY_RETRY_MS tự đóng luồng và thử bơm lại helper (lặp).
-                setStage("Đọc thô bằng cat (helper không bơm được) — sẽ thử bơm lại sau ${PROXY_RETRY_MS / 1000}s")
+                setStage("Đọc thô bằng cat (helper không bơm được, chưa click được) — sẽ thử bơm lại sau ${PROXY_RETRY_MS / 1000}s")
                 val cmd = if (useShell) "shell:stty raw -echo 2>/dev/null; exec cat ${dev.path}"
                 else "exec:cat ${dev.path}"
                 val s = openTimed(manager, cmd)
@@ -708,18 +665,8 @@ class TouchWatcher(
                         val line = r.readLine() ?: break
                         when {
                             line.startsWith("F ") -> onFingerLine(line)
-                            line.startsWith("OK ") -> {
-                                // "OK <id>" hoặc "OK <id> r1" (r1 = helper đã phải click lại 1 lần mới được)
-                                val rest = line.substring(3).trim()
-                                if (rest.contains(' ')) DebugLog.i("Bơm", "Helper đã click lại để chắc ăn: ${line.trim()}")
-                                l.finish(rest.substringBefore(' ').toIntOrNull() ?: -1, TAP_OK)
-                            }
-                            line.startsWith("ERR ") -> {
-                                val rest = line.substring(4).trim()
-                                val passive = rest.substringAfter(' ', "").trim() == "passive"
-                                if (!passive) DebugLog.e("Bơm", "Helper bơm click thất bại: ${line.trim()}")
-                                l.finish(rest.substringBefore(' ').toIntOrNull() ?: -1, if (passive) TAP_PASSIVE else TAP_FAILED)
-                            }
+                            // Click lỗi: helper chỉ bỏ click đó rồi báo một dòng (đã giãn nhịp phía helper), không có số thứ tự.
+                            line.startsWith("ERR ") -> DebugLog.w("Bơm", "Helper: ${line.substring(4).trim()}")
                             line.startsWith("READY") -> {
                                 sawReady = true; l.ready = true; l.injecting = line.contains("inj=1")
                                 runCatching { l.send(zonesLine) }
@@ -729,8 +676,7 @@ class TouchWatcher(
                                 else DebugLog.e("Bơm", "Helper chạy nhưng KHÔNG bơm được ($line) — grab cảm ứng thất bại hoặc không tạo được bộ phát")
                             }
                             line.startsWith("LOG ") -> {
-                                // Helper báo cả thông tin bình thường (vd "ngón thật chạm lúc đang click -> nhường...")
-                                // lẫn sự cố thật. Chỉ dòng có dấu hiệu sự cố mới là cảnh báo, còn lại là log thường.
+                                // Helper báo cả thông tin bình thường lẫn sự cố thật. Chỉ dòng có dấu hiệu sự cố mới là cảnh báo, còn lại là log thường.
                                 val msg = line.substring(4).trim()
                                 val lower = msg.lowercase()
                                 val bad = listOf("fail", "lỗi", "hỏng", "watchdog", "bad cmd", "read:", "inject:", "grab:", "dropped", "dựng lại")
@@ -753,7 +699,6 @@ class TouchWatcher(
             readyGuard.cancel()
             l.injecting = false
             if (link === l) link = null
-            l.failAll()
             runCatching { s.close() }
             if (stream === s) stream = null
             main.post { sink.onLost() }
@@ -848,7 +793,7 @@ class TouchWatcher(
 
     /**
      * Diệt helper cũ còn sống sót (app bị tắt/kill khi helper đang chạy, ADB đứt không báo...). Helper cũ
-     * giữ EVIOCGRAB nên helper mới không grab được -> click sẽ bị bỏ (không fallback). Mẫu `[c]om...` để
+     * giữ EVIOCGRAB nên helper mới không grab được -> không click được. Mẫu `[c]om...` để
      * lệnh `sh -c` của chính nó không tự khớp mẫu.
      */
     private suspend fun killStaleHelpers(manager: ZynAdbConnectionManager) {
@@ -891,13 +836,8 @@ class TouchWatcher(
         /** Watcher đang chạy (để PointRunner gửi click qua proxy). */
         @Volatile var current: TouchWatcher? = null
 
-        /** Kết quả một lệnh TAP gửi cho helper. */
-        const val TAP_OK = 0
-        const val TAP_PASSIVE = 1
-        const val TAP_FAILED = 2
-        const val TAP_TIMEOUT = 3
-        /** Nghỉ ngắn trước khi app click lại khi helper báo lỗi. */
-        const val CLICK_RETRY_PAUSE_MS = 10L
+        /** Khoảng nhả tối thiểu giữa 2 click liên tiếp (khớp helper): 2 lần chạm phải tách bạch, không dính cùng khung hình. */
+        const val TAP_RELEASE_GAP_MS = 10L
 
         private const val RETRY_MS = 3_000L
         private const val MAX_PROXY_FAILS = 3

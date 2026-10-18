@@ -1732,7 +1732,7 @@ class OverlayService : Service() {
             append("ZynTap $ver · Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) · ${Build.MANUFACTURER} ${Build.MODEL}\n")
             append("Wi-Fi đã kết nối: ${yn(wifiNet)} · Dữ liệu di động: ${yn(mobile)}\n")
             append("Gỡ lỗi Wi-Fi bật: ${yn(wifiOn)} · Đã ghép nối: ${yn(paired)} · ADB đang nối: ${yn(linked)}\n")
-            append("Helper bơm cảm ứng: ${if (w == null) "chưa chạy" else if (w.proxyReady) "sẵn sàng (bơm được)" else "đang chạy nhưng chưa bơm được (dùng input tap)"}\n")
+            append("Helper bơm cảm ứng: ${if (w == null) "chưa chạy" else if (w.proxyReady) "sẵn sàng (bơm được)" else "đang chạy nhưng chưa bơm được (click bị bỏ, không có input tap)"}\n")
             append("Vòng helper: ${w?.stage ?: "chưa chạy"}\n")
             append("Quyền vẽ đè: ${yn(OverlayPermission.granted(this@OverlayService))} · Truy cập dữ liệu sử dụng: ${yn(UsageAccess.granted(this@OverlayService))}\n")
             append("Tâm ảo: ${if (::crosshair.isInitialized) crosshair.state() else "?"}\n")

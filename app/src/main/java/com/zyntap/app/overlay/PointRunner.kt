@@ -5,14 +5,14 @@ import android.graphics.Rect
 import com.zyntap.app.data.AdbSession
 import com.zyntap.app.data.DebugLog
 import com.zyntap.app.data.ZynAdbConnectionManager
-import io.github.muntashirakon.adb.AdbStream
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
-/** Service-owned scheduler: main-thread state, cancellable delays, bounded shell reads on IO. */
+/**
+ * Service-owned scheduler: main-thread state, cancellable delays.
+ * Click chỉ đi qua helper [TouchWatcher] (ngón ảo chung luồng với ngón thật). KHÔNG có `input tap`: click lỗi thì bỏ.
+ */
 class PointRunner(
     private val context: Context,
     private val bounds: () -> Rect,
@@ -21,14 +21,13 @@ class PointRunner(
 ) {
     private class Run {
         var job: Job? = null
-        @Volatile var stream: AdbStream? = null
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val runs = mutableMapOf<Int, Run>()
     private val touches = MainTouchGate()
-    private val timer = Executors.newSingleThreadScheduledExecutor()
     private val injectionLock = Mutex()
     private var lastReport = 0L
+    private var lastSkipLog = 0L
 
     /** Ghi vào Debug log (luôn ghi) rồi báo Toast cho người dùng (giãn nhịp để không spam). */
     private fun message(text: String, level: DebugLog.Level = DebugLog.Level.WARN, t: Throwable? = null) {
@@ -62,9 +61,6 @@ class PointRunner(
     fun stop(id: Int) {
         val run = runs.remove(id) ?: return
         run.job?.cancel()
-        val stream = run.stream
-        run.stream = null
-        if (stream != null) scope.launch(NonCancellable + Dispatchers.IO) { runCatching { stream.close() } }
     }
 
     fun stopAll() {
@@ -119,24 +115,7 @@ class PointRunner(
                                 if (targetBlocked(step.x, step.y)) error("Điểm nhấn trùng cửa sổ ZynTap")
                                 injectionLock.withLock {
                                     ensureActive()
-                                    withContext(Dispatchers.IO) {
-                                        try {
-                                            tap(manager, run, step, holdMs, gapMs)
-                                        } catch (e: java.io.IOException) {
-                                            // Bị huỷ chủ động (nhả ngón/xoay màn hình) thì không nối lại
-                                            ensureActive()
-                                            DebugLog.w("Bơm", "Click (${step.x},${step.y}) lỗi IO, ADB có thể đã đứt -> nối lại rồi thử lại", e)
-                                            // Kết nối chết giữa chừng -> nối lại 1 lần rồi thử lại bước này
-                                            AdbSession.drop(context)
-                                            val link = AdbSession.connect(context, attempts = 1)
-                                            if (link !is AdbSession.Link.Connected) {
-                                                DebugLog.e("Bơm", "Nối lại ADB sau khi đứt thất bại: ${(link as? AdbSession.Link.Failed)?.message ?: link}")
-                                                throw IllegalStateException("ADB đã ngắt, đang nối lại. Thử lại sau giây lát.")
-                                            }
-                                            ensureActive()
-                                            tap(manager, run, step, holdMs, gapMs)
-                                        }
-                                    }
+                                    tap(step, holdMs, gapMs)
                                 }
                             }
                         }
@@ -149,42 +128,41 @@ class PointRunner(
             } catch (e: Exception) {
                 message("Không click được: ${e.message ?: "ADB đã ngắt"}", DebugLog.Level.ERROR, e)
             } finally {
-                val stream = run.stream
-                run.stream = null
-                if (stream != null) withContext(NonCancellable + Dispatchers.IO) { runCatching { stream.close() } }
                 if (runs[button.id] === run) runs.remove(button.id)
             }
         }
         return true
     }
 
-    private companion object {
-        /** Chờ helper READY tối đa chừng này trước khi bỏ click (không dùng `input tap` khi helper còn sống). */
-        const val HELPER_WAIT_MS = 1500L
+    /**
+     * Một click qua helper (ngón ảo chạy song song với ngón thật trong cùng một luồng chạm).
+     * Lỗi / helper chưa sẵn sàng thì CHỈ BỎ click này: tuyệt đối không có `input tap` hay đường lui nào khác
+     * (nó là luồng chạm riêng, chen vào là hệ thống huỷ luôn ngón thật đang đè).
+     */
+    private suspend fun tap(point: PointStep.Tap, holdMs: Long, gapMs: Long) {
+        currentCoroutineContext().ensureActive()
+        val watcher = TouchWatcher.current
+        if (watcher?.tap(point.x, point.y, holdMs, gapMs) == true) return
+
+        // Click bị bỏ. Giãn nhịp log để vòng Giữ (click liên tục) không làm ngập Debug log.
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastSkipLog > 1000) {
+            lastSkipLog = now
+            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}): ${if (watcher == null) "chưa có helper bơm cảm ứng" else "helper chưa bơm được (chưa READY / không grab được)"} — không có đường lui nào khác")
+        }
+        // Helper đang khởi động lại / chưa bơm được: ép bơm lại (đã tự giãn nhịp bên trong) để click sau còn có đường đi.
+        if (watcher != null && !watcher.proxyReady) watcher.requestReinject("click bị bỏ vì helper chưa sẵn sàng bơm")
+        // Không quay vòng nóng khi click liên tục bị bỏ.
+        delay(SKIP_PAUSE_MS)
     }
 
-    private suspend fun tap(manager: ZynAdbConnectionManager, run: Run, point: PointStep.Tap, holdMs: Long, gapMs: Long) {
-        currentCoroutineContext().ensureActive()
-        // Strict proxy-only policy: never fall back to `input tap`; it injects a separate gesture
-        // and can cancel a physical finger gesture on some Android builds.
-        val watcher = TouchWatcher.current
-        if (watcher == null) {
-            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}): InputProxy chưa chạy; không dùng phương thức dự phòng")
-            return
-        }
-        try {
-            if (watcher.tap(point.x, point.y, holdMs, gapMs)) return
-            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}): InputProxy chưa sẵn sàng hoặc không bơm được; sẽ không chuyển sang input tap")
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}): InputProxy lỗi (${e.message ?: e.javaClass.simpleName}); không dùng fallback")
-        }
+    private companion object {
+        /** Nghỉ khi một click bị bỏ, để vòng Giữ không chạy nóng. */
+        const val SKIP_PAUSE_MS = 50L
     }
 
     fun close() {
         stopAll()
         scope.cancel()
-        timer.shutdownNow()
     }
 }
