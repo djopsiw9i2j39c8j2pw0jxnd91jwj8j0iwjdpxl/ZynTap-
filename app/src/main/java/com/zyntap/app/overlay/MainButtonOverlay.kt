@@ -66,7 +66,7 @@ class MainButtonView(context: Context) : View(context) {
     private var cdEnd = 0L      // uptimeMillis lúc hết đếm ngược (0 = không đếm)
     private var cdTotal = 1L
 
-    /** Bắt đầu đếm ngược [totalMs]: nút phủ lớp tối, có số giây còn lại và vòng cung đỏ bao quanh nút thu dần. */
+    /** Bắt đầu đếm ngược [totalMs]: nút phủ lớp tối, viền chuyển đỏ và hiện số giây còn lại. */
     fun startCountdown(totalMs: Long) {
         cdTotal = totalMs.coerceAtLeast(1L)
         cdEnd = SystemClock.uptimeMillis() + cdTotal
@@ -81,25 +81,13 @@ class MainButtonView(context: Context) : View(context) {
 
     private val d = UiScale.density(resources)
     private val dim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = 0xCC05080F.toInt() }
-    private val arc = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    /** Viền đỏ đặc của Delay Mode: đè đúng lên viền trắng mỏng của nút. */
+    private val delayEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
+        strokeCap = Paint.Cap.BUTT
         color = DELAY_RED
     }
-    private val arcTrack = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        color = DELAY_RED
-    }
-    private val arcGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        color = DELAY_RED
-    }
-    private val arcTip = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        color = 0xFFFFFFFF.toInt()
-    }
-    private val arcBox = RectF()
+    private val delayBox = RectF()
     private val cdText = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFFFFFFF.toInt()
         textAlign = Paint.Align.CENTER
@@ -206,40 +194,17 @@ class MainButtonView(context: Context) : View(context) {
     }
 
     private fun drawCountdown(canvas: Canvas, cx: Float, cy: Float, r: Float, remainMs: Long) {
-        // Lớp tối nằm TRONG viền: viền trắng của nút vẫn lộ ra
+        // Lớp tối nằm TRONG viền
         canvas.drawCircle(cx, cy, r - edge.strokeWidth, dim)
 
-        // Vòng đỏ BAO QUANH nút (nằm ở khoảng chừa ngoài thân nút): nền mờ + cung đỏ thu dần
-        // theo thời gian còn lại, có quầng sáng và chấm sáng ở đầu cung.
+        // Viền đỏ đặc, cùng độ mỏng và cùng vị trí với viền trắng của nút (đè lên nó).
+        // Chạy từ đỉnh theo chiều kim đồng hồ, thu dần theo thời gian còn lại; phần đã hết trả lại viền trắng.
         val frac = (remainMs.toFloat() / cdTotal).coerceIn(0f, 1f)
-        val elapsed = cdTotal - remainMs
-        val fadeIn = (elapsed / 140f).coerceIn(0f, 1f)          // hiện dần lúc bắt đầu, không giật
-        val sw = (r * 0.09f).coerceIn(2f * d, 3.2f * d)
-        val rr = r + (ringPad * 0.5f).coerceAtLeast(sw * 0.8f)
-        arcBox.set(cx - rr, cy - rr, cx + rr, cy + rr)
-
-        arcTrack.strokeWidth = sw
-        arcTrack.alpha = (46 * fadeIn).toInt()
-        canvas.drawCircle(cx, cy, rr, arcTrack)
-
         if (frac > 0f) {
-            val sweep = 360f * frac
-            arcGlow.strokeWidth = sw * 2f
-            arcGlow.alpha = (70 * fadeIn).toInt()
-            canvas.drawArc(arcBox, -90f, sweep, false, arcGlow)
-
-            arc.strokeWidth = sw
-            arc.alpha = (255 * fadeIn).toInt()
-            canvas.drawArc(arcBox, -90f, sweep, false, arc)
-
-            // chấm sáng ở đầu cung (đầu đang chạy lùi về điểm bắt đầu)
-            val ang = Math.toRadians((-90f + sweep).toDouble())
-            arcTip.alpha = (255 * fadeIn).toInt()
-            canvas.drawCircle(
-                cx + rr * kotlin.math.cos(ang).toFloat(),
-                cy + rr * kotlin.math.sin(ang).toFloat(),
-                sw * 0.42f, arcTip,
-            )
+            delayEdge.strokeWidth = edge.strokeWidth
+            val ar = r - edge.strokeWidth / 2f
+            delayBox.set(cx - ar, cy - ar, cx + ar, cy + ar)
+            canvas.drawArc(delayBox, -90f, 360f * frac, false, delayEdge)
         }
 
         // Số giây còn lại: từ 10s trở lên làm tròn lên số nguyên, dưới 10s hiện 1 chữ số thập phân
@@ -322,7 +287,7 @@ class MainButtonView(context: Context) : View(context) {
     private companion object {
         const val CYAN = 0xFF19D3FF.toInt()
         const val BLUE = 0xFF2A6BFF.toInt()
-        const val DELAY_RED = 0xFFFF3B47.toInt()
+        const val DELAY_RED = 0xFFFF0000.toInt()
     }
 }
 
