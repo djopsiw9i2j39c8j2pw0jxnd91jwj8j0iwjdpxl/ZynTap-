@@ -665,9 +665,10 @@ public final class InputProxy {
     }
 
     /**
-     * Gọi dưới LOCK. Nhấc mọi click đang hiện (màn hình chưa có ngón thật nào) để ngón thật sắp đặt xuống làm ngón đầu.
-     * Click đã giữ >= DELIVERED_HOLD_MS thì coi là đã tới nơi (xong, không chạm lại); chưa đủ thì giữ trong [synth]
-     * để bước DOWN ngay sau đó chạm lại nó như ngón phụ (click lại cho chắc, không bị xịt).
+     * Gọi dưới LOCK. Khi ngón thật chạm xuống trong lúc chỉ có click giả, kết thúc click giả
+     * và nhường hoàn toàn luồng chạm cho ngón thật. Không đưa click giả trở lại trong cùng
+     * sync(): một DOWN giả thứ hai ngay sau DOWN thật tạo thành multi-touch ngắn, khiến một số
+     * game giữ nhầm pointer cho camera và bỏ qua các MOVE tiếp theo.
      */
     private static void yieldSynthToReal() {
         long now = SystemClock.uptimeMillis();
@@ -676,18 +677,16 @@ public final class InputProxy {
             emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, id);
             shown.remove(id);
             lastSynthUpAt = now;
-            Tap tap = synth.get(id);
-            if (tap == null) continue;
-            if (now - tap.downAt >= DELIVERED_HOLD_MS) {
+            Tap tap = synth.remove(id);
+            if (tap != null) {
+                // Đã kết thúc an toàn bằng UP; đừng retry/re-DOWN click này sau khi bắt đầu ngón thật.
                 tap.done = true;
-                synth.remove(id);
-            } else {
                 tap.downAt = 0;
             }
         }
         if (now - lastYieldLog > 1000) {
             lastYieldLog = now;
-            log("ngón thật chạm lúc đang click -> nhường ngón đầu cho ngón thật");
+            log("ngón thật chạm lúc đang click -> kết thúc click giả, nhường luồng hoàn toàn cho ngón thật");
         }
     }
 
