@@ -110,13 +110,16 @@ class OverlayService : Service() {
     private var editDim = 0f         // 0..1: nền tối phía sau nhạt đi khi đang chỉnh nút
     private var editDimAnim: ValueAnimator? = null
     private val handler = Handler(Looper.getMainLooper())
+    // Luồng nền cho vòng kiểm tra "đã thoát app chưa" (IPC UsageStats) - không chiếm luồng UI nữa
+    private val targetThread = android.os.HandlerThread("zyn-target").apply { start() }
+    private val targetHandler = Handler(targetThread.looper)
 
     // ---- tự đóng khi thoát app đã mở ----
     private var targetPkg: String? = null     // app người dùng đã chọn/mở từ ZynTap
-    private var targetSeen = false            // đã thấy app đó ở trước màn hình ít nhất một lần
-    private var targetMisses = 0              // số lần kiểm tra liên tiếp thấy app không còn ở trước
-    private var usageTracker: UsageAccess.Tracker? = null
-    private var warnedNoUsage = false         // đã báo log thiếu quyền "Truy cập dữ liệu sử dụng"
+    @Volatile private var targetSeen = false            // đã thấy app đó ở trước màn hình ít nhất một lần
+    @Volatile private var targetMisses = 0              // số lần kiểm tra liên tiếp thấy app không còn ở trước
+    @Volatile private var usageTracker: UsageAccess.Tracker? = null
+    @Volatile private var warnedNoUsage = false         // đã báo log thiếu quyền "Truy cập dữ liệu sử dụng"
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -202,6 +205,8 @@ class OverlayService : Service() {
         // Gỡ cửa sổ TRƯỚC và bọc riêng từng bước: một bước lỗi không được làm các cửa sổ còn lại
         // (nhất là tâm ảo / vòng quanh tâm) bị bỏ sót trên màn hình sau khi dịch vụ đã tắt.
         handler.removeCallbacksAndMessages(null)
+        targetHandler.removeCallbacksAndMessages(null)
+        targetThread.quitSafely()
         safely("tâm ảo") { if (::crosshair.isInitialized) crosshair.remove() }
         safely("nút main") { if (::circles.isInitialized) circles.removeAll() }
         safely("ô chọn điểm") { if (::pointPicker.isInitialized) pointPicker.close() }
@@ -236,15 +241,15 @@ class OverlayService : Service() {
     private fun startWatchdog() {
         handler.removeCallbacks(watchdog)
         handler.postDelayed(watchdog, WATCHDOG_MS)
-        handler.removeCallbacks(targetWatcher)
-        handler.postDelayed(targetWatcher, TARGET_POLL_MS)
+        targetHandler.removeCallbacks(targetWatcher)
+        targetHandler.postDelayed(targetWatcher, TARGET_POLL_MS)
     }
 
     /** Vòng kiểm tra nhanh riêng cho việc thoát app, để về màn hình chính là UI nổi tắt gần như ngay. */
     private val targetWatcher = object : Runnable {
         override fun run() {
             runCatching { checkTargetApp() }.onFailure { DebugLog.e("Tự đóng", "checkTargetApp lỗi", it) }
-            handler.postDelayed(this, TARGET_POLL_MS)
+            targetHandler.postDelayed(this, TARGET_POLL_MS)
         }
     }
 
@@ -314,7 +319,7 @@ class OverlayService : Service() {
         } else if (targetSeen && tracker.hasLeft(pkg)) {
             if (++targetMisses >= TARGET_MISS_LIMIT) {
                 DebugLog.i("Tự đóng", "Đã thoát khỏi $pkg -> tự đóng menu, nút main và tâm ảo")
-                autoClose()
+                handler.post { autoClose() }
             }
         } else {
             // popup / hộp thoại / popup app khác che tạm: chưa phải thoát, không đếm
@@ -1659,6 +1664,9 @@ class OverlayService : Service() {
             // Không chặn chạm xuống app phía sau khi đang ẩn
             p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            // Cửa sổ menu phủ TOÀN màn hình: chỉ INVISIBLE thì hệ thống vẫn ghép một lớp full-screen đè lên game
+            // ở mỗi khung hình (tụt fps). alpha cửa sổ = 0 -> SurfaceFlinger bỏ hẳn lớp này khỏi khâu ghép.
+            p.alpha = 0f
             runCatching { wm.updateViewLayout(v, p) }
         }
     }
@@ -1671,6 +1679,7 @@ class OverlayService : Service() {
         panelHidden = false
         if (p != null) {
             p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            p.alpha = 1f
             runCatching { wm.updateViewLayout(v, p) }
         }
         v.visibility = View.VISIBLE

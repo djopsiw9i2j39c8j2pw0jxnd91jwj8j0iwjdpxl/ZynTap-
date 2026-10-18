@@ -118,7 +118,7 @@ class CrosshairSettings(context: Context) {
 internal class CrosshairView(context: Context) : View(context) {
 
     var spec: CrossSpec? = null
-        set(v) { field = v; invalidate() }
+        set(v) { if (v == field) return; field = v; invalidate() }
 
     /** true: co nhỏ cho vừa khung (ô xem trước / ô chọn kiểu). */
     var fit = false
