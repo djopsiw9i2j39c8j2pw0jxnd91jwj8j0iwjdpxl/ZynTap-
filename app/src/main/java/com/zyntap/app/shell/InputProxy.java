@@ -598,9 +598,14 @@ public final class InputProxy {
         }
         if (!injecting) return; // chế độ thụ động: hệ thống vẫn tự nhận ngón thật
 
-        // Phương án A: không nhường/cắt click ảo chỉ vì ngón thật mới xuất hiện.
-        // Giữ tất cả pointer đang hoạt động; mỗi pointer kết thúc theo vòng đời riêng của nó.
+        // Phương án A+: giữ click và ngón thật đồng thời, nhưng nếu click ảo đã là ACTION_DOWN
+        // đầu tiên thì game có thể coi nó là pointer chính và bỏ qua vuốt camera của ngón thật.
+        // Khi ngón thật mới xuất hiện sau click ảo, khởi động lại stream một lần với pointer thật đứng đầu.
         for (Map.Entry<Integer, Tap> e : synth.entrySet()) want.put(e.getKey(), e.getValue().p);
+        if (needsRealPrimaryPromotion(want)) {
+            restartStreamRealFirst(want);
+            return;
+        }
 
         // 1) pointer biến mất -> UP
         for (Integer id : new ArrayList<>(shown.keySet())) {
@@ -637,6 +642,44 @@ public final class InputProxy {
 
         // 4) Hệ thống vừa từ chối một DOWN/UP: luồng bên đó đã lệch so với [shown] (ngón thật bị đơ tới khi nhấc tay).
         if (desync) rebuildStream();
+    }
+
+    /** Có pointer thật mới đến sau pointer ảo đang là ACTION_DOWN đầu tiên không? */
+    private static boolean needsRealPrimaryPromotion(Map<Integer, P> want) {
+        if (shown.isEmpty()) return false;
+        Integer first = shown.keySet().iterator().next();
+        if (first < SYNTH_BASE) return false; // pointer đầu tiên đã là ngón thật
+        for (Integer key : want.keySet()) {
+            if (key < SYNTH_BASE && !shown.containsKey(key)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Huỷ và dựng lại stream khi click ảo đã là pointer đầu tiên nhưng ngón thật mới cần xoay camera.
+     * Ngón thật được đưa vào ACTION_DOWN đầu tiên; click ảo vẫn được giữ như pointer phụ.
+     * Đây là biện pháp tương thích với game chỉ theo dõi pointer khởi tạo gesture, không phải quy tắc Android bắt buộc.
+     */
+    private static void restartStreamRealFirst(Map<Integer, P> want) {
+        if (!injecting) return;
+        emit(MotionEvent.ACTION_CANCEL, -1);
+        shown.clear();
+        downTime = SystemClock.uptimeMillis();
+
+        ArrayList<Integer> keys = new ArrayList<>(want.keySet());
+        keys.sort((a, b) -> {
+            boolean ar = a < SYNTH_BASE, br = b < SYNTH_BASE;
+            if (ar != br) return ar ? -1 : 1;
+            return Long.compare(sequenceForKey(a), sequenceForKey(b));
+        });
+
+        for (Integer key : keys) {
+            P p = want.get(key);
+            if (p == null) continue;
+            shown.put(key, p.copy());
+            emit(shown.size() == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN, key);
+        }
+        log("restart stream: ưu tiên ngón thật làm pointer đầu tiên để camera nhận vuốt");
     }
 
     /**
