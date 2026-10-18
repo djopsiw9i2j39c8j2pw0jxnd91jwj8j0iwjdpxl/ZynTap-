@@ -75,8 +75,6 @@ public final class InputProxy {
     // ---- click thông minh ---------------------------------------------------------------------
     /** Click giữ ngắn hơn mức này game dễ không kịp thấy (delay 1ms vẫn bị nâng lên mức này). */
     private static final int MIN_HOLD_MS = 10;
-    /** Click đã giữ đủ lâu thì dù bị ngón thật chen vào cắt sớm vẫn coi là đã tới nơi (không click lại, tránh đúp). */
-    private static final int DELIVERED_HOLD_MS = 15;
     /** Khoảng nhả tối thiểu giữa 2 click liên tiếp: delay 1ms vẫn phải ra 2 lần chạm tách bạch, không dính cùng khung hình. */
     private static final int MIN_RELEASE_GAP_MS = 10;
     /** Click thất bại (hệ thống từ chối / bị cắt quá sớm) thì click lại thêm tối đa chừng này lần. */
@@ -192,9 +190,9 @@ public final class InputProxy {
     /** Một click của app đang giữ. */
     private static final class Tap {
         final P p;
-        volatile long downAt = 0;   // uptime lúc đang chạm xuống thật sự; 0 = đang bị nhấc tạm (ngón thật chen vào)
+        volatile long downAt = 0;   // uptime lúc pointer click thực sự DOWN; 0 = chưa DOWN
         volatile boolean done = false; // đã bị ngón thật cắt SAU khi giữ đủ lâu -> coi như đã tới nơi
-        long sequence; // thứ tự chạm xuống; có thể cập nhật khi click được nhấc/tái chạm
+        final long sequence; // thứ tự chạm xuống trong vòng đời pointer này
         Tap(P p, long sequence) { this.p = p; this.sequence = sequence; }
     }
 
@@ -202,7 +200,6 @@ public final class InputProxy {
     private static int nextSynth = 0;           // xoay vòng id click, không dùng lại id vừa nhả
     private static long lastSynthUpAt = 0;      // uptime lúc click gần nhất vừa nhả (chỉ đụng dưới LOCK)
     private static int injectErrors = 0;        // tổng số lần phát sự kiện lỗi (chỉ đụng dưới LOCK)
-    private static long lastYieldLog = 0;
     private static long downTime = 0;
     private static long lastRealUpAt = 0;   // uptime lúc ngón thật gần nhất vừa nhả (chỉ đụng dưới LOCK)
     private static P lastReal = null;       // chỉ dùng cho chẩn đoán/đọc cảm ứng; không clone sang click ảo
@@ -601,23 +598,8 @@ public final class InputProxy {
         }
         if (!injecting) return; // chế độ thụ động: hệ thống vẫn tự nhận ngón thật
 
-        // 0) NGÓN THẬT MỚI chạm xuống trong lúc màn hình chỉ có click của app (chưa có ngón thật nào):
-        //    nếu để nguyên thì click là "ngón đầu" của cử chỉ, ngón thật chỉ là ngón phụ. Click nhả ra là
-        //    game mất ngón đầu và bỏ rơi ngón thật tới khi nhấc tay (đúng lỗi "bấm main -> click -> điều khiển bị đơ").
-        //    => Nhấc click ngay để ngón thật thành ngón ĐẦU; click (nếu chưa giữ đủ lâu) sẽ chạm lại ngay sau đó
-        //    như một ngón phụ - đúng kiểu "điều khiển trước, click sau" vốn rất mượt.
-        boolean newReal = false;
-        for (Integer id : want.keySet()) {
-            if (!shown.containsKey(id)) { newReal = true; break; }
-        }
-        if (newReal) {
-            boolean realShown = false, synthShown = false;
-            for (Integer id : shown.keySet()) {
-                if (id >= SYNTH_BASE) synthShown = true; else realShown = true;
-            }
-            if (synthShown && !realShown) yieldSynthToReal();
-        }
-
+        // Phương án A: không nhường/cắt click ảo chỉ vì ngón thật mới xuất hiện.
+        // Giữ tất cả pointer đang hoạt động; mỗi pointer kết thúc theo vòng đời riêng của nó.
         for (Map.Entry<Integer, Tap> e : synth.entrySet()) want.put(e.getKey(), e.getValue().p);
 
         // 1) pointer biến mất -> UP
@@ -676,35 +658,6 @@ public final class InputProxy {
         for (Map.Entry<Integer, P> e : keep.entrySet()) {
             shown.put(e.getKey(), e.getValue());
             emit(shown.size() == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN, e.getKey());
-        }
-    }
-
-    /**
-     * Gọi dưới LOCK. Nhấc mọi click đang hiện (màn hình chưa có ngón thật nào) để ngón thật sắp đặt xuống làm ngón đầu.
-     * Click đã giữ >= DELIVERED_HOLD_MS thì coi là đã tới nơi (xong, không chạm lại); chưa đủ thì giữ trong [synth]
-     * để bước DOWN ngay sau đó chạm lại nó như ngón phụ (click lại cho chắc, không bị xịt).
-     */
-    private static void yieldSynthToReal() {
-        long now = SystemClock.uptimeMillis();
-        for (Integer id : new ArrayList<>(shown.keySet())) {
-            if (id < SYNTH_BASE) continue;
-            emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, id);
-            shown.remove(id);
-            releaseMotionId(id);
-            lastSynthUpAt = now;
-            Tap tap = synth.get(id);
-            if (tap == null) continue;
-            if (now - tap.downAt >= DELIVERED_HOLD_MS) {
-                tap.done = true;
-                synth.remove(id);
-            } else {
-                tap.downAt = 0;
-                tap.sequence = ++nextPointerSequence; // lần chạm lại phải đứng sau ngón thật vừa xuất hiện
-            }
-        }
-        if (now - lastYieldLog > 1000) {
-            lastYieldLog = now;
-            log("ngón thật chạm lúc đang click -> nhường ngón đầu cho ngón thật");
         }
     }
 
@@ -812,7 +765,7 @@ public final class InputProxy {
     }
 
     /**
-     * Một lần click. Trả null nếu click đã tới hệ thống đủ lâu để game thấy; ngược lại trả lý do thất bại
+     * Một lần click. Trả null nếu click đã được phát đủ thời lượng; ngược lại trả lý do thất bại
      * (hệ thống từ chối sự kiện, hết id...). "passive" = không bơm được, không nên thử lại.
      */
     private static String tapOnce(float x, float y, int hold, int gap) {
@@ -854,12 +807,12 @@ public final class InputProxy {
                 }
             }
 
-            // Giữ đủ lâu. Nếu ngón thật chen vào làm click bị nhấc tạm (downAt = 0) thì chờ nó chạm lại rồi giữ tiếp.
+            // Giữ đủ thời lượng; ngón thật có thể cùng tồn tại, không làm click bị nhấc/cấp lại.
             long deadline = SystemClock.uptimeMillis() + hold + 600L;
             for (;;) {
                 long remain;
                 synchronized (LOCK) {
-                    if (tap.done || stopping) break;
+                    if (stopping) break;
                     remain = tap.downAt == 0 ? 2 : tap.downAt + hold - SystemClock.uptimeMillis();
                 }
                 if (remain <= 0 || SystemClock.uptimeMillis() > deadline) break;
@@ -867,12 +820,10 @@ public final class InputProxy {
             }
 
             synchronized (LOCK) {
-                boolean delivered = tap.done;           // bị ngón thật cắt sau khi đã giữ đủ lâu
                 boolean wasShown = shown.containsKey(sid);
                 int errs = injectErrors;
                 synth.remove(sid);
                 sync();                                  // UP (nếu còn hiện)
-                if (delivered) return null;
                 if (!wasShown || injectErrors != errs) return "inject";
             }
             return null;
