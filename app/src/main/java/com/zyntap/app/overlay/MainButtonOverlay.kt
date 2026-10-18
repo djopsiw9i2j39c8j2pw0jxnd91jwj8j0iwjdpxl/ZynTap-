@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.DashPathEffect
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.RadialGradient
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
@@ -80,7 +81,11 @@ class MainButtonView(context: Context) : View(context) {
     }
 
     private val d = UiScale.density(resources)
-    private val dim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = 0xCC05080F.toInt() }
+    /** Lớp tối phủ thân nút lúc delay: tối dần ra mép (vignette), alpha nhân theo độ mờ của nút. */
+    private val dim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private var dimKey = 0f
+    /** Chấm sáng nhỏ ở đầu cung đỏ. */
+    private val delayHead = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = 0xFFFFC2C2.toInt() }
     /** Viền đỏ đặc của Delay Mode: đè đúng lên viền trắng mỏng của nút. */
     private val delayEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -92,6 +97,7 @@ class MainButtonView(context: Context) : View(context) {
         color = 0xFFFFFFFF.toInt()
         textAlign = Paint.Align.CENTER
         typeface = Typeface.DEFAULT_BOLD
+        fontFeatureSettings = "tnum" // chữ số cùng bề ngang: số đếm không bị "nhảy" khi đổi
     }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1.5f * d }
@@ -153,7 +159,11 @@ class MainButtonView(context: Context) : View(context) {
             cdEnd = 0L
             post { pulseReady() }
         }
-        if (a <= 0f && !editing && !counting) return // 0% và menu đóng: nút vô hình hoàn toàn (vẫn nhận chạm)
+        if (a <= 0f && !editing) {
+            // 0% và menu đóng: nút vô hình hoàn toàn (vẫn nhận chạm), hiệu ứng delay cũng ẩn theo
+            if (counting) postInvalidateDelayed(cdEnd - now + 16L)
+            return
+        }
 
         // thân nút: gradient xanh, độ đặc theo [fillPct]
         val key = r
@@ -172,14 +182,16 @@ class MainButtonView(context: Context) : View(context) {
         // tên nút, tự co cỡ chữ cho vừa trong vòng tròn
         val lay = fitLabel(r)
         if (lay != null) {
-            text.alpha = if (a <= 0f) 0 else (255 * (0.55f + 0.45f * a)).toInt()
+            val labelA = if (a <= 0f) 0f else 0.55f + 0.45f * a
+            // Đang delay: tên nút mờ hẳn đi để số đếm ngược nổi bật
+            text.alpha = (255 * labelA * (1f - 0.85f * delayVis(now))).toInt()
             canvas.save()
             canvas.translate(cx - lay.width / 2f, cy - lay.height / 2f)
             lay.draw(canvas)
             canvas.restore()
         }
 
-        if (counting) drawCountdown(canvas, cx, cy, r, cdEnd - now)
+        if (counting) drawCountdown(canvas, cx, cy, r, cdEnd - now, a)
 
         if (editing) {
             val rr = r + ringPad * 0.55f
@@ -193,32 +205,87 @@ class MainButtonView(context: Context) : View(context) {
         }
     }
 
-    private fun drawCountdown(canvas: Canvas, cx: Float, cy: Float, r: Float, remainMs: Long) {
-        // Lớp tối nằm TRONG viền
-        canvas.drawCircle(cx, cy, r - edge.strokeWidth, dim)
+    /** Mức hiện của hiệu ứng delay 0..1: hiện dần lúc bắt đầu, mờ dần trong khoảnh khắc cuối. */
+    private fun delayVis(now: Long): Float {
+        if (cdEnd == 0L) return 0f
+        val remain = cdEnd - now
+        val fin = ((cdTotal - remain) / 140f).coerceIn(0f, 1f)
+        val fout = (remain / 140f).coerceIn(0f, 1f)
+        return minOf(fin, fout)
+    }
 
-        // Viền đỏ đặc, cùng độ mỏng và cùng vị trí với viền trắng của nút (đè lên nó).
-        // Chạy từ đỉnh theo chiều kim đồng hồ, thu dần theo thời gian còn lại; phần đã hết trả lại viền trắng.
+    private fun drawCountdown(canvas: Canvas, cx: Float, cy: Float, r: Float, remainMs: Long, a: Float) {
+        // Toàn bộ hiệu ứng delay nhân theo độ đặc [a] của nút: nút càng mờ thì hiệu ứng càng mờ
+        val k = a * delayVis(SystemClock.uptimeMillis())
+        if (k <= 0f) { postInvalidateOnAnimation(); return }
+        val edgeW = edge.strokeWidth
+
+        // 1) Lớp tối trong viền, gradient tâm nhạt -> mép đậm hơn, hơi ngả đỏ
+        if (dim.shader == null || dimKey != r) {
+            dim.shader = RadialGradient(
+                cx, cy, r,
+                intArrayOf(0xB805080F.toInt(), 0xD105080F.toInt(), 0xEB1A0609.toInt()),
+                floatArrayOf(0f, 0.62f, 1f),
+                Shader.TileMode.CLAMP,
+            )
+            dimKey = r
+        }
+        dim.alpha = (255 * k).toInt()
+        canvas.drawCircle(cx, cy, r - edgeW, dim)
+
+        // 2) Viền đỏ đặc, cùng độ mỏng và cùng vị trí với viền trắng của nút (đè lên nó).
+        //    Chạy từ đỉnh theo chiều kim đồng hồ, thu dần; phần đã hết trả lại viền trắng.
         val frac = (remainMs.toFloat() / cdTotal).coerceIn(0f, 1f)
         if (frac > 0f) {
-            delayEdge.strokeWidth = edge.strokeWidth
-            val ar = r - edge.strokeWidth / 2f
+            val ar = r - edgeW / 2f
+            delayEdge.strokeWidth = edgeW
+            delayEdge.alpha = (255 * k).toInt()
             delayBox.set(cx - ar, cy - ar, cx + ar, cy + ar)
-            canvas.drawArc(delayBox, -90f, 360f * frac, false, delayEdge)
+            val sweep = 360f * frac
+            canvas.drawArc(delayBox, -90f, sweep, false, delayEdge)
+
+            // chấm sáng nhỏ ở đầu cung đang chạy lùi
+            val ang = Math.toRadians((-90f + sweep).toDouble())
+            delayHead.alpha = (235 * k).toInt()
+            canvas.drawCircle(
+                cx + ar * kotlin.math.cos(ang).toFloat(),
+                cy + ar * kotlin.math.sin(ang).toFloat(),
+                edgeW * 0.95f, delayHead,
+            )
         }
 
-        // Số giây còn lại: từ 10s trở lên làm tròn lên số nguyên, dưới 10s hiện 1 chữ số thập phân
+        // 3) Số giây còn lại: từ 10s trở lên làm tròn lên số nguyên (nảy nhẹ mỗi khi đổi giây),
+        //    dưới 10s hiện 1 chữ số thập phân; 3 giây cuối ngả dần sang đỏ.
         val sec = remainMs / 1000f
-        val s = if (remainMs >= 10_000L) kotlin.math.ceil(sec.toDouble()).toInt().toString()
+        val big = remainMs >= 10_000L
+        val s = if (big) kotlin.math.ceil(sec.toDouble()).toInt().toString()
         else String.format(java.util.Locale.US, "%.1f", sec)
         val maxW = r * 1.25f
         var size = r * 0.75f
         cdText.textSize = size
         val w = cdText.measureText(s)
         if (w > maxW) { size *= maxW / w; cdText.textSize = size }
+
+        var pop = 1f
+        if (big) {
+            val sinceTick = 1000L - (remainMs % 1000L).let { if (it == 0L) 1000L else it }
+            if (sinceTick in 0..180) { val t = 1f - sinceTick / 180f; pop = 1f + 0.12f * t * t }
+        }
+        val warn = (1f - remainMs / 3000f).coerceIn(0f, 1f)
+        cdText.color = blend(0xFFFFFFFF.toInt(), 0xFFFF7A7A.toInt(), warn)
+        cdText.alpha = (255 * k).toInt()
+        cdText.setShadowLayer(r * 0.10f, 0f, r * 0.03f, ((150 * k).toInt() shl 24))
+        canvas.save()
+        canvas.scale(pop, pop, cx, cy)
         canvas.drawText(s, cx, cy - (cdText.ascent() + cdText.descent()) / 2f, cdText)
+        canvas.restore()
 
         postInvalidateOnAnimation()
+    }
+
+    private fun blend(from: Int, to: Int, t: Float): Int {
+        fun ch(sh: Int) = (((from shr sh) and 0xFF) + ((((to shr sh) and 0xFF) - ((from shr sh) and 0xFF)) * t)).toInt()
+        return (0xFF shl 24) or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
     }
 
     private fun pulseReady() {
