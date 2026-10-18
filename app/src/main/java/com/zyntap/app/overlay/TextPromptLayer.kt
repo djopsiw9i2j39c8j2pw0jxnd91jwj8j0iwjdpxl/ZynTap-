@@ -6,6 +6,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.text.InputFilter
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -98,11 +99,14 @@ class TextPromptLayer(
         }
     }
 
-    fun show(title: String, initial: String, maxLen: Int, onDone: (String) -> Unit) {
+    /** [numeric] = bàn phím số (cho phép dấu thập phân), dùng để nhập thời gian. */
+    fun show(title: String, initial: String, maxLen: Int, numeric: Boolean = false, onDone: (String) -> Unit) {
         if (shown) return
         shown = true
         this.onDone = onDone
         titleText.text = title
+        input.inputType = if (numeric) InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        else InputType.TYPE_CLASS_TEXT
         input.filters = arrayOf(InputFilter.LengthFilter(maxLen))
         input.setText(initial)
         input.setSelection(input.text.length)

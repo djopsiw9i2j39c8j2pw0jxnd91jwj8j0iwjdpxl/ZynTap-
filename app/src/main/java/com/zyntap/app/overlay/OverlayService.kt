@@ -161,6 +161,8 @@ class OverlayService : Service() {
             else pointRunner.cancelTouch(button.id)
         }
         circles.onCancel = { id -> pointRunner.cancelTouch(id) }
+        // Delay Mode chỉ đếm ngược khi nút thật sự click được (không phải lúc đang chỉnh nút / nhập liệu / chọn điểm)
+        circles.canFire = { !pointPicker.isShowing && !editLock && !inputActive }
         startForegroundWithNotification()
     }
 

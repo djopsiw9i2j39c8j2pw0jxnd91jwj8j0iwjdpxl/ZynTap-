@@ -7,6 +7,7 @@ import android.graphics.DashPathEffect
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.SystemClock
@@ -60,7 +61,37 @@ class MainButtonView(context: Context) : View(context) {
             invalidate()
         }
 
+    // ---- Delay Mode: lớp tối + số đếm ngược ---------------------------------
+
+    private var cdEnd = 0L      // uptimeMillis lúc hết đếm ngược (0 = không đếm)
+    private var cdTotal = 1L
+
+    /** Bắt đầu đếm ngược [totalMs]: nút phủ lớp tối trong viền, có số giây còn lại và vòng cung thu dần. */
+    fun startCountdown(totalMs: Long) {
+        cdTotal = totalMs.coerceAtLeast(1L)
+        cdEnd = SystemClock.uptimeMillis() + cdTotal
+        invalidate()
+    }
+
+    fun stopCountdown() {
+        if (cdEnd == 0L) return
+        cdEnd = 0L
+        invalidate()
+    }
+
     private val d = UiScale.density(resources)
+    private val dim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = 0xCC05080F.toInt() }
+    private val arc = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        color = 0xFFFFB84D.toInt()
+    }
+    private val arcBox = RectF()
+    private val cdText = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFFFFF.toInt()
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+    }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1.5f * d }
     private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -114,7 +145,14 @@ class MainButtonView(context: Context) : View(context) {
         val r = minOf(width, height) / 2f - ringPad
         if (r <= 0f) return
         val a = maxOf(fillPct, minPct) / 100f
-        if (a <= 0f && !editing) return // 0% và menu đóng: nút vô hình hoàn toàn (vẫn nhận chạm)
+        val now = SystemClock.uptimeMillis()
+        val counting = cdEnd != 0L && now < cdEnd
+        if (cdEnd != 0L && !counting) {
+            // Hết đếm ngược: nháy nhẹ cho biết đã bấm lại được
+            cdEnd = 0L
+            post { pulseReady() }
+        }
+        if (a <= 0f && !editing && !counting) return // 0% và menu đóng: nút vô hình hoàn toàn (vẫn nhận chạm)
 
         // thân nút: gradient xanh, độ đặc theo [fillPct]
         val key = r
@@ -140,6 +178,8 @@ class MainButtonView(context: Context) : View(context) {
             canvas.restore()
         }
 
+        if (counting) drawCountdown(canvas, cx, cy, r, cdEnd - now)
+
         if (editing) {
             val rr = r + ringPad * 0.55f
             glow.color = CYAN
@@ -150,6 +190,41 @@ class MainButtonView(context: Context) : View(context) {
             canvas.drawCircle(cx, cy, rr, ring)
             canvas.restore()
         }
+    }
+
+    private fun drawCountdown(canvas: Canvas, cx: Float, cy: Float, r: Float, remainMs: Long) {
+        // Lớp tối nằm TRONG viền: viền trắng của nút vẫn lộ ra
+        canvas.drawCircle(cx, cy, r - edge.strokeWidth, dim)
+
+        // Vòng cung màu cam chạy dọc mép trong, thu dần theo thời gian còn lại
+        val sw = (r * 0.11f).coerceIn(2f * d, 5f * d)
+        arc.strokeWidth = sw
+        val ar = r - edge.strokeWidth - sw * 0.9f
+        if (ar > 0f) {
+            arcBox.set(cx - ar, cy - ar, cx + ar, cy + ar)
+            canvas.drawArc(arcBox, -90f, 360f * (remainMs.toFloat() / cdTotal).coerceIn(0f, 1f), false, arc)
+        }
+
+        // Số giây còn lại: từ 10s trở lên làm tròn lên số nguyên, dưới 10s hiện 1 chữ số thập phân
+        val sec = remainMs / 1000f
+        val s = if (remainMs >= 10_000L) kotlin.math.ceil(sec.toDouble()).toInt().toString()
+        else String.format(java.util.Locale.US, "%.1f", sec)
+        val maxW = r * 1.25f
+        var size = r * 0.75f
+        cdText.textSize = size
+        val w = cdText.measureText(s)
+        if (w > maxW) { size *= maxW / w; cdText.textSize = size }
+        canvas.drawText(s, cx, cy - (cdText.ascent() + cdText.descent()) / 2f, cdText)
+
+        postInvalidateOnAnimation()
+    }
+
+    private fun pulseReady() {
+        if (!isAttachedToWindow || pressedVisual) return
+        animate().cancel()
+        animate().scaleX(1.18f).scaleY(1.18f).setDuration(110L).withEndAction {
+            animate().scaleX(1f).scaleY(1f).setDuration(170L).start()
+        }.start()
     }
 
     /**
@@ -230,10 +305,54 @@ class MainButtonOverlay(
     var onAction: ((MainButton, Boolean) -> Unit)? = null
     var onCancel: ((Int) -> Unit)? = null
 
+    /** false = lúc này nút không thật sự click được (menu đang mở / đang chỉnh...) nên Delay Mode không đếm ngược. */
+    var canFire: (() -> Boolean)? = null
+
     private class Entry(val view: MainButtonView, val params: WindowManager.LayoutParams, var addedAt: Long)
 
     private val entries = HashMap<Int, Entry>()
     private var editingId: Int? = null
+
+    // ---- Delay Mode ---------------------------------------------------------
+
+    private val cooldownEnd = HashMap<Int, Long>()   // id nút -> uptimeMillis lúc hết khoá
+    private val blockedDown = HashSet<Int>()          // nút có lần chạm xuống bị chặn (nhả ra cũng bỏ qua)
+
+    private fun isBlocked(b: MainButton) =
+        b.delayActive && editingId != b.id && (cooldownEnd[b.id] ?: 0L) > SystemClock.uptimeMillis()
+
+    private fun startCooldown(b: MainButton) {
+        if (canFire?.invoke() == false) return
+        cooldownEnd[b.id] = SystemClock.uptimeMillis() + b.delayMs
+        entries[b.id]?.view?.startCountdown(b.delayMs.toLong())
+    }
+
+    private fun clearCooldown(id: Int) {
+        cooldownEnd.remove(id)
+        blockedDown.remove(id)
+        entries[id]?.view?.stopCountdown()
+    }
+
+    /** Ngón chạm xuống nút. false = đang đếm ngược (Delay Mode) -> chặn, không tính là click. */
+    private fun fireDown(b: MainButton): Boolean {
+        if (isBlocked(b)) { blockedDown.add(b.id); return false }
+        blockedDown.remove(b.id)
+        onAction?.invoke(b, true)
+        if (b.delayActive && b.mode == MainButton.MODE_TAP) startCooldown(b) // Nhấn: khoá ngay sau click
+        return true
+    }
+
+    /** Ngón nhả khỏi nút. */
+    private fun fireUp(b: MainButton) {
+        if (blockedDown.remove(b.id)) return // lần chạm này đã bị chặn từ lúc xuống
+        onAction?.invoke(b, false)
+        if (b.delayActive && b.mode == MainButton.MODE_RELEASE) startCooldown(b) // Thả: khoá sau khi thả
+    }
+
+    private fun notifyCancel(id: Int) {
+        blockedDown.remove(id)
+        onCancel?.invoke(id)
+    }
 
     /** Ngón (slot input_event) đang đặt trên nút chạm xuyên: slot -> id nút. */
     private val watched = HashMap<Int, Int>()
@@ -392,13 +511,12 @@ class MainButtonOverlay(
             val id = buttonAt(x, y) ?: return
             val b = repo.find(id) ?: return
             watched[slot] = id
-            entries[id]?.view?.pressedVisual = true
-            onAction?.invoke(b, true)
+            entries[id]?.view?.pressedVisual = fireDown(b) // bị Delay Mode chặn thì không hiện hiệu ứng nhấn
         } else {
             val id = watched.remove(slot) ?: return
             entries[id]?.view?.pressedVisual = watched.containsValue(id)
             val b = repo.find(id) ?: return
-            if (!watched.containsValue(id)) onAction?.invoke(b, false)
+            if (!watched.containsValue(id)) fireUp(b)
         }
     }
 
@@ -408,7 +526,7 @@ class MainButtonOverlay(
         watched.clear()
         ids.forEach { id ->
             entries[id]?.view?.pressedVisual = false
-            onCancel?.invoke(id)
+            notifyCancel(id)
         }
     }
 
@@ -449,7 +567,8 @@ class MainButtonOverlay(
     }
 
     private fun removeView(id: Int) {
-        onCancel?.invoke(id)
+        cooldownEnd.remove(id)
+        notifyCancel(id)
         watched.entries.removeAll { it.value == id }
         val e = entries.remove(id) ?: return
         e.view.animate().cancel()
@@ -469,7 +588,8 @@ class MainButtonOverlay(
     }
 
     fun onRemoved(id: Int) {
-        onCancel?.invoke(id)
+        cooldownEnd.remove(id)
+        notifyCancel(id)
         watched.entries.removeAll { it.value == id }
         if (editingId == id) editingId = null
         refreshWatcher()
@@ -481,7 +601,8 @@ class MainButtonOverlay(
 
     /** Tên/độ mờ/size vừa đổi trong menu -> cập nhật ngay trên nút thật. */
     fun onChanged(b: MainButton) {
-        onCancel?.invoke(b.id)
+        clearCooldown(b.id) // đổi cài đặt (kể cả thời gian delay) -> bắt đầu lại từ đầu
+        notifyCancel(b.id)
         watched.entries.removeAll { it.value == b.id }
         val e = entries[b.id] ?: return
         bind(e.view, b)
@@ -510,7 +631,7 @@ class MainButtonOverlay(
 
     /** Vào/ra trạng thái chỉnh sửa của một nút (null = không nút nào đang chỉnh). */
     fun setEditing(id: Int?) {
-        if (id != null) onCancel?.invoke(id)
+        if (id != null) { clearCooldown(id); notifyCancel(id) }
         editingId = id
         entries.forEach { (k, e) ->
             e.view.editing = k == id
@@ -559,7 +680,7 @@ class MainButtonOverlay(
 
     fun cancelTouches() {
         cancelWatched()
-        entries.forEach { (id, e) -> e.view.pressedVisual = false; onCancel?.invoke(id) }
+        entries.forEach { (id, e) -> e.view.pressedVisual = false; notifyCancel(id) }
     }
 
     fun removeAll() {
@@ -585,8 +706,7 @@ class MainButtonOverlay(
                     downX = e.rawX; downY = e.rawY
                     startX = p.x; startY = p.y
                     moved = false
-                    v.pressedVisual = true
-                    if (!editing) onAction?.invoke(b, true)
+                    v.pressedVisual = if (!editing) fireDown(b) else true
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -614,7 +734,7 @@ class MainButtonOverlay(
                     if (pointerId == e.getPointerId(e.actionIndex)) {
                         pointerId = -1
                         v.pressedVisual = false
-                        if (editing) { if (moved) { repo.save(); onDrag?.invoke(false) } } else onAction?.invoke(b, false)
+                        if (editing) { if (moved) { repo.save(); onDrag?.invoke(false) } } else fireUp(b)
                     }
                     true
                 }
@@ -622,7 +742,7 @@ class MainButtonOverlay(
                     pointerId = -1
                     v.pressedVisual = false
                     if (editing && moved) { repo.save(); onDrag?.invoke(false) }
-                    onCancel?.invoke(id)
+                    notifyCancel(id)
                     true
                 }
                 MotionEvent.ACTION_POINTER_DOWN -> true
