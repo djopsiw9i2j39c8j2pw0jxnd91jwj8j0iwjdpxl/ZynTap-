@@ -343,6 +343,10 @@ class TouchWatcher(
         private set
     @Volatile private var proxyFails = 0
     @Volatile private var fastRetry = false
+    /** Lần chạy helper vừa rồi kết thúc vì CHÍNH helper tự thoát sau khi hệ thống từ chối bơm (không phải ADB đứt). */
+    @Volatile private var lastEndInjectBail = false
+    /** Số lần liên tiếp helper tự thoát vì bị từ chối bơm (để giãn nhịp chạy lại). */
+    private var injectBailStreak = 0
     @Volatile private var lastReinjectAt = 0L
     @Volatile private var reinjectGap = REINJECT_MIN_MS // giãn dần nếu bơm lại mà vẫn lỗi, về mức đầu khi bơm được
 
@@ -545,7 +549,13 @@ class TouchWatcher(
                     val ok = runProxy(manager, dev)
                     val lived = SystemClock.elapsedRealtime() - startedAt
                     proxyFails = if (ok) 0 else proxyFails + 1
-                    if (ok) {
+                    val bailed = ok && lastEndInjectBail
+                    injectBailStreak = if (bailed && lived < HEALTHY_LIVED_MS) injectBailStreak + 1 else 0
+                    if (bailed) {
+                        // ADB vẫn sống: hệ thống từ chối nhận cảm ứng bơm vào. Chạy lại dồn dập vô ích và làm cảm ứng chớp tắt.
+                        DebugLog.w("Bơm", "Helper tự thoát vì hệ thống từ chối bơm cảm ứng (lần liên tiếp $injectBailStreak) — ADB vẫn nối, không phải mất mạng/ADB")
+                        setStage("Hệ thống từ chối bơm cảm ứng, chờ rồi thử lại", log = false)
+                    } else if (ok) {
                         DebugLog.w("Bơm", "Helper đã dừng (mất ADB / bị đóng) -> chạy lại")
                         setStage("Helper dừng, chuẩn bị chạy lại", log = false)
                     }
@@ -558,7 +568,13 @@ class TouchWatcher(
                     // ngón đang đè (vuốt cam) không ai phát lại nên bị đơ; chờ thêm RETRY_MS (3s) chỉ kéo dài cú đơ đó.
                     // Helper chết nhanh sau khi lên (chập chờn liên tục) thì vẫn giãn nhịp như cũ để không bơm lại dồn dập.
                     val quick = fastRetry || (ok && lived > HEALTHY_LIVED_MS)
-                    delay(if (quick) FAST_RETRY_MS else RETRY_MS)
+                    val wait = when {
+                        // Bị từ chối bơm liên tiếp: giãn dần 3s, 6s, 12s, 24s, tối đa 30s
+                        injectBailStreak > 0 -> minOf(RETRY_MS shl (injectBailStreak - 1).coerceAtMost(4), INJECT_BAIL_MAX_MS)
+                        quick -> FAST_RETRY_MS
+                        else -> RETRY_MS
+                    }
+                    delay(wait)
                     fastRetry = false
                     continue
                 }
@@ -635,6 +651,8 @@ class TouchWatcher(
         link = l
         var sawReady = false
         var unknownLines = 0
+        var injectBailed = false
+        lastEndInjectBail = false
         // Helper không báo READY trong thời hạn (treo / app_process không chạy) -> đóng luồng để vòng thử lại, không đứng im
         val readyGuard = launch(Dispatchers.IO) {
             delay(READY_TIMEOUT_MS)
@@ -685,6 +703,7 @@ class TouchWatcher(
                                 // Helper báo cả thông tin bình thường lẫn sự cố thật. Chỉ dòng có dấu hiệu sự cố mới là cảnh báo, còn lại là log thường.
                                 val msg = line.substring(4).trim()
                                 val lower = msg.lowercase()
+                                if (lower.contains("inject hỏng liên tiếp")) injectBailed = true
                                 val bad = listOf("fail", "lỗi", "hỏng", "watchdog", "bad cmd", "read:", "inject:", "grab:", "dropped", "dựng lại")
                                     .any { lower.contains(it) }
                                 if (bad) DebugLog.w("Bơm", "Helper báo: $msg") else DebugLog.i("Bơm", "Helper báo: $msg")
@@ -698,8 +717,8 @@ class TouchWatcher(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // ADB đứt -> helper tự thoát, kernel tự nhả grab
-            DebugLog.w("Bơm", "Luồng helper bị ngắt (ADB đứt?) — helper tự thoát và nhả cảm ứng", e)
+            // Helper tự thoát sau khi bị từ chối bơm thì luồng đóng là HỆ QUẢ, không phải ADB đứt
+            if (!injectBailed) DebugLog.w("Bơm", "Luồng helper bị ngắt (ADB đứt?) — helper tự thoát và nhả cảm ứng", e)
         } finally {
             beat.cancel()
             readyGuard.cancel()
@@ -708,6 +727,7 @@ class TouchWatcher(
             runCatching { s.close() }
             if (stream === s) stream = null
             main.post { sink.onLost() }
+            lastEndInjectBail = injectBailed
         }
         sawReady
     }
@@ -848,6 +868,7 @@ class TouchWatcher(
         private const val RETRY_MS = 3_000L
         private const val MAX_PROXY_FAILS = 3
         private const val FAST_RETRY_MS = 400L
+        private const val INJECT_BAIL_MAX_MS = 30_000L
         /** Helper sống quá chừng này mới coi là "đang chạy ổn" (rớt thì chạy lại nhanh). */
         private const val HEALTHY_LIVED_MS = 8_000L
         private const val READY_TIMEOUT_MS = 10_000L
