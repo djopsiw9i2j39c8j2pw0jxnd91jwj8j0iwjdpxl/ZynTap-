@@ -875,7 +875,7 @@ public final class InputProxy {
                 while (root.getCause() != null && root.getCause() != root) root = root.getCause();
                 log("inject fail: " + t + (root != t ? " <- " + root : "")
                     + " [action=" + (p.ev instanceof MotionEvent ? ((MotionEvent) p.ev).getActionMasked() : -1)
-                    + " display=" + p.ev.getDisplayId() + " sdk=" + Build.VERSION.SDK_INT + "]");
+                    + " sdk=" + Build.VERSION.SDK_INT + "]");
             } finally {
                 p.ev.recycle();
             }
