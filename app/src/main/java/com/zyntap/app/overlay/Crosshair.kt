@@ -290,7 +290,12 @@ class CrosshairOverlay(
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            ).apply { gravity = Gravity.TOP or Gravity.START }
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                // Cửa sổ NOT_TOUCHABLE đục hơn 0.8 làm Android 12+ CHẶN mọi chạm rơi vào khung tâm (ngón chạm ngay tâm bị
+                // rớt, kẹt tới khi nhấc tay). Nút main đã dùng mức này; tâm ảo trước đây để alpha mặc định 1.0.
+                alpha = 0.8f // = MainButtonOverlay.PASS_THROUGH_ALPHA (mức tối đa hệ thống cho phép)
+            }
             place(np)
             val nv = CrosshairView(ctx).apply { spec = s; isClickable = false; isFocusable = false }
             addedAt = SystemClock.uptimeMillis()

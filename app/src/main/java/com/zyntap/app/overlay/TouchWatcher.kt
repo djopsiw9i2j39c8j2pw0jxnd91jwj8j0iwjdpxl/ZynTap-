@@ -466,6 +466,15 @@ class TouchWatcher(
         return true
     }
 
+    /**
+     * Bảo helper đổ nhật ký cảm ứng của nó (trạng thái, các va chạm ngón thật/click, inject lỗi, ~150 sự kiện gần nhất)
+     * vào Debug log. Bấm "Kiểm tra" NGAY sau khi bị kẹt rồi "Sao chép" để gửi người sửa lỗi.
+     */
+    fun dumpTrace() {
+        val l = link ?: return
+        scope.launch(Dispatchers.IO) { runCatching { l.send("DUMP") } }
+    }
+
     @Suppress("DEPRECATION")
     private fun rotation(): Int = runCatching { wm.defaultDisplay.rotation }.getOrDefault(Surface.ROTATION_0)
 

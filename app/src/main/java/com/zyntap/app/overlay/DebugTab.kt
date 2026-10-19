@@ -210,6 +210,8 @@ class DebugTab(
     /** Ghi một dòng trạng thái hiện tại vào log (ADB, helper bơm, quyền...). */
     private fun diagnose() {
         DebugLog.i("Kiểm tra", runCatching { info() }.getOrElse { "Lỗi khi đọc trạng thái: $it" }.lines().joinToString(" | "))
+        // Helper đổ nhật ký cảm ứng (chạy nền, vài trăm ms sau dòng log mới hiện) -> sau đó "Sao chép"
+        runCatching { TouchWatcher.current?.dumpTrace() }
         refresh(forceBottom = true)
     }
 }
