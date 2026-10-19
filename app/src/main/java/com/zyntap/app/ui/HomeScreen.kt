@@ -111,7 +111,7 @@ private fun StatusCard(
             text = when {
                 ready -> "Đã kết nối Wi-Fi · ADB đã ghép nối"
                 !wifiConnected && wasPaired ->
-                    if (mobileData) "Chưa kết nối Wi-Fi (đang dùng dữ liệu di động) — nối Wi-Fi rồi bật lại gỡ lỗi Wi-Fi"
+                    if (mobileData) "Đang dùng dữ liệu di động — nối Wi-Fi rồi bật lại gỡ lỗi Wi-Fi"
                     else "Chưa kết nối Wi-Fi — nối Wi-Fi rồi bật lại gỡ lỗi Wi-Fi"
                 !wifiConnected ->
                     if (mobileData) "Chưa kết nối Wi-Fi — đang dùng dữ liệu di động"
