@@ -2,6 +2,7 @@ package com.zyntap.app.shell;
 
 import android.os.SystemClock;
 import android.view.InputDevice;
+import android.os.Build;
 import android.view.InputEvent;
 import android.view.MotionEvent;
 
@@ -870,7 +871,11 @@ public final class InputProxy {
                 injector.inject(p.ev);
                 ok = true;
             } catch (Throwable t) {
-                log("inject fail: " + t);
+                Throwable root = t;
+                while (root.getCause() != null && root.getCause() != root) root = root.getCause();
+                log("inject fail: " + t + (root != t ? " <- " + root : "")
+                    + " [action=" + (p.ev instanceof MotionEvent ? ((MotionEvent) p.ev).getActionMasked() : -1)
+                    + " display=" + p.ev.getDisplayId() + " sdk=" + Build.VERSION.SDK_INT + "]");
             } finally {
                 p.ev.recycle();
             }
@@ -1133,6 +1138,11 @@ public final class InputProxy {
         private final Method method;
         private final boolean withUid;
         private Method setDisplay;
+        private volatile boolean altDisplay = false;
+
+        private Object call(InputEvent ev) throws Exception {
+            return withUid ? method.invoke(target, ev, 0, -1) : method.invoke(target, ev, 0);
+        }
 
         Injector() throws Exception {
             Object t = null; Method m = null; boolean uid = false;
@@ -1181,11 +1191,23 @@ public final class InputProxy {
         @Override
         public void inject(InputEvent ev) throws Exception {
             if (setDisplay != null) {
-                try { setDisplay.invoke(ev, 0); } catch (Throwable ignored) { }
+                try { setDisplay.invoke(ev, altDisplay ? -1 : 0); } catch (Throwable ignored) { }
             }
             // mode 0 = ASYNC, uid -1 = INVALID_UID
-            Object r = withUid ? method.invoke(target, ev, 0, -1) : method.invoke(target, ev, 0);
-            if (r instanceof Boolean && !((Boolean) r)) throw new IllegalStateException("hệ thống từ chối sự kiện");
+            Object r = call(ev);
+            if (r instanceof Boolean && !((Boolean) r)) {
+                // Bị từ chối với display 0: thử lại để hệ thống tự chọn màn hình mặc định (display chưa gán).
+                if (setDisplay != null && !altDisplay) {
+                    try { setDisplay.invoke(ev, -1); } catch (Throwable ignored) { }
+                    Object r2 = call(ev);
+                    if (r2 instanceof Boolean && ((Boolean) r2)) {
+                        altDisplay = true;
+                        log("inject: display 0 bị từ chối, dùng display mặc định thì được -> giữ cách này");
+                        return;
+                    }
+                }
+                throw new IllegalStateException("hệ thống từ chối sự kiện");
+            }
         }
     }
 }
