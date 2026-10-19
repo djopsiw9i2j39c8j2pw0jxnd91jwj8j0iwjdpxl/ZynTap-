@@ -62,11 +62,6 @@ public final class InputProxy {
     private static final int ABS_MT_TRACKING_ID = 0x39, ABS_MT_PRESSURE = 0x3a;
     /** _IOW('E', 0x90, int) */
     private static final int EVIOCGRAB = 0x40044590;
-    /**
-     * MotionEvent.FLAG_CANCELED (ẩn khỏi SDK công khai nên ghi số). Android 15+ kiểm tra từng sự kiện bơm vào (InputVerifier):
-     * ACTION_CANCEL thiếu cờ này bị TỪ CHỐI (injectInputEvent trả false) -> bước dọn/dựng lại luồng chạm của helper hỏng theo.
-     */
-    private static final int FLAG_CANCELED = 0x20;
 
     private static final int REAL_SLOTS = 16;          // số slot ngón thật theo dõi
     /** Hệ thống chỉ nhận tối đa chừng này pointer trong một MotionEvent (MAX_POINTERS của InputDispatcher). */
@@ -103,6 +98,8 @@ public final class InputProxy {
     /** Hệ thống vừa từ chối/lỡ một sự kiện DOWN/UP -> luồng chạm bên hệ thống đã lệch khỏi [shown]. Chỉ đụng dưới LOCK. */
     private static boolean desync = false;
     private static long lastRebuildAt = 0;
+    /** Đang bỏ các sự kiện sau SYN_DROPPED cho tới SYN_REPORT kế tiếp. Chỉ đụng dưới LOCK. */
+    private static boolean dropping = false;
     /**
      * Sau SYN_DROPPED không biết kernel đang đứng ở slot nào (lệnh ABS_MT_SLOT có thể nằm trong gói bị bỏ, mà kernel chỉ
      * phát lại ABS_MT_SLOT khi slot ĐỔI) -> toạ độ đến sau bị ghi nhầm sang ngón khác. Cờ này bật tới khi gặp ABS_MT_SLOT kế tiếp.
@@ -135,177 +132,6 @@ public final class InputProxy {
         t.setDaemon(true);
         outThreadOn = true;
         t.start();
-    }
-
-    // ---- nhật ký chẩn đoán (đọc bằng lệnh DUMP / nút "Kiểm tra", tự đổ khi inject lỗi) ----------------
-    private static final int TRACE_N = 1500, NOTE_N = 200;
-    private static final String[] traceBuf = new String[TRACE_N];
-    private static final String[] noteBuf = new String[NOTE_N];
-    private static int traceHead = 0, traceCount = 0, noteHead = 0, noteCount = 0, traceMoves = 0;
-    private static final long T0 = SystemClock.uptimeMillis();
-    private static long lastAutoDumpAt = 0;
-    private static int injOk = 0, injFail = 0, injSlow = 0, rebuilds = 0, collisions = 0;
-    private static long injMaxMs = 0;
-    private static volatile long lastRawAt = 0;
-    private static volatile int rawEvents = 0;
-
-    private static void putTrace(String x) { traceBuf[traceHead] = x; traceHead = (traceHead + 1) % TRACE_N; if (traceCount < TRACE_N) traceCount++; }
-
-    private static void flushMovesLocked(long t) {
-        if (traceMoves > 0) { putTrace(t + " MOVE x" + traceMoves); traceMoves = 0; }
-    }
-
-    /** Một dòng thường (chạm xuống / nhả / click...). MOVE không ghi từng cái, chỉ đếm. */
-    private static void trace(String s) {
-        synchronized (traceBuf) {
-            long t = SystemClock.uptimeMillis() - T0;
-            flushMovesLocked(t);
-            putTrace(t + " " + s);
-        }
-    }
-
-    private static void traceMove() { synchronized (traceBuf) { traceMoves++; } }
-
-    /** Dòng ĐÁNG CHÚ Ý (va chạm ngón thật/click, inject lỗi, dựng lại luồng...): ghi vào cả hai nhật ký, nhật ký này sống lâu hơn. */
-    private static void note(String s) {
-        synchronized (traceBuf) {
-            long t = SystemClock.uptimeMillis() - T0;
-            flushMovesLocked(t);
-            String line = t + " " + s;
-            putTrace(line);
-            noteBuf[noteHead] = line; noteHead = (noteHead + 1) % NOTE_N; if (noteCount < NOTE_N) noteCount++;
-        }
-    }
-
-    private static String actionName(int a) {
-        switch (a) {
-            case MotionEvent.ACTION_DOWN: return "DOWN";
-            case MotionEvent.ACTION_UP: return "UP";
-            case MotionEvent.ACTION_MOVE: return "MOVE";
-            case MotionEvent.ACTION_CANCEL: return "CANCEL";
-            case MotionEvent.ACTION_POINTER_DOWN: return "PDOWN";
-            case MotionEvent.ACTION_POINTER_UP: return "PUP";
-            default: return "A" + a;
-        }
-    }
-
-    /** Gọi dưới LOCK: các ngón [shown] (R = ngón thật + slot, T = click ảo). */
-    private static String shownDesc() {
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < shown.size(); i++) {
-            Finger f = shown.get(i);
-            if (i > 0) sb.append(' ');
-            sb.append(f.real() ? "R" : "T").append(f.pid);
-            if (f.real()) sb.append("/s").append(f.slot);
-            sb.append('(').append((int) f.sent.x).append(',').append((int) f.sent.y).append(')');
-        }
-        return sb.append(']').toString();
-    }
-
-    private static String describe(MotionEvent ev) {
-        StringBuilder sb = new StringBuilder(actionName(ev.getActionMasked()));
-        int a = ev.getActionMasked();
-        if (a == MotionEvent.ACTION_POINTER_DOWN || a == MotionEvent.ACTION_POINTER_UP) sb.append('#').append(ev.getActionIndex());
-        sb.append(" ids=");
-        for (int i = 0; i < ev.getPointerCount(); i++) sb.append(i > 0 ? "," : "").append(ev.getPointerId(i));
-        return sb.toString();
-    }
-
-    private static void dumpTrace(String why, int max) {
-        String sh, sys;
-        long rawAgo;
-        synchronized (LOCK) {
-            sh = shownDesc();
-            StringBuilder ra = new StringBuilder();
-            for (int i = 0; i < REAL_SLOTS; i++) if (rawActive[i]) ra.append(ra.length() > 0 ? "," : "").append(i);
-            sh += " realActive=[" + ra + "] swallowed=" + java.util.Arrays.toString(java.util.Arrays.copyOf(swallowed, 4))
-                    + " injecting=" + injecting + " tapQ=" + tapQ.size() + " curTap=" + (curTap != null) + " desync=" + desync;
-        }
-        synchronized (INJ_LOCK) {
-            StringBuilder sb = new StringBuilder("[");
-            for (int i = 0; i < shN; i++) sb.append(i > 0 ? " " : "").append(shId[i]);
-            sys = sb.append(']').toString() + " hàng-đợi=" + INJQ.size();
-        }
-        rawAgo = lastRawAt == 0 ? -1 : SystemClock.uptimeMillis() - lastRawAt;
-        ArrayList<String> lines = new ArrayList<>();
-        ArrayList<String> notes = new ArrayList<>();
-        synchronized (traceBuf) {
-            flushMovesLocked(SystemClock.uptimeMillis() - T0);
-            int n = Math.min(max, traceCount);
-            for (int i = n; i >= 1; i--) lines.add(traceBuf[(traceHead - i + TRACE_N) % TRACE_N]);
-            int m = Math.min(80, noteCount);
-            for (int i = m; i >= 1; i--) notes.add(noteBuf[(noteHead - i + NOTE_N) % NOTE_N]);
-        }
-        log("T ===== NHẬT KÝ CẢM ỨNG (" + why + ") bây giờ=" + (SystemClock.uptimeMillis() - T0) + " =====");
-        log("T trạng thái: helper-thấy=" + sh + " | hệ-thống-đã-nhận-ids=" + sys
-                + " | inject ok=" + injOk + " lỗi=" + injFail + " chậm(>25ms)=" + injSlow + " maxInject=" + injMaxMs + "ms"
-                + " | dựng-lại=" + rebuilds + " va-chạm=" + collisions
-                + " | sự-kiện-thô-gần-nhất=" + rawAgo + "ms trước (" + rawEvents + " cái)");
-        rawEvents = 0;
-        packLog("T !", notes);
-        packLog("T .", lines);
-        log("T ===== HẾT NHẬT KÝ =====");
-    }
-
-    private static void packLog(String tag, ArrayList<String> lines) {
-        StringBuilder sb = new StringBuilder(tag);
-        int k = 0;
-        for (String l : lines) {
-            sb.append(k == 0 ? " " : " | ").append(l);
-            if (++k == 4) { log(sb.toString()); sb.setLength(0); sb.append(tag); k = 0; }
-        }
-        if (k > 0) log(sb.toString());
-    }
-
-    // ---- hệ thống ĐÃ nhận những ngón nào (chỉ đụng dưới INJ_LOCK) -----------------------------------
-    // Cập nhật CHỈ khi injectInputEvent thành công. ACTION_CANCEL / dựng lại luồng phải dựa vào đây, không phải vào [shown]:
-    // [shown] là cái helper MUỐN, còn hệ thống (và InputVerifier của Android 15+) chỉ biết những sự kiện nó đã chấp nhận.
-    private static final int[] shId = new int[MAX_POINTERS + 1];
-    private static final float[] shX = new float[MAX_POINTERS + 1], shY = new float[MAX_POINTERS + 1];
-    private static int shN = 0;
-    private static long shDownTime = 0;
-
-    private static void updateShadowLocked(MotionEvent ev) {
-        int act = ev.getActionMasked();
-        int n = Math.min(ev.getPointerCount(), MAX_POINTERS);
-        switch (act) {
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_CANCEL:
-                shN = 0;
-                break;
-            case MotionEvent.ACTION_POINTER_UP: {
-                int skip = ev.getActionIndex(), k = 0;
-                for (int i = 0; i < n; i++) {
-                    if (i == skip) continue;
-                    shId[k] = ev.getPointerId(i); shX[k] = ev.getX(i); shY[k] = ev.getY(i); k++;
-                }
-                shN = k;
-                break;
-            }
-            default: // DOWN, POINTER_DOWN, MOVE: sự kiện mang đủ mọi ngón đang chạm
-                if (act == MotionEvent.ACTION_DOWN) shDownTime = ev.getDownTime();
-                for (int i = 0; i < n; i++) { shId[i] = ev.getPointerId(i); shX[i] = ev.getX(i); shY[i] = ev.getY(i); }
-                shN = n;
-                break;
-        }
-    }
-
-    /** ACTION_CANCEL (có FLAG_CANCELED) cho đúng các ngón hệ thống đang thấy; null nếu hệ thống không thấy ngón nào. Gọi dưới INJ_LOCK. */
-    private static MotionEvent cancelFromShadowLocked() {
-        int n = shN;
-        if (n <= 0) return null;
-        MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[n];
-        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[n];
-        for (int i = 0; i < n; i++) {
-            MotionEvent.PointerProperties pp = new MotionEvent.PointerProperties();
-            pp.id = shId[i];
-            pp.toolType = MotionEvent.TOOL_TYPE_FINGER;
-            MotionEvent.PointerCoords pc = new MotionEvent.PointerCoords();
-            pc.x = shX[i]; pc.y = shY[i]; pc.pressure = 1f;
-            props[i] = pp; coords[i] = pc;
-        }
-        return MotionEvent.obtain(shDownTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_CANCEL, n, props, coords,
-                0, 0, 1f, 1f, deviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, FLAG_CANCELED);
     }
 
     // Ngón thật (thô, theo slot) — chỉ đụng dưới LOCK
@@ -345,15 +171,6 @@ public final class InputProxy {
     private static final int[] lastRepX = new int[REAL_SLOTS];
     private static final int[] lastRepY = new int[REAL_SLOTS];
     private static int curSlot = 0;
-    /** Ngón thật đang chờ click ảo nhả mới được chạm xuống (xem [sync] bước 3). 0 = không chờ, -1 = đã hết hạn chờ. Chỉ đụng dưới LOCK. */
-    private static final long[] deferSince = new long[REAL_SLOTS];
-    private static final P[] deferP = new P[REAL_SLOTS];          // toạ độ cuối của ngón đang chờ
-    private static final long[] lateUntil = new long[REAL_SLOTS];  // ngón chờ rồi nhấc: giữ chạm tới lúc này
-    private static boolean deferActive = false;
-    /** Ngón thật nhấc trong lúc chờ: sau khi chạm xuống vẫn giữ chừng này rồi mới nhả. */
-    private static final long LATE_HOLD_MS = 25;
-    /** Chờ click nhả tối đa chừng này; click chỉ giữ ~30ms nên bình thường chỉ chờ vài ms. */
-    private static final long REAL_DEFER_MAX_MS = 60;
 
     /** Một pointer đã/đang gửi cho hệ thống. */
     private static final class P {
@@ -521,9 +338,6 @@ public final class InputProxy {
                     enqueueTap(x, y, hold, gap);
                     break;
                 }
-                case "DUMP":
-                    dumpTrace("theo yêu cầu", 150);
-                    break;
                 case "QUIT":
                     stopping = true;
                     shutdown();
@@ -597,62 +411,14 @@ public final class InputProxy {
         return true;
     }
 
-    /**
-     * Tấm cảm ứng đẩy sự kiện thô vào đây (gọi từ MỘT luồng đọc duy nhất).
-     *
-     * Các sự kiện của cùng một gói được gom lại và chỉ áp vào trạng thái, dưới LOCK, một lần duy nhất khi tới SYN_REPORT.
-     * Trước đây mỗi sự kiện lấy LOCK riêng, nên luồng click ({@link #pump}) có thể chen vào GIỮA gói và gọi {@link #sync}
-     * trên trạng thái nửa cũ nửa mới: ngón thật bị phát toạ độ X mới + Y cũ, hoặc chạm xuống khi áp lực / độ lớn chưa kịp tới.
-     */
+    /** Tấm cảm ứng đẩy sự kiện thô vào đây (gọi từ luồng đọc). */
     static void onEvent(int type, int code, int value) {
-        lastRawAt = SystemClock.uptimeMillis();
-        rawEvents++;
-        if (type == EV_SYN) {
-            if (code == SYN_DROPPED) {
-                // Bộ đệm cảm ứng bị tràn (hệ thống/binder chậm). Giữ nguyên trạng thái các ngón, chỉ bỏ gói dở dang;
-                // ngón nào nhấc trong lúc tràn sẽ được dọn ở BTN_TOUCH=0 / lần đổi tracking id kế tiếp.
-                // Lệnh đổi slot có thể đã nằm trong gói bị bỏ -> chưa biết slot hiện tại cho tới khi gặp ABS_MT_SLOT kế tiếp.
-                pktN = 0;
-                pktDropping = true;
-                synchronized (LOCK) { slotUnsure = true; }
-                log("SYN_DROPPED: bộ đệm cảm ứng tràn -> giữ nguyên các ngón đang chạm");
-                note("SYN_DROPPED (kernel tràn bộ đệm)");
-            } else if (code == SYN_REPORT) {
-                if (pktDropping) {
-                    // Sau SYN_DROPPED gói đang dở đã hỏng: bỏ mọi sự kiện tới hết SYN_REPORT kế tiếp rồi đọc tiếp bình thường.
-                    pktDropping = false;
-                    pktN = 0;
-                    return;
-                }
-                synchronized (LOCK) {
-                    for (int i = 0; i < pktN; i++) applyEvent(pktType[i], pktCode[i], pktValue[i]);
-                    pktN = 0;
-                    applyEvent(EV_SYN, SYN_REPORT, 0);
-                }
+        synchronized (LOCK) {
+            if (dropping) {
+                // Sau SYN_DROPPED gói đang dở đã hỏng: bỏ mọi sự kiện tới hết SYN_REPORT kế tiếp rồi đọc tiếp bình thường.
+                if (type == EV_SYN && code == SYN_REPORT) dropping = false;
+                return;
             }
-            return;
-        }
-        if (pktDropping) return;
-        if (pktN == PKT_MAX) {
-            // Gói dài bất thường: áp phần đã có (chưa sync) để không mất sự kiện.
-            synchronized (LOCK) {
-                for (int i = 0; i < pktN; i++) applyEvent(pktType[i], pktCode[i], pktValue[i]);
-            }
-            pktN = 0;
-        }
-        pktType[pktN] = type; pktCode[pktN] = code; pktValue[pktN] = value;
-        pktN++;
-    }
-
-    private static final int PKT_MAX = 1024;
-    private static final int[] pktType = new int[PKT_MAX], pktCode = new int[PKT_MAX], pktValue = new int[PKT_MAX];
-    /** Chỉ luồng đọc đụng tới 3 biến này. */
-    private static int pktN = 0;
-    private static boolean pktDropping = false;
-
-    /** Áp MỘT sự kiện vào trạng thái ngón thật. Gọi dưới LOCK, chỉ từ {@link #onEvent}. */
-    private static void applyEvent(int type, int code, int value) {
-        {
             if (type == EV_ABS) {
                 switch (code) {
                     case ABS_MT_SLOT:
@@ -706,7 +472,14 @@ public final class InputProxy {
                     }
                 }
             } else if (type == EV_SYN) {
-                if (code == SYN_REPORT) {
+                if (code == SYN_DROPPED) {
+                    // Bộ đệm cảm ứng bị tràn (hệ thống/binder chậm). Giữ nguyên trạng thái các ngón, chỉ bỏ gói dở dang;
+                    // ngón nào nhấc trong lúc tràn sẽ được dọn ở BTN_TOUCH=0 / lần đổi tracking id kế tiếp.
+                    // Lệnh đổi slot có thể đã nằm trong gói bị bỏ -> chưa biết slot hiện tại cho tới khi gặp ABS_MT_SLOT kế tiếp.
+                    dropping = true;
+                    slotUnsure = true;
+                    log("SYN_DROPPED: bộ đệm cảm ứng tràn -> giữ nguyên các ngón đang chạm");
+                } else if (code == SYN_REPORT) {
                     sync();
                     java.util.Arrays.fill(upInPacket, false);
                     btnUpInPacket = false;
@@ -876,28 +649,44 @@ public final class InputProxy {
         return -1;
     }
 
-    /** Mã pointer nhỏ nhất đang trống (như InputReader của Android tự cấp), -1 nếu hết. */
-    private static int allocPid() {
-        for (int i = 0; i < 32; i++) {
+    /**
+     * Click (ngón ảo) chỉ được cấp mã pointer từ mức này trở lên (nếu còn trống). Ngón THẬT luôn lấy mã nhỏ nhất đang trống
+     * từ 0, y hệt khi không có click. Nhờ vậy ngón vuốt cam của bạn luôn là ngón đầu (mã 0) bất kể nó chạm xuống đúng lúc
+     * click đang giữ hay đang nhả. Trước đây click chiếm mã 0 khoảng 75% thời gian (giữ 30ms trong chu kỳ 40ms) nên ngón thật
+     * lúc thì là ngón đầu, lúc thì là ngón thứ hai tuỳ khoảnh khắc chạm -> game xử lý lúc được lúc không.
+     * Đặt 0 để quay về kiểu cũ (cấp theo thứ tự chạm xuống).
+     */
+    private static final int TAP_PID_FLOOR = 2;
+
+    /** Mã pointer đang trống: ngón thật từ 0, click từ [TAP_PID_FLOOR] (hết thì lùi xuống dưới). -1 nếu hết. */
+    private static int allocPid(boolean virtual) {
+        int from = virtual ? TAP_PID_FLOOR : 0;
+        for (int i = from; i < 32; i++) {
+            if ((pidMask & (1 << i)) == 0) { pidMask |= 1 << i; return i; }
+        }
+        for (int i = 0; i < from; i++) {
             if ((pidMask & (1 << i)) == 0) { pidMask |= 1 << i; return i; }
         }
         return -1;
     }
 
-    /** Gọi dưới LOCK. Cho một ngón (thật hoặc ảo) chạm xuống: ngón thật xếp sau các ngón thật khác nhưng trước ngón ảo; ngón ảo xếp cuối. false nếu hết chỗ. */
+    /**
+     * Gọi dưới LOCK. Cho một ngón (thật hoặc ảo) chạm xuống. Danh sách [shown] luôn xếp theo mã pointer TĂNG DẦN, đúng như
+     * InputReader của Android gốc (chỉ số trong MotionEvent = thứ tự theo mã), nên ngón chạm sau có thể chen lên trước nếu mã nhỏ hơn.
+     * false nếu hết chỗ.
+     */
     private static boolean addFinger(int slot, Tap tap, P p) {
         if (shown.size() >= MAX_POINTERS) return false;
-        int pid = allocPid();
+        int pid = allocPid(tap != null);
         if (pid < 0) return false;
         if (shown.isEmpty()) downTime = SystemClock.uptimeMillis();
-        // Ngón thật luôn đứng TRƯỚC mọi ngón ảo (click): click không bao giờ ở vị trí đầu khi còn ngón thật, nên lúc click nhả
-        // (ACTION_POINTER_UP) không thể bị game hiểu là ngón chính đã nhấc. Giữa các ngón thật với nhau vẫn theo thứ tự chạm xuống.
-        int at = shown.size();
-        if (tap == null) {
-            at = 0;
-            while (at < shown.size() && shown.get(at).real()) at++;
-        }
+        int at = 0;
+        while (at < shown.size() && shown.get(at).pid < pid) at++;
         shown.add(at, new Finger(slot, tap, pid, p.copy()));
+        if (tap == null) {
+            log("ngón thật slot " + slot + " nhận pid " + pid + " chỉ số " + at + "/" + shown.size()
+                    + (curTap != null && curTap.down && !curTap.finished ? " (click đang giữ)" : ""));
+        }
         emit(shown.size() == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN, at);
         return true;
     }
@@ -918,7 +707,6 @@ public final class InputProxy {
                     downX[s] = p.x; downY[s] = p.y;
                     captureAssist(s, p.x, p.y);
                     lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
-                    trace("THÔ chạm slot " + s + " (" + lastRepX[s] + "," + lastRepY[s] + ")" + (swallowed[s] ? " NUỐT" : "") + (aMode[s] >= 0 ? " trợ-vuốt" : "") + " shown=" + shownDesc());
                     out("F " + s + " 1 " + lastRepX[s] + " " + lastRepY[s]);
                 } else {
                     lastRepX[s] = (int) p.x; lastRepY[s] = (int) p.y;
@@ -930,74 +718,35 @@ public final class InputProxy {
                 aMode[s] = -1;
                 aMoveT[s] = 0;
                 lastRealUpAt = SystemClock.uptimeMillis();
-                trace("THÔ nhả slot " + s);
                 out("F " + s + " 0 " + lastRepX[s] + " " + lastRepY[s]);
             }
         }
         if (!injecting) return; // chế độ thụ động: hệ thống vẫn tự nhận ngón thật
 
         // 1) ngón biến mất -> UP (thứ tự các ngón còn lại giữ nguyên)
-        final long nowMs = SystemClock.uptimeMillis();
         for (int i = 0; i < shown.size(); ) {
             Finger f = shown.get(i);
-            // lateUntil: ngón thật nhấc lúc còn đang chờ click nhả (chưa kịp chạm xuống) vẫn phải được chạm đủ lâu để game thấy
-            boolean keep = f.real() ? (want[f.slot] != null || lateUntil[f.slot] > nowMs) : (f.tap.down && !f.tap.finished);
+            boolean keep = f.real() ? want[f.slot] != null : (f.tap.down && !f.tap.finished);
             if (keep) { i++; continue; }
             emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, i);
+            if (f.real()) log("ngón thật slot " + f.slot + " nhả (pid " + f.pid + ")");
             shown.remove(i);
             pidMask &= ~(1 << f.pid);
         }
         // 2) ngón còn lại di chuyển (đúng thứ tự của InputReader: UP -> MOVE -> DOWN)
-        boolean moved = false;
+        boolean moved = false, realMoved = false;
         for (Finger f : shown) {
             P w = f.real() ? want[f.slot] : f.tap.p;
-            if (w != null && !w.same(f.sent)) { f.sent = w.copy(); moved = true; }
+            if (w != null && !w.same(f.sent)) { f.sent = w.copy(); moved = true; if (f.real()) realMoved = true; }
         }
         if (moved) emit(MotionEvent.ACTION_MOVE, -1);
-        // 3) ngón mới -> DOWN, nối vào cuối: thật hay ảo cũng xếp theo lúc chạm xuống.
-        //    NGOẠI LỆ: ngón thật đầu tiên mà hệ thống đang chỉ thấy toàn ngón ảo (click đang giữ) thì CHỜ click nhả
-        //    (tối đa [REAL_DEFER_MAX_MS], click chỉ giữ ~30ms) rồi mới chạm xuống. Nếu không, click ảo đứng đầu luồng
-        //    (ACTION_DOWN là của click), ngón thật chỉ là ACTION_POINTER_DOWN, rồi lúc click nhả thì hệ thống thấy
-        //    ACTION_POINTER_UP của ngón ĐẦU TIÊN -> game coi như ngón chính đã nhấc, ngón thật bị đơ tới khi nhấc tay.
-        boolean realShown = false, virtShown = false;
-        for (Finger f : shown) { if (f.real()) realShown = true; else virtShown = true; }
-        boolean deferring = false;
+        if (realMoved) synchronized (STAT) { stRawMove++; }
+        // 3) ngón mới -> DOWN, nối vào cuối: thật hay ảo cũng xếp theo lúc chạm xuống
         for (int s = 0; s < REAL_SLOTS; s++) {
-            P wp = want[s];
-            boolean lifted = false;
-            if (wp == null) {
-                // Ngón đã nhấc khi còn đang chờ: vẫn phải cho game thấy một lần chạm (không nuốt mất cú chạm ngắn của người dùng)
-                if (deferSince[s] != 0 && deferP[s] != null && indexOfSlot(s) < 0) { wp = deferP[s]; lifted = true; }
-                else { deferSince[s] = 0; deferP[s] = null; continue; }
-            } else if (indexOfSlot(s) >= 0) {
-                continue;
-            }
-            if (!realShown && virtShown) {
-                if (deferSince[s] == 0) { deferSince[s] = nowMs; collisions++; note("VA CHẠM: ngón thật slot " + s + " chạm xuống lúc click đang giữ -> chờ click nhả " + shownDesc()); }
-                if (nowMs - deferSince[s] < REAL_DEFER_MAX_MS) {
-                    if (!lifted) deferP[s] = wp;
-                    deferring = true;
-                    continue;
-                }
-                if (deferSince[s] > 0) {
-                    out("LOG ngón thật slot " + s + " chờ click nhả quá " + REAL_DEFER_MAX_MS + "ms -> chạm xuống sau click");
-                    deferSince[s] = -1;
-                }
-            }
-            if (addFinger(s, null, wp)) {
-                if (deferSince[s] != 0) note("ngón thật slot " + s + " vào luồng sau khi chờ " + (deferSince[s] > 0 ? (nowMs - deferSince[s]) + "ms" : "hết hạn") + (lifted ? " (đã nhấc trong lúc chờ)" : "") + " " + shownDesc());
-                realShown = true;
-                if (lifted) lateUntil[s] = nowMs + LATE_HOLD_MS;
-                deferSince[s] = 0;
-                deferP[s] = null;
-            } else {
-                out("LOG hết chỗ pointer cho ngón thật slot " + s);
-                if (lifted) { deferSince[s] = 0; deferP[s] = null; }
+            if (want[s] != null && indexOfSlot(s) < 0) {
+                if (!addFinger(s, null, want[s])) { out("LOG hết chỗ pointer cho ngón thật slot " + s); }
             }
         }
-        boolean late = false;
-        for (int s = 0; s < REAL_SLOTS; s++) if (lateUntil[s] > nowMs) late = true;
-        deferActive = deferring || late;
         if (curTap != null && curTap.down && !curTap.finished && indexOfTap(curTap) < 0) {
             if (!addFinger(-1, curTap, curTap.p)) curTap.finished = true; // hết chỗ: bỏ click này
         }
@@ -1007,30 +756,18 @@ public final class InputProxy {
     }
 
     /**
-     * Gọi dưới LOCK. Hệ thống vừa từ chối một sự kiện nên luồng bên đó đã lệch so với [shown]. Cách dọn:
-     *  1. bỏ mọi sự kiện đang xếp hàng (dựng theo trạng thái cũ, hệ thống sẽ từ chối tiếp),
-     *  2. ACTION_CANCEL (có FLAG_CANCELED) cho ĐÚNG những ngón hệ thống đang thấy (theo shadow, không phải theo [shown]),
-     *  3. chạm lại các ngón đang hiện (cùng chỗ, cùng mã pointer) để ngón thật và click tiếp tục như bình thường.
-     * Trước đây CANCEL thiếu FLAG_CANCELED và liệt kê theo [shown] nên chính nó cũng bị từ chối -> lỗi dây chuyền
-     * -> sau 4 lần helper tự nhả cảm ứng -> ngón đang đè bị kẹt tới khi nhấc tay.
+     * Gọi dưới LOCK. Huỷ luồng chạm đang dở bên hệ thống rồi chạm lại đúng các ngón đang hiện (cùng chỗ, cùng mã
+     * pointer), để ngón thật và click tiếp tục như bình thường thay vì bị hệ thống bỏ qua cho tới khi nhấc tay.
      */
     private static void rebuildStream() {
         long now = SystemClock.uptimeMillis();
         if (now - lastRebuildAt < 30) return;   // chống lặp liên tục; lần sync sau thử lại
         desync = false;
         lastRebuildAt = now;
-        if (!injecting) return;
-        rebuilds++;
+        if (!injecting || shown.isEmpty()) return;
         ArrayList<Finger> keep = new ArrayList<>(shown);
         log("inject lỗi -> dựng lại luồng chạm (" + keep.size() + " ngón) để ngón thật không bị đơ");
-        note("DỰNG LẠI luồng chạm, giữ " + keep.size() + " ngón " + shownDesc());
-        if (now - lastAutoDumpAt > 3000) { lastAutoDumpAt = now; dumpTrace("tự động: inject lỗi", 80); }
-        synchronized (INJ_LOCK) {
-            for (Pending q : INJQ) if (q.ev != null) q.ev.recycle();
-            INJQ.clear();
-            INJQ.addLast(new Pending());
-            INJ_LOCK.notifyAll();
-        }
+        emit(MotionEvent.ACTION_CANCEL, -1);
         shown.clear();
         downTime = SystemClock.uptimeMillis();
         for (Finger f : keep) {
@@ -1064,12 +801,8 @@ public final class InputProxy {
             action = baseAction | (actionIndex << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
         }
         long now = SystemClock.uptimeMillis();
-        if (baseAction == MotionEvent.ACTION_MOVE) traceMove();
-        else trace(actionName(baseAction) + (actionIndex >= 0 ? "#" + actionIndex : "") + " " + shownDesc());
-        // ACTION_CANCEL bắt buộc có FLAG_CANCELED, nếu không Android 15+ từ chối sự kiện
-        int flags = baseAction == MotionEvent.ACTION_CANCEL ? FLAG_CANCELED : 0;
         MotionEvent ev = MotionEvent.obtain(downTime, now, action, n, props, coords,
-                0, 0, 1f, 1f, deviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, flags);
+                0, 0, 1f, 1f, deviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
         enqueueInject(ev, baseAction == MotionEvent.ACTION_MOVE);
     }
 
@@ -1081,11 +814,9 @@ public final class InputProxy {
      * riêng phát lần lượt theo đúng thứ tự. MOVE liên tiếp được gộp lại (MOVE nào cũng mang toạ độ mới nhất của mọi ngón).
      */
     private static final class Pending {
-        final MotionEvent ev;          // null nếu là lệnh "huỷ những ngón hệ thống đang thấy" (dựng lúc phát, theo shadow mới nhất)
+        final MotionEvent ev;
         final boolean move;
-        final boolean resyncCancel;
-        Pending(MotionEvent ev, boolean move) { this.ev = ev; this.move = move; this.resyncCancel = false; }
-        Pending() { this.ev = null; this.move = false; this.resyncCancel = true; }
+        Pending(MotionEvent ev, boolean move) { this.ev = ev; this.move = move; }
     }
 
     private static final Object INJ_LOCK = new Object();
@@ -1093,6 +824,16 @@ public final class InputProxy {
     private static boolean injBusy = false;     // chỉ đụng dưới INJ_LOCK
     private static boolean injStop = false;     // chỉ đụng dưới INJ_LOCK
     private static int injectFails = 0;         // chỉ đụng ở luồng phát
+    private static long lastLagLogAt = 0;       // chỉ đụng ở luồng phát
+
+    // ---- thống kê chẩn đoán: cứ ~3s ghi 1 dòng khi có ngón thật đang đè (lúc vuốt cam) ----------------------------
+    // Phân biệt được "helper ngừng phát" với "helper vẫn phát đều mà game/hệ thống bỏ qua": nếu vuốt-thật > 0 mà phát-MOVE = 0
+    // thì lỗi ở helper; nếu cả hai đều chạy mà cam vẫn đơ thì lỗi nằm phía hệ thống/game.
+    private static final Object STAT = new Object();
+    private static int stRawMove = 0, stInjMove = 0, stInjOther = 0, stTapDown = 0;
+    private static long stMaxCall = 0, stMaxAge = 0;
+    private static long lastStatAt = 0;
+    private static final long STAT_MS = 3000;
 
     private static void enqueueInject(MotionEvent ev, boolean move) {
         synchronized (INJ_LOCK) {
@@ -1122,33 +863,27 @@ public final class InputProxy {
                 p = INJQ.pollFirst();
                 injBusy = true;
             }
-            MotionEvent ev = p.ev;
-            if (p.resyncCancel) {
-                // Dựng lúc phát (không phải lúc xếp hàng) để khớp đúng những gì hệ thống đã chấp nhận tới giờ
-                synchronized (INJ_LOCK) { ev = cancelFromShadowLocked(); }
-            }
             boolean ok = false;
-            if (ev == null) {
-                ok = true; // hệ thống không thấy ngón nào -> không có gì để huỷ
-            } else {
-                long t0 = SystemClock.uptimeMillis();
-                try {
-                    injector.inject(ev);
-                    ok = true;
-                } catch (Throwable t) {
-                    log("inject fail: " + t);
-                    note("INJECT LỖI " + describe(ev) + " -> " + t);
-                }
-                long dt = SystemClock.uptimeMillis() - t0;
-                if (dt > injMaxMs) injMaxMs = dt;
-                if (dt > 25) { injSlow++; note("inject CHẬM " + dt + "ms (" + describe(ev) + ")"); }
-                if (ok) {
-                    injOk++;
-                    synchronized (INJ_LOCK) { updateShadowLocked(ev); }
-                } else {
-                    injFail++;
-                }
-                ev.recycle();
+            long t0 = SystemClock.uptimeMillis();
+            long age = t0 - p.ev.getEventTime(); // sự kiện nằm chờ trong hàng đợi bao lâu
+            try {
+                injector.inject(p.ev);
+                ok = true;
+            } catch (Throwable t) {
+                log("inject fail: " + t);
+            } finally {
+                p.ev.recycle();
+            }
+            long took = SystemClock.uptimeMillis() - t0;
+            synchronized (STAT) {
+                if (p.move) stInjMove++; else stInjOther++;
+                if (took > stMaxCall) stMaxCall = took;
+                if (age > stMaxAge) stMaxAge = age;
+            }
+            if ((age > 100 || took > 50) && t0 - lastLagLogAt > 1500) {
+                lastLagLogAt = t0;
+                int qn; synchronized (INJ_LOCK) { qn = INJQ.size(); }
+                log("phát chạm chậm: chờ " + age + "ms, gọi hệ thống " + took + "ms, hàng đợi " + qn);
             }
             if (ok) injectFails = 0; else onInjectFailure(p.move);
             synchronized (INJ_LOCK) {
@@ -1160,16 +895,12 @@ public final class InputProxy {
 
     private static void onInjectFailure(boolean wasMove) {
         synchronized (LOCK) {
-            injectFails++;
-            // Một MOVE lỗi lẻ tẻ có thể chỉ là chập chờn; từ lần thứ 2 liên tiếp thì luồng đã lệch với hệ thống.
-            if (!wasMove || injectFails >= 2) desync = true;
-            if (injectFails >= MAX_INJECT_FAILS && injecting) {
+            if (!wasMove) desync = true;
+            if (++injectFails >= MAX_INJECT_FAILS && injecting) {
                 // Bộ phát hỏng mà grab vẫn còn = cảm ứng chết cả máy. Nhả grab ngay (đóng fd), huỷ ngón kẹt.
                 injecting = false;
                 urgentRelease = true;
                 log("inject hỏng liên tiếp -> nhả cảm ứng ngay");
-                note("BỎ BƠM: inject hỏng " + injectFails + " lần liên tiếp");
-                dumpTrace("tự động: inject hỏng liên tiếp", 100);
                 new Thread(InputProxy::shutdown, "zyn-bail").start();
             } else if (desync) {
                 rebuildStream();
@@ -1212,7 +943,6 @@ public final class InputProxy {
             if (!injecting) { tapErr("click bị bỏ: helper không bơm được (thụ động)"); return; }
             if (tapQ.size() >= MAX_TAP_QUEUE) { tapErr("click bị bỏ: hàng đợi đầy"); return; }
             tapQ.addLast(new Tap(tapPointer(x, y), hold, gap));
-            trace("TAP+ " + (int) x + "," + (int) y + " hold=" + hold + " hàng=" + tapQ.size());
             LOCK.notifyAll();
         }
     }
@@ -1234,11 +964,31 @@ public final class InputProxy {
      * MỘT luồng lo mọi việc theo thời gian: bắt đầu / nhả click và nhịp trợ vuốt. Mọi thay đổi đều đi qua [sync]
      * dưới cùng LOCK với ngón thật nên click ảo chạy song song với ngón thật trong cùng một luồng chạm.
      */
+    /** Gọi dưới LOCK. Ghi 1 dòng thống kê của ~3s vừa qua, chỉ khi đang có ngón thật đè (bỏ qua lúc rảnh để khỏi tràn log). */
+    private static void logStats() {
+        boolean realDown = false;
+        for (Finger f : shown) if (f.real()) { realDown = true; break; }
+        int rm, im, io, td;
+        long mc, ma;
+        synchronized (STAT) {
+            rm = stRawMove; im = stInjMove; io = stInjOther; td = stTapDown; mc = stMaxCall; ma = stMaxAge;
+            stRawMove = 0; stInjMove = 0; stInjOther = 0; stTapDown = 0; stMaxCall = 0; stMaxAge = 0;
+        }
+        if (!realDown) return;
+        int qn;
+        synchronized (INJ_LOCK) { qn = INJQ.size(); }
+        StringBuilder sb = new StringBuilder("stat 3s: vuốt-thật=" + rm + " phát-MOVE=" + im + " phát-DOWN/UP=" + io + " click=" + td
+                + " gọi-tối-đa=" + mc + "ms chờ-tối-đa=" + ma + "ms hàng-đợi=" + qn + " ngón=[");
+        for (Finger f : shown) sb.append(f.real() ? "T" : "C").append(f.pid).append('@').append((int) f.sent.x).append(',').append((int) f.sent.y).append(' ');
+        log(sb.append(']').toString());
+    }
+
     private static void pump() {
         synchronized (LOCK) {
             while (!stopping) {
                 long now = SystemClock.uptimeMillis();
                 long wait = 1000;
+                if (now - lastStatAt >= STAT_MS) { lastStatAt = now; logStats(); }
                 if (curTap != null && now >= curTap.releaseAt) {
                     curTap.finished = true;
                     sync();                       // UP
@@ -1261,6 +1011,7 @@ public final class InputProxy {
                             tapErr("click bị bỏ: hết chỗ pointer");
                         } else {
                             head.releaseAt = SystemClock.uptimeMillis() + head.hold; // giữ tính từ lúc thật sự chạm xuống
+                            synchronized (STAT) { stTapDown++; }
                         }
                         now = SystemClock.uptimeMillis();
                     } else {
@@ -1269,7 +1020,6 @@ public final class InputProxy {
                 }
                 if (curTap != null) wait = Math.min(wait, curTap.releaseAt - now);
                 if (driftActive()) { sync(); wait = Math.min(wait, 8); }
-                if (deferActive) { sync(); wait = Math.min(wait, 5); } // ngón thật đang chờ click nhả: kiểm tra lại sát hạn
                 try {
                     LOCK.wait(Math.max(1, wait));
                 } catch (InterruptedException e) {
@@ -1308,23 +1058,15 @@ public final class InputProxy {
             synchronized (LOCK) {
                 tapQ.clear();
                 curTap = null;
-                if (injecting) {
-                    injecting = false;   // từ giờ không dựng thêm sự kiện nào (tránh chạm lại ngón thật còn đè sau khi đã huỷ)
+                if (injecting && !shown.isEmpty()) {
+                    emit(MotionEvent.ACTION_CANCEL, -1);
                     shown.clear();
                     pidMask = 0;
                 }
                 LOCK.notifyAll();
             }
-            // Phát nốt các sự kiện còn trong hàng đợi, rồi huỷ những ngón hệ thống CÒN THẤY (theo shadow, kèm FLAG_CANCELED),
-            // nếu không hệ thống kẹt ngón ma.
+            // Phải phát nốt CANCEL/UP còn nằm trong hàng đợi trước khi chết, nếu không hệ thống kẹt ngón ma.
             drainInject(500);
-            if (injector != null) {
-                MotionEvent c;
-                synchronized (INJ_LOCK) { c = cancelFromShadowLocked(); }
-                if (c != null) {
-                    try { injector.inject(c); } catch (Throwable ignored) { } finally { c.recycle(); }
-                }
-            }
             synchronized (INJ_LOCK) { injStop = true; INJ_LOCK.notifyAll(); }
         } catch (Throwable ignored) {
         }
