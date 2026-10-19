@@ -100,6 +100,20 @@ public final class InputProxy {
     private static long lastRebuildAt = 0;
     /** Đang bỏ các sự kiện sau SYN_DROPPED cho tới SYN_REPORT kế tiếp. Chỉ đụng dưới LOCK. */
     private static boolean dropping = false;
+    /**
+     * Sau SYN_DROPPED không biết kernel đang đứng ở slot nào (lệnh ABS_MT_SLOT có thể nằm trong gói bị bỏ, mà kernel chỉ
+     * phát lại ABS_MT_SLOT khi slot ĐỔI) -> toạ độ đến sau bị ghi nhầm sang ngón khác. Cờ này bật tới khi gặp ABS_MT_SLOT kế tiếp.
+     */
+    private static boolean slotUnsure = false;
+    private static boolean pickedInPacket = false;
+    /**
+     * Trong gói SYN hiện tại: slot nào vừa nhả / BTN_TOUCH vừa về 0. Ngón vừa nhả không được "nhận nuôi" lại
+     * từ toạ độ đi kèm trong cùng gói.
+     */
+    private static final boolean[] upInPacket = new boolean[16];
+    private static boolean btnUpInPacket = false;
+    /** Slot bị BTN_TOUCH=0 xoá: toạ độ cũ còn dùng được nếu hoá ra ngón đó vẫn đang đè. */
+    private static final boolean[] keepXY = new boolean[16];
 
     private static void out(String line) {
         if (!outThreadOn) { OUT.println(line); return; }
@@ -409,12 +423,14 @@ public final class InputProxy {
                 switch (code) {
                     case ABS_MT_SLOT:
                         curSlot = Math.max(0, Math.min(REAL_SLOTS, value));
+                        slotUnsure = false;
                         break;
                     case ABS_MT_TRACKING_ID:
                         if (curSlot >= REAL_SLOTS) break;
                         if (value == -1) {
                             rawActive[curSlot] = false;
                             tid[curSlot] = -1;
+                            upInPacket[curSlot] = true;
                         } else if (!rawActive[curSlot]) {
                             startRaw(curSlot, value);
                         } else if (tid[curSlot] != value) {
@@ -427,10 +443,12 @@ public final class InputProxy {
                         }
                         break;
                     case ABS_MT_POSITION_X:
-                        if (curSlot < REAL_SLOTS) { rawX[curSlot] = value; hasX[curSlot] = true; }
+                        if (slotUnsure && !pickedInPacket) { pickSlotNearest(value, true); pickedInPacket = true; }
+                        if (curSlot < REAL_SLOTS) { adoptIfOrphan(curSlot); rawX[curSlot] = value; hasX[curSlot] = true; }
                         break;
                     case ABS_MT_POSITION_Y:
-                        if (curSlot < REAL_SLOTS) { rawY[curSlot] = value; hasY[curSlot] = true; }
+                        if (slotUnsure && !pickedInPacket) { pickSlotNearest(value, false); pickedInPacket = true; }
+                        if (curSlot < REAL_SLOTS) { adoptIfOrphan(curSlot); rawY[curSlot] = value; hasY[curSlot] = true; }
                         break;
                     case ABS_MT_PRESSURE:
                         if (curSlot < REAL_SLOTS) rawP[curSlot] = value;
@@ -447,24 +465,59 @@ public final class InputProxy {
             } else if (type == EV_KEY) {
                 // BTN_TOUCH = 0: không còn ngón nào chạm. Dọn hết ngón còn kẹt (vd. lệnh nhả bị rơi trong gói SYN_DROPPED).
                 if (code == BTN_TOUCH && value == 0) {
+                    btnUpInPacket = true;
                     for (int s = 0; s < REAL_SLOTS; s++) {
-                        if (rawActive[s]) { rawActive[s] = false; tid[s] = -1; }
+                        // keepXY: nếu ngón này thật ra vẫn đè (BTN_TOUCH báo nhầm) thì còn toạ độ cũ để nhận nuôi lại ngay
+                        if (rawActive[s]) { rawActive[s] = false; tid[s] = -1; keepXY[s] = true; }
                     }
                 }
             } else if (type == EV_SYN) {
                 if (code == SYN_DROPPED) {
                     // Bộ đệm cảm ứng bị tràn (hệ thống/binder chậm). Giữ nguyên trạng thái các ngón, chỉ bỏ gói dở dang;
                     // ngón nào nhấc trong lúc tràn sẽ được dọn ở BTN_TOUCH=0 / lần đổi tracking id kế tiếp.
+                    // Lệnh đổi slot có thể đã nằm trong gói bị bỏ -> chưa biết slot hiện tại cho tới khi gặp ABS_MT_SLOT kế tiếp.
                     dropping = true;
+                    slotUnsure = true;
                     log("SYN_DROPPED: bộ đệm cảm ứng tràn -> giữ nguyên các ngón đang chạm");
                 } else if (code == SYN_REPORT) {
                     sync();
+                    java.util.Arrays.fill(upInPacket, false);
+                    btnUpInPacket = false;
+                    pickedInPacket = false;
                 }
             }
         }
     }
 
+    /**
+     * Gọi dưới LOCK khi có toạ độ tới cho một slot mà helper tưởng là KHÔNG có ngón. Kernel chỉ gửi ABS_MT_TRACKING_ID lúc ngón
+     * chạm xuống, nên nếu helper lỡ mất nó thì ngón đó chết hẳn (không vuốt được) cho tới khi nhấc tay lên chạm lại. Các trường hợp
+     * lỡ: helper khởi động / grab lúc ngón ĐANG đè, SYN_DROPPED làm rơi lệnh chạm, BTN_TOUCH=0 báo nhầm. Giờ có toạ độ tới là coi
+     * như ngón đó đang chạm: nhận nuôi nó (như vừa chạm xuống tại chỗ đó). Không nhận nuôi khi ngón VỪA nhả trong cùng gói.
+     */
+    private static void adoptIfOrphan(int s) {
+        if (rawActive[s] || upInPacket[s] || btnUpInPacket) return;
+        boolean kx = keepXY[s] && hasX[s], ky = keepXY[s] && hasY[s];
+        startRaw(s, -2);
+        hasX[s] = kx;
+        hasY[s] = ky;
+        log("nhận nuôi ngón slot " + s + " (mất tracking id: helper vừa khởi động / SYN_DROPPED / BTN_TOUCH nhầm)");
+    }
+
+    /** Gọi dưới LOCK. Sau SYN_DROPPED: toạ độ [value] thuộc ngón đang chạm có toạ độ gần nhất trên trục đó. */
+    private static void pickSlotNearest(int value, boolean isX) {
+        int best = -1;
+        long bd = Long.MAX_VALUE;
+        for (int s = 0; s < REAL_SLOTS; s++) {
+            if (!rawActive[s]) continue;
+            long d = Math.abs((long) value - (isX ? rawX[s] : rawY[s]));
+            if (d < bd) { bd = d; best = s; }
+        }
+        if (best >= 0) curSlot = best;
+    }
+
     private static void startRaw(int s, int trackingId) {
+        keepXY[s] = false;
         rawActive[s] = true;
         tid[s] = trackingId;
         hasX[s] = false;
