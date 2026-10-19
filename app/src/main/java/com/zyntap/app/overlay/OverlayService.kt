@@ -238,7 +238,17 @@ class OverlayService : Service() {
         }
     }
 
+    /** Nhịp nối lại ADB riêng 100ms (ensureInBackground tự chặn trùng lượt nên gọi dày vẫn an toàn). */
+    private val reconnectTick = object : Runnable {
+        override fun run() {
+            runCatching { AdbSession.ensureInBackground(this@OverlayService) }
+            handler.postDelayed(this, RECONNECT_MS)
+        }
+    }
+
     private fun startWatchdog() {
+        handler.removeCallbacks(reconnectTick)
+        handler.postDelayed(reconnectTick, RECONNECT_MS)
         handler.removeCallbacks(watchdog)
         handler.postDelayed(watchdog, WATCHDOG_MS)
         targetHandler.removeCallbacks(targetWatcher)
@@ -1038,7 +1048,8 @@ class OverlayService : Service() {
     private var statusLinkDot: View? = null
     private var statusLinkHalo: View? = null
     private var statusLinkText: TextView? = null
-    private var statusPulse: android.animation.ObjectAnimator? = null
+    private var wifiBreath: android.animation.ObjectAnimator? = null
+    private var linkBreath: android.animation.ObjectAnimator? = null
     private var statusPulsing = false
     private var lastStatusKey = -1
 
@@ -1082,6 +1093,8 @@ class OverlayService : Service() {
         statusLinkDot = link.dot; statusLinkHalo = link.halo; statusLinkText = link.text
         lastStatusKey = -1
         refreshStatus()
+        stopHaloBreath()
+        startHaloBreath()
         return box
     }
 
@@ -1130,28 +1143,38 @@ class OverlayService : Service() {
         setStatusPulse(pulse)
     }
 
-    /** Quầng sáng nhấp nháy nhẹ khi đang nối lại; trạng thái khác thì đứng yên. */
+    /** Quầng sáng của cả hai chấm "thở" nhẹ (thụt ra thụt vào); khi đang nối lại thì thở nhanh hơn. */
     private fun setStatusPulse(on: Boolean) {
-        val halo = statusLinkHalo
-        if (on && statusPulse?.target === halo) return
-        if (!on && statusPulse == null) return
-        statusPulse?.cancel(); statusPulse = null
-        halo?.alpha = 1f; halo?.scaleX = 1f; halo?.scaleY = 1f
         statusPulsing = on
-        if (on && halo != null) {
-            statusPulse = android.animation.ObjectAnimator.ofPropertyValuesHolder(
-                halo,
-                android.animation.PropertyValuesHolder.ofFloat(View.ALPHA, 1f, 0.25f),
-                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.25f),
-                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.25f),
-            ).apply {
-                duration = 900
-                repeatCount = ValueAnimator.INFINITE
-                repeatMode = ValueAnimator.REVERSE
-                interpolator = AccelerateDecelerateInterpolator()
-                start()
-            }
+        linkBreath?.duration = if (on) BREATH_FAST_MS else BREATH_MS
+    }
+
+    private fun makeBreath(halo: View?, ms: Long): android.animation.ObjectAnimator? {
+        halo ?: return null
+        halo.alpha = 1f; halo.scaleX = 1f; halo.scaleY = 1f
+        return android.animation.ObjectAnimator.ofPropertyValuesHolder(
+            halo,
+            android.animation.PropertyValuesHolder.ofFloat(View.ALPHA, 1f, 0.35f),
+            android.animation.PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 0.72f),
+            android.animation.PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 0.72f),
+        ).apply {
+            duration = ms
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            interpolator = AccelerateDecelerateInterpolator()
+            start()
         }
+    }
+
+    private fun startHaloBreath() {
+        if (wifiBreath == null) wifiBreath = makeBreath(statusWifiHalo, BREATH_MS)
+        if (linkBreath == null) linkBreath = makeBreath(statusLinkHalo, if (statusPulsing) BREATH_FAST_MS else BREATH_MS)
+    }
+
+    private fun stopHaloBreath() {
+        wifiBreath?.cancel(); wifiBreath = null
+        linkBreath?.cancel(); linkBreath = null
+        for (h in listOf(statusWifiHalo, statusLinkHalo)) { h?.alpha = 1f; h?.scaleX = 1f; h?.scaleY = 1f }
     }
 
     private val statusTick = object : Runnable {
@@ -1444,6 +1467,7 @@ class OverlayService : Service() {
         closing = true
         setWanted(this, false) // chủ động đóng -> không tự khôi phục
         handler.removeCallbacks(watchdog)
+        handler.removeCallbacks(reconnectTick)
         solidAnim?.cancel()
         editDimAnim?.cancel()
         promptLayer?.close()
@@ -1659,6 +1683,7 @@ class OverlayService : Service() {
         panelHidden = true
         if (::circles.isInitialized) circles.setMenuOpen(false)
         handler.removeCallbacks(statusTick)
+        stopHaloBreath()
         v.visibility = View.INVISIBLE
         if (p != null) {
             // Không chặn chạm xuống app phía sau khi đang ẩn
@@ -1685,13 +1710,14 @@ class OverlayService : Service() {
         v.visibility = View.VISIBLE
         applySolid(solidAmount)
         startStatusTick()
+        startHaloBreath()
         if (shownTabIdx == 2) pointsTab?.enter()
         if (shownTabIdx == 4) debugTab?.enter()
     }
 
     private fun removePanel() {
         handler.removeCallbacks(statusTick)
-        statusPulse?.cancel(); statusPulse = null; statusPulsing = false
+        stopHaloBreath(); statusPulsing = false
         statusWifiDot = null; statusWifiHalo = null; statusWifiText = null
         statusLinkDot = null; statusLinkHalo = null; statusLinkText = null
         lastStatusKey = -1
@@ -1809,6 +1835,9 @@ class OverlayService : Service() {
         private const val SCRIM_SOLID_ALPHA = 0x66 // = SCRIM_ALPHA: tắt trong suốt chỉ làm card đặc, không đậm thêm lớp đen
 
         private const val STATUS_MS = 1500L
+        private const val BREATH_MS = 1600L
+        private const val BREATH_FAST_MS = 800L
+        private const val RECONNECT_MS = 100L // nhịp gọi nối lại ADB (trước đây gộp trong watchdog 2000ms)
         private const val WATCHDOG_MS = 2000L
         private const val ATTACH_GRACE_MS = 1500L
 
