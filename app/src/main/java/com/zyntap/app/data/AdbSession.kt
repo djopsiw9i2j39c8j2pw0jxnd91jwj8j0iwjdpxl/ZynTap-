@@ -92,7 +92,7 @@ object AdbSession {
                         DebugLog.w("ADB", "Lần nối $i/$total thất bại: $lastError")
                         // Dọn trạng thái dở dang rồi thử lại sau một nhịp ngắn
                         runCatching { manager.disconnect() }
-                        if (i < total) delay(700)
+                        if (i < total) delay(100)
                     }
                     if (rejected == total) {
                         DebugLog.e("ADB", "Máy từ chối mọi lần nối ($total/$total) — thường là đã quên khoá ghép nối, cần ghép lại bằng mã 6 số")
@@ -140,6 +140,6 @@ object AdbSession {
         }
     }
 
-    private const val CHECK_EVERY_MS = 5_000L
-    private const val RETRY_AFTER_FAIL_MS = 15_000L
+    private const val CHECK_EVERY_MS = 100L
+    private const val RETRY_AFTER_FAIL_MS = 100L
 }
