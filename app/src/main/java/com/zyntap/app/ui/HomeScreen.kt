@@ -1,6 +1,18 @@
 package com.zyntap.app.ui
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
@@ -103,10 +115,16 @@ private fun StatusCard(
             .clickable(enabled = !active, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
     ) {
-        // Gộp Wi-Fi + ADB thành MỘT trạng thái: xanh khi cả hai đã sẵn sàng, vàng kèm lý do còn thiếu
+        // Gộp Wi-Fi + ADB thành MỘT trạng thái. Đếm số điều kiện đã bật (nối Wi-Fi, bật gỡ lỗi Wi-Fi,
+        // đã ghép nối ADB): 0 = đỏ, 1-2 = vàng, đủ 3 = xanh.
         val ready = active && wifiConnected
+        val onCount = (if (wifiConnected) 1 else 0) + (if (wifiAdbOn) 1 else 0) + (if (wasPaired) 1 else 0)
         StatusRow(
-            ok = ready,
+            dotColor = when {
+                ready -> Zyn.Ok
+                onCount == 0 -> Zyn.Danger
+                else -> Zyn.Warn
+            },
             title = if (ready) "Sẵn sàng" else "Chưa sẵn sàng",
             text = when {
                 ready -> "Đã kết nối Wi-Fi · ADB đã ghép nối"
@@ -124,15 +142,62 @@ private fun StatusCard(
     }
 }
 
+/** Chấm trạng thái giống menu nổi: chấm đặc + quầng mờ bên ngoài "thở" (thụt ra thụt vào). */
 @Composable
-private fun StatusRow(ok: Boolean, title: String, text: String) {
-    val dot by animateColorAsState(if (ok) Zyn.Ok else Zyn.Warn, label = "status-dot")
+private fun StatusDot(color: Color) {
+    val c by animateColorAsState(color, animationSpec = tween(400), label = "status-dot")
+    val breath = rememberInfiniteTransition(label = "status-breath")
+    val k by breath.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.72f,
+        animationSpec = infiniteRepeatable(tween(1600, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "halo-scale",
+    )
+    val a by breath.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.35f,
+        animationSpec = infiniteRepeatable(tween(1600, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "halo-alpha",
+    )
+    Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .size(20.dp)
+                .graphicsLayer { scaleX = k; scaleY = k; alpha = a }
+                .background(c.copy(alpha = 0.19f), CircleShape),
+        )
+        Box(Modifier.size(10.dp).background(c, CircleShape))
+    }
+}
+
+@Composable
+private fun StatusRow(dotColor: Color, title: String, text: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(10.dp).background(dot, CircleShape))
-        Spacer(Modifier.width(12.dp))
+        StatusDot(dotColor)
+        Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Text(title, color = Zyn.Text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(text = text, color = Zyn.TextDim, fontSize = 13.sp)
+            // Đổi chữ: cũ trượt lên mờ dần, mới trượt từ dưới lên hiện dần
+            val swap = tween<Float>(260)
+            AnimatedContent(
+                targetState = title,
+                transitionSpec = {
+                    (fadeIn(swap) + slideInVertically(tween(260)) { it / 2 }) togetherWith
+                        (fadeOut(tween(160)) + slideOutVertically(tween(260)) { -it / 2 })
+                },
+                label = "status-title",
+            ) { t ->
+                Text(t, color = Zyn.Text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
+            AnimatedContent(
+                targetState = text,
+                transitionSpec = {
+                    (fadeIn(swap) + slideInVertically(tween(260)) { it / 2 }) togetherWith
+                        (fadeOut(tween(160)) + slideOutVertically(tween(260)) { -it / 2 })
+                },
+                label = "status-text",
+            ) { t ->
+                Text(text = t, color = Zyn.TextDim, fontSize = 13.sp)
+            }
         }
     }
 }
