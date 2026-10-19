@@ -541,7 +541,9 @@ class TouchWatcher(
                 if (proxyFails < MAX_PROXY_FAILS) {
                     killStaleHelpers(manager)
                     setStage("Đang chạy helper bơm trên ${dev.path} (chờ READY)")
+                    val startedAt = SystemClock.elapsedRealtime()
                     val ok = runProxy(manager, dev)
+                    val lived = SystemClock.elapsedRealtime() - startedAt
                     proxyFails = if (ok) 0 else proxyFails + 1
                     if (ok) {
                         DebugLog.w("Bơm", "Helper đã dừng (mất ADB / bị đóng) -> chạy lại")
@@ -552,7 +554,11 @@ class TouchWatcher(
                         if (proxyFails >= MAX_PROXY_FAILS) DebugLog.e("Bơm", "Bỏ helper, lùi về đọc thô `cat` (nút main vẫn nhận ngón nhưng KHÔNG click được vì không bơm chung luồng được)")
                     }
                     if (!ok) { device = null; clearCachedDevice() } // lần sau dò lại đường dẫn cảm ứng
-                    delay(if (fastRetry) FAST_RETRY_MS else RETRY_MS)
+                    // Helper đang chạy ổn định mà rớt (ADB chớp, bị kill...): chạy lại gần như ngay. Trong lúc không có helper,
+                    // ngón đang đè (vuốt cam) không ai phát lại nên bị đơ; chờ thêm RETRY_MS (3s) chỉ kéo dài cú đơ đó.
+                    // Helper chết nhanh sau khi lên (chập chờn liên tục) thì vẫn giãn nhịp như cũ để không bơm lại dồn dập.
+                    val quick = fastRetry || (ok && lived > HEALTHY_LIVED_MS)
+                    delay(if (quick) FAST_RETRY_MS else RETRY_MS)
                     fastRetry = false
                     continue
                 }
@@ -842,6 +848,8 @@ class TouchWatcher(
         private const val RETRY_MS = 3_000L
         private const val MAX_PROXY_FAILS = 3
         private const val FAST_RETRY_MS = 400L
+        /** Helper sống quá chừng này mới coi là "đang chạy ổn" (rớt thì chạy lại nhanh). */
+        private const val HEALTHY_LIVED_MS = 8_000L
         private const val READY_TIMEOUT_MS = 10_000L
         private const val REINJECT_MAX_MS = 120_000L
         private const val PROXY_RETRY_MS = 30_000L
