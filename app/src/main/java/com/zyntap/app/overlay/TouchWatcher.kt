@@ -714,7 +714,7 @@ class TouchWatcher(
                                 if (lower.contains("inject hỏng liên tiếp")) injectBailed = true
                                 val bad = listOf("fail", "lỗi", "hỏng", "watchdog", "bad cmd", "read:", "inject:", "grab:", "dropped", "dựng lại")
                                     .any { lower.contains(it) }
-                                if (bad) DebugLog.w("Bơm", "Helper báo: $msg") else DebugLog.i("Bơm", "Helper báo: $msg")
+                                if (bad) DebugLog.w("Bơm", "Helper báo: $msg") // log thông tin thường: bỏ, không ghi
                             }
                             line.startsWith("FAIL") -> { DebugLog.e("Bơm", "Helper báo lỗi: ${line.trim()}"); break }
                             else -> if (unknownLines++ < 5) DebugLog.w("Bơm", "Helper nói: ${line.take(200)}")

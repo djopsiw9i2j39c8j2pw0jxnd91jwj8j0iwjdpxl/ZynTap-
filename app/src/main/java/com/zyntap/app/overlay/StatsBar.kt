@@ -455,6 +455,15 @@ class StatsBarOverlay(
             requestFpsSample()
         } else {
             stopScreenFpsMeter()
+            // Tắt FPS thì tắt luôn TimeStats của SurfaceFlinger (để bật sẽ tốn thêm CPU cho mọi game)
+            if (timeStatsStarted.compareAndSet(true, false)) {
+                fpsExecutor.execute {
+                    runCatching {
+                        val manager = ZynAdbConnectionManager.get(ctx.applicationContext)
+                        if (manager.isConnected) runAdbText(manager, "dumpsys SurfaceFlinger --timestats -disable", 8_000)
+                    }
+                }
+            }
         }
         val pattern = if (android.text.format.DateFormat.is24HourFormat(ctx)) "HH:mm" else "h:mm a"
         val time = SimpleDateFormat(pattern, Locale.getDefault()).format(Date())
@@ -554,8 +563,16 @@ class StatsBarOverlay(
 
     private data class LayerStats(val name: String, val frames: Long, val averageFps: Double)
 
+    @Volatile private var lastFpsReqAt = 0L
+    // Cache gói đang ở trước: `dumpsys window` rất nặng, không cần hỏi mỗi lần đo
+    @Volatile private var cachedFocusPkg: String? = null
+    @Volatile private var cachedFocusAt = 0L
+
     private fun requestFpsSample() {
+        val nowReq = SystemClock.elapsedRealtime()
+        if (nowReq - lastFpsReqAt < FPS_SAMPLE_GAP_MS) return
         if (!fpsSampling.compareAndSet(false, true)) return
+        lastFpsReqAt = nowReq
         fpsExecutor.execute {
             try {
                 val manager = runCatching { ZynAdbConnectionManager.get(ctx.applicationContext) }.getOrNull()
@@ -565,9 +582,14 @@ class StatsBarOverlay(
                     return@execute
                 }
 
-                val focusOut = runCatching { runAdbText(manager, FOCUS_CMD, 16_000) }.getOrDefault("")
-                val focusedPkg = FOCUS_RE.find(focusOut)?.groupValues?.getOrNull(1)
-                    ?.takeIf { PKG_RE.matches(it) && it != "com.zyntap.app" }
+                val nowFocus = SystemClock.elapsedRealtime()
+                if (cachedFocusPkg == null || nowFocus - cachedFocusAt > FOCUS_CACHE_MS) {
+                    val focusOut = runCatching { runAdbText(manager, FOCUS_CMD, 16_000) }.getOrDefault("")
+                    cachedFocusPkg = FOCUS_RE.find(focusOut)?.groupValues?.getOrNull(1)
+                        ?.takeIf { PKG_RE.matches(it) && it != "com.zyntap.app" }
+                    cachedFocusAt = nowFocus
+                }
+                val focusedPkg = cachedFocusPkg
                 val pkg = focusedPkg ?: targetPkg()?.takeIf { PKG_RE.matches(it) }
                 if (pkg.isNullOrBlank()) {
                     publishFps(-1)
@@ -584,7 +606,7 @@ class StatsBarOverlay(
                 }
 
                 val dump = runCatching {
-                    runAdbText(manager, "dumpsys SurfaceFlinger --timestats -dump", 1_200_000)
+                    runAdbText(manager, TIMESTATS_CMD, 300_000)
                 }.getOrDefault("")
                 val candidates = parseLayerStats(dump, pkg)
                 val chosen = candidates.sortedWith(
@@ -912,6 +934,13 @@ class StatsBarOverlay(
         private val WS_RE = Regex("\\s+")
         private val RLS_RE = Regex("RequestedLayerState\\{[0-9a-fA-F]+\\s+(.+?)(?:\\s+parentId=.*|\\s+ROOT.*|\\}.*)?$")
         private val FOCUS_RE = Regex("([A-Za-z0-9_.]+)/[A-Za-z0-9_.$]+")
+        /** Nhịp đo FPS tối thiểu (ms) — trước đây đo mỗi 1s làm SurfaceFlinger + đường ADB chung với cảm ứng bị nghẽn. */
+        private const val FPS_SAMPLE_GAP_MS = 2000L
+        private const val FOCUS_CACHE_MS = 5000L
+        /** Chỉ giữ 4 trường parseLayerStats cần, lọc ngay trên máy để không kéo hàng trăm KB qua ADB mỗi lần. */
+        private const val TIMESTATS_CMD =
+            "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
+                "grep -E '^[[:space:]]*(layerName|packageName|totalFrames|averageFPS)[[:space:]]*='"
         private const val FOCUS_CMD =
             "dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | head -n 2"
 
