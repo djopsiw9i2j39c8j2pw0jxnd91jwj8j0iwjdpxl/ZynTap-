@@ -41,16 +41,18 @@ import java.util.ArrayList;
  *
  * Giao thức (mỗi dòng, UTF-8):
  * <pre>
- *   app -> helper:  PING | ROT r w h | ZONE ... | ASSIST ... | TAP x y holdMs [gapMs] | QUIT
+ *   app -> helper:  PING | ROT r w h | ZONE ... | ASSIST ... | RUN id repeat holdMs gapMs op... | STOP id | STOPALL | QUIT
+ *   (op: T:x,y = 1 click | M:x,y;x,y;... = nhiều click CÙNG LÚC | W:ms = chờ. Cả kịch bản chạy TRONG helper: giữa các click
+ *    không còn độ trễ ADB, không còn nghỉ nào ngoài W do người dùng đặt)
  *   (gapMs: click chờ cho tới khi ngón thật đã nhả ít nhất gapMs, để game kịp xử lý ngón thật trước)
  *   helper -> app:  READY grab=0|1 inj=0|1 dev=n | FAIL msg | F slot 1|0 x y | ERR msg | LOG msg
  * </pre>
- * TAP là "bắn rồi quên": không có số thứ tự, không có phản hồi. Click lỗi (bộ phát từ chối, hàng đợi đầy, hết chỗ
+ * RUN là "bắn rồi quên": không có số thứ tự, không có phản hồi. Click lỗi (bộ phát từ chối, hàng đợi đầy, hết chỗ
  * pointer, chế độ thụ động...) thì CHỈ BỎ click đó (kèm một dòng {@code ERR}), không thử lại, không có đường lui nào khác.
  * Tọa độ x,y (F, TAP) là PIXEL màn hình hiện tại (đã tính xoay).
  *
  * Nếu grab hoặc inject không dùng được (ROM chặn) -> chế độ THỤ ĐỘNG: không grab, không tự phát lại,
- * chỉ báo ngón chạm (F) như cũ; TAP bị bỏ.
+ * chỉ báo ngón chạm (F) như cũ; RUN bị bỏ.
  */
 public final class InputProxy {
 
@@ -72,12 +74,16 @@ public final class InputProxy {
     private static final int MAX_INJECT_FAILS = 4;
 
     // ---- click ------------------------------------------------------------------------------------
-    /** Click giữ ngắn hơn mức này game dễ không kịp thấy (delay 1ms vẫn bị nâng lên mức này). */
-    private static final int MIN_HOLD_MS = 10;
-    /** Khoảng nhả tối thiểu giữa 2 click liên tiếp: delay 1ms vẫn phải ra 2 lần chạm tách bạch, không dính cùng khung hình. */
-    private static final int MIN_RELEASE_GAP_MS = 10;
-    /** Hàng đợi click tối đa; đầy thì click mới bị bỏ (không dồn vô hạn). */
-    private static final int MAX_TAP_QUEUE = 16;
+    /** Không ép giữ tối thiểu: hold = 0 thì DOWN rồi UP liền nhau, không chờ. */
+    private static final int MIN_HOLD_MS = 0;
+    /** Không ép khoảng nhả giữa 2 click: click sau chạm xuống ngay khi click trước vừa nhả. */
+    private static final int MIN_RELEASE_GAP_MS = 0;
+    /** Số kịch bản chạy đồng thời tối đa (mỗi nút main một kịch bản). */
+    private static final int MAX_RUNS = 64;
+    /** Số điểm tối đa của một cụm click cùng lúc (chừa chỗ cho ngón thật; hệ thống nhận tối đa [MAX_POINTERS]). */
+    private static final int MAX_GROUP = 10;
+    /** Hàng đợi bơm dài hơn mức này thì tạm dừng click mới (chống dồn sự kiện vô hạn khi chạy tốc độ tối đa). */
+    private static final int MAX_INJ_BACKLOG = 24;
 
     // ---- cấu hình (từ tham số dòng lệnh) ----------------------------------------------------
     private static String devPath = "";
@@ -237,9 +243,34 @@ public final class InputProxy {
         return INJ_DEV_BASE + (pid << 6) + ((injGen++) & 0x3F);
     }
 
-    /** Hàng đợi click chờ tới lượt + click đang giữ (tối đa một ngón ảo cùng lúc). Chỉ đụng dưới LOCK. */
-    private static final ArrayDeque<Tap> tapQ = new ArrayDeque<>();
-    private static Tap curTap = null;
+    /** Một bước của kịch bản: cụm click (1 hoặc nhiều điểm CÙNG LÚC) hoặc chờ. */
+    private static final class Op {
+        final float[] xy;     // cặp x,y; null = bước chờ
+        final long waitMs;
+        Op(float[] xy, long waitMs) { this.xy = xy; this.waitMs = waitMs; }
+        boolean isWait() { return xy == null; }
+    }
+
+    /** Một kịch bản đang chạy trong helper (của một nút main). */
+    private static final class Run {
+        final int id;
+        final boolean repeat;
+        final int hold;
+        final int gap;
+        final Op[] ops;
+        int idx = 0;
+        long notBefore = 0;   // đang chờ (bước W) tới lúc này
+        boolean done = false;
+        Run(int id, boolean repeat, int hold, int gap, Op[] ops) {
+            this.id = id; this.repeat = repeat; this.hold = hold; this.gap = gap; this.ops = ops;
+        }
+    }
+
+    /** Kịch bản đang chạy + cụm click đang giữ (cả cụm chạm xuống cùng lúc, nhả cùng lúc). Chỉ đụng dưới LOCK. */
+    private static final ArrayList<Run> runs = new ArrayList<>();
+    private static final ArrayList<Tap> curTaps = new ArrayList<>();
+    private static long curReleaseAt = 0;
+    private static int rrIndex = 0;
     private static long lastTapUpAt = 0;
     private static long lastErrAt = 0;
     private static int errSkipped = 0;
@@ -332,6 +363,7 @@ public final class InputProxy {
                         rot = Integer.parseInt(t[1]) & 3;
                         scrW = Math.max(1, Integer.parseInt(t[2]));
                         scrH = Math.max(1, Integer.parseInt(t[3]));
+                        runs.clear(); // toạ độ kịch bản thuộc chiều cũ: dừng hết
                         sync(); // ngón đang đè phải đổi sang toạ độ của chiều mới ngay, không chờ sự kiện cảm ứng kế
                     }
                     break;
@@ -351,14 +383,21 @@ public final class InputProxy {
                     synchronized (LOCK) { assistZones = z; }
                     break;
                 }
-                case "TAP": {
-                    // TAP x y holdMs [gapMs] — không có số thứ tự, không chờ phản hồi
-                    final float x = Float.parseFloat(t[1]), y = Float.parseFloat(t[2]);
+                case "RUN": {
+                    // RUN id repeat(0|1) holdMs gapMs op...  — không có phản hồi
+                    final int id = Integer.parseInt(t[1]);
+                    final boolean repeat = t[2].equals("1");
                     final int hold = Math.max(MIN_HOLD_MS, Math.min(2000, Integer.parseInt(t[3])));
-                    final int gap = t.length > 4 ? Math.max(0, Math.min(500, Integer.parseInt(t[4]))) : 0;
-                    enqueueTap(x, y, hold, gap);
+                    final int gap = Math.max(0, Math.min(500, Integer.parseInt(t[4])));
+                    startRun(id, repeat, hold, gap, parseOps(t, 5));
                     break;
                 }
+                case "STOP":
+                    stopRun(Integer.parseInt(t[1]));
+                    break;
+                case "STOPALL":
+                    synchronized (LOCK) { runs.clear(); }
+                    break;
                 case "QUIT":
                     stopping = true;
                     shutdown();
@@ -706,7 +745,7 @@ public final class InputProxy {
         shown.add(at, new Finger(slot, tap, pid, p.copy()));
         if (tap == null) {
             log("ngón thật slot " + slot + " nhận pid " + pid + " chỉ số " + at + "/" + shown.size()
-                    + (curTap != null && curTap.down && !curTap.finished ? " (click đang giữ)" : ""));
+                    + (!curTaps.isEmpty() ? " (click đang giữ)" : ""));
         }
         emit(shown.size() == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN, at);
         return true;
@@ -768,8 +807,11 @@ public final class InputProxy {
                 if (!addFinger(s, null, want[s])) { out("LOG hết chỗ pointer cho ngón thật slot " + s); }
             }
         }
-        if (curTap != null && curTap.down && !curTap.finished && indexOfTap(curTap) < 0) {
-            if (!addFinger(-1, curTap, curTap.p)) curTap.finished = true; // hết chỗ: bỏ click này
+        for (int i = 0; i < curTaps.size(); i++) {
+            Tap ct = curTaps.get(i);
+            if (ct.down && !ct.finished && indexOfTap(ct) < 0) {
+                if (!addFinger(-1, ct, ct.p)) ct.finished = true; // hết chỗ: bỏ click này
+            }
         }
 
         // 4) Hệ thống vừa từ chối một DOWN/UP: luồng bên đó đã lệch so với [shown] (ngón thật bị đơ tới khi nhấc tay).
@@ -975,27 +1017,127 @@ public final class InputProxy {
         return p;
     }
 
-    /** Xếp một click vào hàng đợi. Lỗi (thụ động, đầy hàng) thì chỉ bỏ click này. */
-    private static void enqueueTap(float x, float y, int hold, int gap) {
+    /** Đọc các op "T:x,y" | "M:x,y;x,y" | "W:ms" (token đã tách theo khoảng trắng, bắt đầu từ [from]). */
+    private static Op[] parseOps(String[] t, int from) {
+        ArrayList<Op> ops = new ArrayList<>();
+        for (int i = from; i < t.length; i++) {
+            String s = t[i];
+            if (s.length() < 3 || s.charAt(1) != ':') continue;
+            char k = s.charAt(0);
+            String body = s.substring(2);
+            if (k == 'W') {
+                ops.add(new Op(null, Math.max(0L, Math.min(3_600_000L, Long.parseLong(body)))));
+            } else if (k == 'T' || k == 'M') {
+                String[] pts = body.split(";");
+                int n = Math.min(pts.length, k == 'T' ? 1 : MAX_GROUP);
+                float[] xy = new float[n * 2];
+                for (int j = 0; j < n; j++) {
+                    String[] c = pts[j].split(",");
+                    xy[2 * j] = Float.parseFloat(c[0]);
+                    xy[2 * j + 1] = Float.parseFloat(c[1]);
+                }
+                ops.add(new Op(xy, 0));
+            }
+        }
+        return ops.toArray(new Op[0]);
+    }
+
+    /** Bắt đầu một kịch bản. Đang chạy cùng id thì bỏ qua (một lần bấm không dồn việc). Lỗi thì chỉ bỏ. */
+    private static void startRun(int id, boolean repeat, int hold, int gap, Op[] ops) {
+        boolean anyClick = false;
+        for (Op o : ops) if (!o.isWait()) { anyClick = true; break; }
+        if (!anyClick) return;
         synchronized (LOCK) {
             if (!injecting) { tapErr("click bị bỏ: helper không bơm được (thụ động)"); return; }
-            if (tapQ.size() >= MAX_TAP_QUEUE) { tapErr("click bị bỏ: hàng đợi đầy"); return; }
-            tapQ.addLast(new Tap(tapPointer(x, y), hold, gap));
+            for (Run r : runs) if (r.id == id) return;
+            if (runs.size() >= MAX_RUNS) { tapErr("click bị bỏ: quá nhiều kịch bản đang chạy"); return; }
+            runs.add(new Run(id, repeat, hold, gap, ops));
             LOCK.notifyAll();
         }
     }
 
-    /** Gọi dưới LOCK. Lúc sớm nhất click đầu hàng được chạm xuống. */
-    private static long tapReadyAt(Tap t) {
-        // 2 click liên tiếp: giữa chúng phải có khoảng nhả, nếu không UP và DOWN dính vào cùng một khung hình, game nuốt mất lần chạm.
+    private static void stopRun(int id) {
+        synchronized (LOCK) {
+            for (int i = 0; i < runs.size(); i++) {
+                if (runs.get(i).id == id) { runs.remove(i); break; }
+            }
+        }
+    }
+
+    private static int injBacklog() {
+        synchronized (INJ_LOCK) { return INJQ.size(); }
+    }
+
+    /** Gọi dưới LOCK. Lúc sớm nhất cụm click của kịch bản [r] được chạm xuống. */
+    private static long tapReadyAt(Run r) {
         long ready = lastTapUpAt + MIN_RELEASE_GAP_MS;
         // Chạm xuyên + chế độ Thả: game đang bận xử lý ngón thật vừa nhả, click quá sát bị nuốt. Chờ cho đủ khoảng cách.
-        if (t.gap > 0 && lastRealUpAt > 0) {
+        if (r.gap > 0 && lastRealUpAt > 0) {
             boolean realDown = false;
             for (int i = 0; i < REAL_SLOTS; i++) realDown |= rawActive[i];
-            if (!realDown) ready = Math.max(ready, lastRealUpAt + t.gap);
+            if (!realDown) ready = Math.max(ready, lastRealUpAt + r.gap);
         }
         return ready;
+    }
+
+    private static void advance(Run r) {
+        r.idx++;
+        if (r.idx >= r.ops.length) {
+            if (r.repeat) r.idx = 0; else r.done = true;
+        }
+    }
+
+    /**
+     * Gọi dưới LOCK khi không có cụm nào đang giữ. Chạy tiếp một kịch bản tới cụm click kế tiếp.
+     * @return 0 nếu vừa chạm xuống một cụm (gọi lại ngay); ngược lại số ms (>= 1) tới lúc có việc kế.
+     */
+    private static long startNextGroup(long now) {
+        if (injBacklog() > MAX_INJ_BACKLOG) return 1;
+        long soonest = 1000;
+        int n = runs.size();
+        long result = -1;
+        for (int k = 0; k < n && result < 0; k++) {
+            Run r = runs.get((rrIndex + k) % n);
+            if (r.done) continue;
+            if (r.notBefore > now) { soonest = Math.min(soonest, r.notBefore - now); continue; }
+            for (int guard = 0; guard <= r.ops.length && !r.done; guard++) {
+                Op op = r.ops[r.idx];
+                if (op.isWait()) {
+                    r.notBefore = now + op.waitMs;   // chỉ chờ khi người dùng tự đặt Delay
+                    advance(r);
+                    if (op.waitMs > 0) { soonest = Math.min(soonest, op.waitMs); break; }
+                    continue;
+                }
+                long ready = tapReadyAt(r);
+                if (ready > now) { soonest = Math.min(soonest, ready - now); break; }
+                launchGroup(r, op);
+                advance(r);
+                rrIndex = (rrIndex + k + 1) % Math.max(1, n);
+                result = 0;
+                break;
+            }
+        }
+        for (int i = runs.size() - 1; i >= 0; i--) if (runs.get(i).done) runs.remove(i);
+        return result == 0 ? 0 : Math.max(1, soonest);
+    }
+
+    /** Gọi dưới LOCK. Cả cụm chạm xuống liên tiếp không chờ nhau (mỗi ngón một POINTER_DOWN ngay trong một lượt). */
+    private static void launchGroup(Run r, Op op) {
+        for (int i = 0; i < op.xy.length; i += 2) {
+            Tap t = new Tap(tapPointer(op.xy[i], op.xy[i + 1]), r.hold, r.gap);
+            t.down = true;
+            curTaps.add(t);
+        }
+        curReleaseAt = SystemClock.uptimeMillis() + r.hold;
+        sync();   // DOWN (chung luồng với ngón thật đang có)
+        for (int i = curTaps.size() - 1; i >= 0; i--) if (curTaps.get(i).finished) curTaps.remove(i);
+        if (curTaps.isEmpty()) {
+            lastTapUpAt = SystemClock.uptimeMillis();
+            tapErr("click bị bỏ: hết chỗ pointer");
+        } else {
+            curReleaseAt = SystemClock.uptimeMillis() + r.hold; // giữ tính từ lúc thật sự chạm xuống
+            synchronized (STAT) { stTapDown += curTaps.size(); }
+        }
     }
 
     /**
@@ -1027,39 +1169,21 @@ public final class InputProxy {
                 long now = SystemClock.uptimeMillis();
                 long wait = 1000;
                 if (now - lastStatAt >= STAT_MS) { lastStatAt = now; logStats(); }
-                if (curTap != null && now >= curTap.releaseAt) {
-                    curTap.finished = true;
-                    sync();                       // UP
+                if (!curTaps.isEmpty() && now >= curReleaseAt) {
+                    for (int i = 0; i < curTaps.size(); i++) curTaps.get(i).finished = true;
+                    sync();                       // UP cả cụm
+                    curTaps.clear();
                     lastTapUpAt = SystemClock.uptimeMillis();
-                    curTap = null;
                     now = lastTapUpAt;
                 }
-                if (curTap == null && !tapQ.isEmpty()) {
-                    Tap head = tapQ.peekFirst();
-                    long ready = tapReadyAt(head);
-                    if (ready <= now) {
-                        tapQ.pollFirst();
-                        head.down = true;
-                        head.releaseAt = now + head.hold;
-                        curTap = head;
-                        sync();                   // DOWN (chung luồng với ngón thật đang có)
-                        if (head.finished) {      // không chạm xuống được (hết chỗ pointer)
-                            curTap = null;
-                            lastTapUpAt = SystemClock.uptimeMillis();
-                            tapErr("click bị bỏ: hết chỗ pointer");
-                        } else {
-                            head.releaseAt = SystemClock.uptimeMillis() + head.hold; // giữ tính từ lúc thật sự chạm xuống
-                            synchronized (STAT) { stTapDown++; }
-                        }
-                        now = SystemClock.uptimeMillis();
-                    } else {
-                        wait = Math.min(wait, ready - now);
-                    }
+                if (curTaps.isEmpty() && !runs.isEmpty()) {
+                    wait = Math.min(wait, startNextGroup(now));
                 }
-                if (curTap != null) wait = Math.min(wait, curTap.releaseAt - now);
+                if (!curTaps.isEmpty()) wait = Math.min(wait, curReleaseAt - SystemClock.uptimeMillis());
                 if (driftActive()) { sync(); wait = Math.min(wait, 8); }
+                if (wait <= 0) continue;          // tới hạn ngay (hold = 0 / click kế tiếp): KHÔNG nghỉ
                 try {
-                    LOCK.wait(Math.max(1, wait));
+                    LOCK.wait(wait);
                 } catch (InterruptedException e) {
                     return;
                 }
@@ -1094,8 +1218,8 @@ public final class InputProxy {
                 SystemClock.sleep(30);
             }
             synchronized (LOCK) {
-                tapQ.clear();
-                curTap = null;
+                runs.clear();
+                curTaps.clear();
                 if (injecting && !shown.isEmpty()) {
                     emit(MotionEvent.ACTION_CANCEL, -1, true);
                     shown.clear();
