@@ -35,6 +35,7 @@ import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 // ============================================================================
@@ -212,11 +213,11 @@ internal class StatsBarView(ctx: Context, private val settings: StatsSettings) :
     private val bg = GradientDrawable()
 
     private val fpsLabel = TextView(ctx).apply {
-        text = "FPS"; scaledTextSize(9f); setTextColor(C_MUTED)
+        text = "FPS"; scaledTextSize(8.5f); setTextColor(C_MUTED)
         setTypeface(typeface, Typeface.BOLD); letterSpacing = 0.06f
     }
     private val fpsValue = TextView(ctx).apply {
-        text = "--"; scaledTextSize(14f); setTextColor(C_MUTED)
+        text = "--"; scaledTextSize(12f); setTextColor(C_MUTED)
         setTypeface(typeface, Typeface.BOLD); gravity = Gravity.START
         minWidth = (paint.measureText("000") + 1f).toInt()
     }
@@ -447,10 +448,11 @@ class StatsBarOverlay(
             lastRx = rx; lastTx = tx; lastNetAt = now
         }
         val bat = readBattery()
+        if (settings.isOn(StatKind.FPS)) requestFpsSample()
         val pattern = if (android.text.format.DateFormat.is24HourFormat(ctx)) "HH:mm" else "h:mm a"
         val time = SimpleDateFormat(pattern, Locale.getDefault()).format(Date())
         val snap = StatSnapshot(
-            fps = if (settings.isOn(StatKind.FPS)) fpsValue else -1,
+            fps = if (settings.isOn(StatKind.FPS) && SystemClock.elapsedRealtime() - fpsUpdatedAt < 3500L) fpsValue else -1,
             batteryPct = bat.first, charging = bat.second,
             time = time, rxBps = rxBps, txBps = txBps,
         )
@@ -471,8 +473,94 @@ class StatsBarOverlay(
         stopTickerIfIdle()
     }
 
-    // ---- FPS: TẠM THỜI giả lập 60 (logic đo thật đã gỡ, sẽ làm lại sau) ----
-    private val fpsValue = 60
+    // ---- FPS thật qua SurfaceFlinger / ADB Wi-Fi ----
+    @Volatile private var fpsValue = -1
+    @Volatile private var fpsUpdatedAt = 0L
+    private val fpsSampling = AtomicBoolean(false)
+    private val fpsExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "ZynTap-FPS").apply { isDaemon = true }
+    }
+
+    /**
+     * Đọc timestamp khung hình của SurfaceFlinger ở nền để không chặn UI.
+     * FPS được đếm từ timestamp present thực tế trong cửa sổ 1 giây gần nhất.
+     */
+    private fun requestFpsSample() {
+        if (!fpsSampling.compareAndSet(false, true)) return
+        fpsExecutor.execute {
+            try {
+                val manager = runCatching { ZynAdbConnectionManager.get(ctx.applicationContext) }.getOrNull()
+                if (manager == null || !manager.isConnected) {
+                    fpsValue = -1
+                    fpsUpdatedAt = 0L
+                    return@execute
+                }
+                // Ưu tiên package đang thật sự giữ focus; nếu focus đang ở ZynTap/launcher,
+                // dùng app mà người dùng đã chọn trong ZynTap làm phương án dự phòng.
+                val focusOut = runCatching { runAdbText(manager, FOCUS_CMD) }.getOrDefault("")
+                val focusedPkg = FOCUS_RE.find(focusOut)?.groupValues?.getOrNull(1)
+                    ?.takeIf { PKG_RE.matches(it) && it != "com.zyntap.app" }
+                val pkg = focusedPkg ?: targetPkg()?.takeIf { PKG_RE.matches(it) }
+                if (pkg.isNullOrBlank()) {
+                    fpsValue = -1
+                    fpsUpdatedAt = 0L
+                    return@execute
+                }
+                val layersOut = runAdbText(manager, "dumpsys SurfaceFlinger --list")
+                val layers = layersOut.lineSequence()
+                    .map { it.trim() }
+                    .filter { it.contains(pkg) && !it.contains("Background", ignoreCase = true) }
+                    .toList()
+                val layer = layers.lastOrNull { it.contains("SurfaceView", ignoreCase = true) }
+                    ?: layers.lastOrNull { it.contains("BLAST", ignoreCase = true) }
+                    ?: layers.lastOrNull()
+                if (layer.isNullOrBlank()) {
+                    fpsValue = -1
+                    fpsUpdatedAt = 0L
+                    return@execute
+                }
+                val latency = runAdbText(manager, "dumpsys SurfaceFlinger --latency '${layer.replace("'", "'\\''")}'")
+                val timestamps = latency.lineSequence().drop(1).mapNotNull { line ->
+                    val cols = line.trim().split(Regex("\\s+"))
+                    cols.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0L }
+                }.toList()
+                val newest = timestamps.maxOrNull()
+                if (newest == null) {
+                    fpsValue = -1
+                    fpsUpdatedAt = 0L
+                } else {
+                    val count = timestamps.count { it >= newest - 1_000_000_000L }
+                    fpsValue = count.coerceIn(0, 240)
+                    fpsUpdatedAt = SystemClock.elapsedRealtime()
+                }
+            } catch (t: Throwable) {
+                DebugLog.w("FPS", "Không đọc được FPS từ SurfaceFlinger: ${t.message ?: t.javaClass.simpleName}")
+                fpsValue = -1
+                fpsUpdatedAt = 0L
+            } finally {
+                fpsSampling.set(false)
+            }
+        }
+    }
+
+    /** Chạy lệnh shell ADB, đọc đầu ra và luôn đóng luồng. Chỉ được gọi từ worker FPS. */
+    private fun runAdbText(manager: ZynAdbConnectionManager, command: String): String {
+        val stream = manager.openStream("shell:$command")
+        return try {
+            stream.openInputStream().bufferedReader().use { reader ->
+                val out = StringBuilder()
+                val buf = CharArray(2048)
+                while (out.length < 200_000) {
+                    val n = reader.read(buf)
+                    if (n < 0) break
+                    out.append(buf, 0, n)
+                }
+                out.toString()
+            }
+        } finally {
+            runCatching { stream.close() }
+        }
+    }
 
     // ---- cửa sổ ----
 
@@ -675,7 +763,7 @@ class StatsBarOverlay(
             v.isAttachedToWindow -> "đang hiện"
             else -> "cửa sổ chưa gắn"
         }
-        return "tổng=${settings.enabled} · bật: ${if (on.isEmpty()) "không" else on} · $w · fps=$fpsValue (giả lập)"
+        return "tổng=${settings.enabled} · bật: ${if (on.isEmpty()) "không" else on} · $w · fps=$fpsValue (ADB)"
     }
 
     companion object {
