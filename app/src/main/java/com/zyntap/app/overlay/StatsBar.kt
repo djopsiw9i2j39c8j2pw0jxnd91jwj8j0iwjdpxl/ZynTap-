@@ -491,6 +491,8 @@ class StatsBarOverlay(
             io.execute {
                 try {
                     fpsValue = measureFps()
+                } catch (_: InterruptedException) {
+                    fpsValue = -1 // dịch vụ đang tắt -> không phải lỗi
                 } catch (t: Throwable) {
                     fpsValue = -1
                     val n = SystemClock.elapsedRealtime()
@@ -531,7 +533,19 @@ class StatsBarOverlay(
     private fun findLayer(mgr: ZynAdbConnectionManager, pkg: String): String? {
         val out = runAdb(mgr, LIST_CMD.replace("@PKG@", pkg), 3500L) ?: return null
         val name = out.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
-        return if (name == null || name.contains('\'')) null else name
+        return if (name == null) null else cleanLayerName(name)
+    }
+
+    /**
+     * Android 14+: `--list` có thể in nguyên dòng "RequestedLayerState{4d18f86 SurfaceView[pkg/Act]@0(BLAST)#3211 parentId=3210}".
+     * Tên layer thật chỉ là phần giữa mã băm và " parentId=...".
+     */
+    private fun cleanLayerName(raw: String): String? {
+        var n = raw.trim()
+        val m = RLS_RE.find(n)
+        if (m != null) n = m.groupValues[1].trim()
+        n = n.trimEnd('}', ' ')
+        return if (n.isEmpty() || n.contains('\'')) null else n
     }
 
     private fun measureFps(): Int {
@@ -562,8 +576,12 @@ class StatsBarOverlay(
             setWhy("đo layer: $found")
         }
         val layer = layerName ?: return -1
-        val lat = runAdb(mgr, "dumpsys SurfaceFlinger --latency '$layer'", 2500L)
+        var lat = runAdb(mgr, "dumpsys SurfaceFlinger --latency '$layer'", 2500L)
         if (lat == null) { setWhy("đọc latency quá thời gian"); return -1 }
+        if (lat.lineSequence().count { it.isNotBlank() } < 3 && layer.contains('#')) {
+            // Một số bản Android khớp theo tên không kèm "#id"
+            lat = runAdb(mgr, "dumpsys SurfaceFlinger --latency '${layer.substringBeforeLast('#')}'", 2500L) ?: lat
+        }
 
         // Mỗi dòng 3 mốc (ns): cột 1 = lúc lên màn hình. Một số máy (Android 11+ BLAST) để cột 1 = 0 -> lùi về cột 2 / cột 0.
         val rows = ArrayList<List<Long>>()
@@ -581,7 +599,7 @@ class StatsBarOverlay(
         }
         if (ts.size < 2) {
             layerName = null // layer có thể đã đổi (đổi cảnh, mở lại game) -> dò lại lần sau
-            setWhy("layer không có mốc thời gian khung hình")
+            setWhy("layer không có mốc thời gian khung hình; mẫu: " + lat.trim().take(160).replace('\n', '|'))
             return -1
         }
         ts = ts.sorted()
@@ -674,6 +692,7 @@ class StatsBarOverlay(
             val v = StatsBarView(ctx, settings)
             v.maxBarWidth = (screenBounds().width() - 2 * margin()).coerceAtLeast(0)
             v.editing = draggable
+            v.alpha = if (hidden) 0f else 1f
             v.refreshKinds()
             lastSnap?.let { v.update(it) }
             val np = newParams(
@@ -791,9 +810,17 @@ class StatsBarOverlay(
         }
     }
 
-    fun fadeOut(ms: Long) { view?.animate()?.alpha(0f)?.setDuration(ms)?.start() }
+    /** Ẩn theo các UI nổi khác (đóng menu, đang chọn điểm...). Giữ cả khi cửa sổ bị dựng lại. */
+    @Volatile private var hidden = false
 
-    fun restore() { view?.animate()?.cancel(); view?.alpha = 1f }
+    fun fadeOut(ms: Long) { hidden = true; view?.animate()?.alpha(0f)?.setDuration(ms)?.start() }
+
+    fun fadeTo(visible: Boolean, ms: Long) {
+        hidden = !visible
+        view?.animate()?.alpha(if (visible) 1f else 0f)?.setDuration(ms)?.start()
+    }
+
+    fun restore() { hidden = false; view?.animate()?.cancel(); view?.alpha = 1f }
 
     fun remove() {
         view?.let { detach(wm, it) }
@@ -825,6 +852,7 @@ class StatsBarOverlay(
     companion object {
         private val PKG_RE = Regex("^[A-Za-z0-9_.]+$")
         private val WS_RE = Regex("\\s+")
+        private val RLS_RE = Regex("RequestedLayerState\\{[0-9a-fA-F]+\\s+(.+?)(?:\\s+parentId=.*|\\s+ROOT.*|\\}.*)?$")
         private val FOCUS_RE = Regex("([A-Za-z0-9_.]+)/[A-Za-z0-9_.$]+")
         private const val FOCUS_CMD =
             "dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | head -n 2"

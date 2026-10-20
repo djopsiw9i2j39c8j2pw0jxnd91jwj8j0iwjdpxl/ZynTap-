@@ -162,6 +162,7 @@ class OverlayService : Service() {
                 editLock = picking
                 if (!picking) setPanelGhost(false)
                 circles.fadeAll(if (picking) 0f else 1f, 100)
+                if (::stats.isInitialized) stats.fadeTo(!picking, 100) // thanh thông số ẩn cùng các UI nổi khác
             },
             { dragging -> setPanelGhost(dragging) }, // chỉ ẩn menu khi đang kéo ghim
         )
