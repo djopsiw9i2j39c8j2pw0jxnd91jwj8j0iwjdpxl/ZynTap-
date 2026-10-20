@@ -27,12 +27,14 @@ class PointPickerOverlay(
 ) {
     private val density = UiScale.density(ctx.resources)
     private fun dp(n: Int) = (n * density).toInt()
+    private var disposed = false
     private var pin: Pin? = null
     private var cancelView: View? = null
     private var callback: ((Int, Int) -> Unit)? = null
     val isShowing get() = pin != null
 
     fun show(x: Int?, y: Int?, onPick: (Int, Int) -> Unit) {
+        if (disposed) return
         close()
         callback = onPick
         val screen = bounds()
@@ -125,7 +127,14 @@ class PointPickerOverlay(
         pin?.let { it.animate().cancel(); runCatching { wm.removeViewImmediate(it) } }
         cancelView?.let { runCatching { wm.removeViewImmediate(it) } }
         pin = null; cancelView = null; callback = null
-        if (active) onVisibility(false)
+        if (active && !disposed) onVisibility(false)
+    }
+
+    /** Permanent service shutdown: do not call back into UI restoration while tearing it down. */
+    fun dispose() {
+        if (disposed) return
+        disposed = true
+        close()
     }
 
     private class Pin(ctx: Context) : View(ctx) {

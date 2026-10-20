@@ -385,6 +385,7 @@ class StatsBarOverlay(
     private val main = Handler(Looper.getMainLooper())
     private val d get() = UiScale.density(ctx.resources)
 
+    @Volatile private var closed = false
     private var view: StatsBarView? = null
     private var params: WindowManager.LayoutParams? = null
     private var addedAt = 0L
@@ -396,6 +397,7 @@ class StatsBarOverlay(
     private var ticking = false
     private val tick = object : Runnable {
         override fun run() {
+            if (closed) { ticking = false; return }
             try {
                 refreshOnce()
             } catch (t: Throwable) {
@@ -406,7 +408,7 @@ class StatsBarOverlay(
     }
 
     private fun startTicker() {
-        if (ticking) return
+        if (closed || ticking) return
         ticking = true
         main.post(tick)
     }
@@ -483,6 +485,7 @@ class StatsBarOverlay(
 
     // ---- ô xem trước trong tab Cài đặt ----
     internal fun addPreview(v: StatsBarView) {
+        if (closed) return
         if (!previews.contains(v)) previews.add(v)
         lastSnap?.let { v.update(it) }
         startTicker()
@@ -530,7 +533,7 @@ class StatsBarOverlay(
     }
 
     private fun startScreenFpsMeter() {
-        if (screenFpsRunning) return
+        if (closed || screenFpsRunning) return
         screenFpsRunning = true
         screenFrameCount = 0
         screenSampleStartedAt = SystemClock.elapsedRealtime()
@@ -569,12 +572,14 @@ class StatsBarOverlay(
     @Volatile private var cachedFocusAt = 0L
 
     private fun requestFpsSample() {
+        if (closed) return
         val nowReq = SystemClock.elapsedRealtime()
         if (nowReq - lastFpsReqAt < FPS_SAMPLE_GAP_MS) return
         if (!fpsSampling.compareAndSet(false, true)) return
         lastFpsReqAt = nowReq
         fpsExecutor.execute {
             try {
+                if (closed) return@execute
                 val manager = runCatching { ZynAdbConnectionManager.get(ctx.applicationContext) }.getOrNull()
                 if (manager == null || !manager.isConnected) {
                     publishFps(-1)
@@ -750,7 +755,7 @@ class StatsBarOverlay(
 
     /** Dựng / cập nhật / gỡ cho khớp cấu hình hiện tại. Gọi lặp lại thoải mái. */
     fun ensure() {
-        if (!OverlayPermission.granted(ctx)) return
+        if (closed || !OverlayPermission.granted(ctx)) return
         if (!settings.anyOn()) { remove(); return }
         val old = view
         if (old != null && !old.isAttachedToWindow && SystemClock.uptimeMillis() - addedAt > 1500L) {
@@ -904,18 +909,25 @@ class StatsBarOverlay(
 
     /** Dịch vụ tắt: gỡ cửa sổ, dừng nhịp, dừng luồng đo. */
     fun close() {
+        if (closed) return
+        closed = true
         remove()
         main.removeCallbacksAndMessages(null)
         ticking = false
         previews.clear()
-        if (timeStatsStarted.compareAndSet(true, false)) {
-            fpsExecutor.execute {
+        // remove() may have seen an active preview. Explicitly stop Choreographer AFTER clearing it.
+        stopScreenFpsMeter()
+        onDrag = null
+        // Queue behind an in-flight sample: it may enable TimeStats after close() starts.
+        fpsExecutor.execute {
+            if (timeStatsStarted.compareAndSet(true, false)) {
                 runCatching {
                     val manager = ZynAdbConnectionManager.get(ctx.applicationContext)
                     if (manager.isConnected) runAdbText(manager, "dumpsys SurfaceFlinger --timestats -disable", 8_000)
                 }
             }
         }
+        fpsExecutor.shutdown() // orderly, non-blocking: queued cleanup still runs.
     }
 
     fun state(): String {

@@ -64,7 +64,10 @@ import kotlin.math.abs
  */
 class OverlayService : Service() {
 
-    private lateinit var wm: WindowManager
+    private lateinit var wm: OverlayWindowManager
+    @Volatile private var stopping = false
+    @Volatile private var targetGeneration = 0L
+    private val targetCloseQueued = java.util.concurrent.atomic.AtomicLong(-1L)
     private var handleView: View? = null
     private var panelView: FrameLayout? = null
     private var panelCard: View? = null
@@ -77,7 +80,7 @@ class OverlayService : Service() {
     private var solid = false          // đang ở chế độ giao diện trong suốt
     private var solidAmount = 0f       // 0 = đặc, 1 = trong suốt hẳn (để chuyển mượt)
     private var solidAnim: ValueAnimator? = null
-    private var closing = false        // đang chạy hiệu ứng đóng menu
+    @Volatile private var closing = false        // đang chạy hiệu ứng đóng menu
     private var closeAnim: ValueAnimator? = null
     private var panelAnimating = false
     private var handleDragging = false
@@ -118,11 +121,16 @@ class OverlayService : Service() {
     private val targetHandler = Handler(targetThread.looper)
 
     // ---- tự đóng khi thoát app đã mở ----
-    private var targetPkg: String? = null     // app người dùng đã chọn/mở từ ZynTap
-    @Volatile private var targetSeen = false            // đã thấy app đó ở trước màn hình ít nhất một lần
-    @Volatile private var targetMisses = 0              // số lần kiểm tra liên tiếp thấy app không còn ở trước
-    @Volatile private var usageTracker: UsageAccess.Tracker? = null
-    @Volatile private var warnedNoUsage = false         // đã báo log thiếu quyền "Truy cập dữ liệu sử dụng"
+    @Volatile private var targetPkg: String? = null     // app người dùng đã chọn/mở từ ZynTap
+    // Main publishes a new session; mutable detection state belongs ONLY to targetThread.
+    // A poll already in flight cannot overwrite the next launch's seen/misses/tracker state.
+    private class TargetSession(val pkg: String, val generation: Long) {
+        var seen = false
+        var misses = 0
+        var tracker: UsageAccess.Tracker? = null
+        var warnedNoUsage = false
+    }
+    @Volatile private var targetSession: TargetSession? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -132,7 +140,7 @@ class OverlayService : Service() {
         DebugLog.i("Dịch vụ", "Menu nổi bắt đầu chạy")
         running = true
         WifiState.start(this)
-        wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        wm = OverlayWindowManager(getSystemService(Context.WINDOW_SERVICE) as WindowManager)
         // Dọn tâm ảo còn sót lại từ lần chạy trước (nếu lần đó bị tắt giữa chừng)
         runCatching { CrosshairOverlay.sweepOrphans() }
         runCatching { StatsBarOverlay.sweepOrphans() }
@@ -157,6 +165,7 @@ class OverlayService : Service() {
         pointPicker = PointPickerOverlay(this, wm, { realBounds },
             { w, h, f -> overlayParams(w, h, f) },
             { picking ->
+                if (stopping) return@PointPickerOverlay
                 if (picking) { pointRunner.stopAll(); circles.cancelTouches() }
                 // Keep the inputs touchable: tapping X/Y a second time cancels the pin and edits manually.
                 editLock = picking
@@ -168,7 +177,7 @@ class OverlayService : Service() {
         )
         circles.onDrag = { dragging -> setPanelGhost(dragging) } // kéo nút main -> menu ẩn, thả -> hiện
         circles.onAction = { button, down ->
-            if (!pointPicker.isShowing && !editLock && !inputActive) pointRunner.touch(button, down)
+            if (!stopping && !closing && !pointPicker.isShowing && !editLock && !inputActive) pointRunner.touch(button, down)
             else { pointRunner.cancelTouch(button.id); false }
         }
         circles.onCancel = { id -> pointRunner.cancelTouch(id) }
@@ -176,11 +185,13 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (stopping) return START_NOT_STICKY
         when (intent?.action) {
             ACTION_HIDE -> closePanel()
             ACTION_STOP -> {
                 // Người dùng chủ động tắt -> không tự khôi phục nữa
                 setWanted(this, false)
+                shutdownOverlays()
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -193,11 +204,15 @@ class OverlayService : Service() {
                 // Ghi nhớ app đang được mở để biết lúc nào người dùng thoát khỏi nó
                 val pkg = intent?.getStringExtra(EXTRA_TARGET_PKG)
                 if (pkg != null) {
-                    if (pkg != targetPkg) { targetSeen = false; targetMisses = 0; usageTracker = null }
+                    // Invalidate an exit queued by an earlier launch, even for the same package.
+                    targetGeneration++
+                    targetCloseQueued.set(-1L)
                     targetPkg = pkg
+                    targetSession = TargetSession(pkg, targetGeneration)
                     prefs.edit().putString(KEY_TARGET, pkg).apply()
                 } else if (targetPkg == null) {
                     targetPkg = prefs.getString(KEY_TARGET, null)
+                    targetSession = targetPkg?.let { TargetSession(it, targetGeneration) }
                 }
                 ensureHandle()
                 circles.ensureAll()
@@ -211,28 +226,41 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
-        // Gỡ cửa sổ TRƯỚC và bọc riêng từng bước: một bước lỗi không được làm các cửa sổ còn lại
-        // (nhất là tâm ảo / vòng quanh tâm) bị bỏ sót trên màn hình sau khi dịch vụ đã tắt.
+        shutdownOverlays()
+        targetThread.quitSafely()
+        running = false
+        super.onDestroy()
+    }
+
+    /** Terminal, idempotent cleanup on main. Never wait for an animation to remove windows. */
+    private fun shutdownOverlays() {
+        if (stopping) return
+        stopping = true // BEFORE cancellation: close()/cancel() callbacks cannot resurrect UI.
+        closing = true
+        targetGeneration++
         handler.removeCallbacksAndMessages(null)
         targetHandler.removeCallbacksAndMessages(null)
-        targetThread.quitSafely()
-        safely("tâm ảo") { if (::crosshair.isInitialized) crosshair.remove() }
-        safely("thanh thông số") { if (::stats.isInitialized) stats.close() }
-        safely("nút main") { if (::circles.isInitialized) circles.removeAll() }
-        safely("ô chọn điểm") { if (::pointPicker.isInitialized) pointPicker.close() }
-        safely("bộ chạy điểm nhấn") { if (::pointRunner.isInitialized) pointRunner.close() }
+        // Close the shared window owner before invoking any component cleanup callback.
+        safely("chủ cửa sổ") { if (::wm.isInitialized) wm.close() }
         safely("hiệu ứng") {
             closeAnim?.let { it.removeAllListeners(); it.cancel() }
             closeAnim = null
             solidAnim?.cancel()
             editDimAnim?.cancel()
+            ghostAnim?.cancel()
         }
+        safely("ô chọn điểm") { if (::pointPicker.isInitialized) pointPicker.dispose() }
         safely("menu + tay nắm") { removeViews() }
-        // Lưới an toàn cuối: còn cửa sổ tâm nào sót thì gỡ nốt
-        safely("tâm ảo (quét lại)") { CrosshairOverlay.sweepOrphans() }
-        DebugLog.i("Dịch vụ", "Menu nổi đã tắt")
+        safely("nút main") { if (::circles.isInitialized) circles.close() }
+        safely("tâm ảo") { if (::crosshair.isInitialized) crosshair.close() }
+        safely("thanh thông số") { if (::stats.isInitialized) stats.close() }
+        safely("bộ chạy điểm nhấn") { if (::pointRunner.isInitialized) pointRunner.close() }
         running = false
-        super.onDestroy()
+        if (::wm.isInitialized && wm.pendingCount > 0) {
+            DebugLog.w("Dọn dẹp", "Đã chặn dựng UI; còn ${wm.pendingCount} cửa sổ đang chờ thử gỡ lại")
+        } else {
+            DebugLog.i("Dịch vụ", "Đã gỡ toàn bộ cửa sổ nổi; đã chặn callback dựng lại UI")
+        }
     }
 
     private inline fun safely(what: String, block: () -> Unit) {
@@ -243,20 +271,23 @@ class OverlayService : Service() {
 
     private val watchdog = object : Runnable {
         override fun run() {
+            if (stopping || closing) return
             runCatching { checkHealth() }.onFailure { DebugLog.e("Watchdog", "checkHealth lỗi", it) }
-            handler.postDelayed(this, WATCHDOG_MS)
+            if (!stopping && !closing) handler.postDelayed(this, WATCHDOG_MS)
         }
     }
 
     /** Nhịp nối lại ADB riêng 100ms (ensureInBackground tự chặn trùng lượt nên gọi dày vẫn an toàn). */
     private val reconnectTick = object : Runnable {
         override fun run() {
+            if (stopping || closing) return
             runCatching { AdbSession.ensureInBackground(this@OverlayService) }
-            handler.postDelayed(this, RECONNECT_MS)
+            if (!stopping && !closing) handler.postDelayed(this, RECONNECT_MS)
         }
     }
 
     private fun startWatchdog() {
+        if (stopping || closing) return
         handler.removeCallbacks(reconnectTick)
         handler.postDelayed(reconnectTick, RECONNECT_MS)
         handler.removeCallbacks(watchdog)
@@ -268,13 +299,15 @@ class OverlayService : Service() {
     /** Vòng kiểm tra nhanh riêng cho việc thoát app, để về màn hình chính là UI nổi tắt gần như ngay. */
     private val targetWatcher = object : Runnable {
         override fun run() {
+            if (stopping) return
             runCatching { checkTargetApp() }.onFailure { DebugLog.e("Tự đóng", "checkTargetApp lỗi", it) }
-            targetHandler.postDelayed(this, TARGET_POLL_MS)
+            if (!stopping && targetCloseQueued.get() != targetGeneration) targetHandler.postDelayed(this, TARGET_POLL_MS)
         }
     }
 
     /** Kiểm tra định kỳ: nút/menu bị hệ thống gỡ mất, hoặc nút kẹt trạng thái ẩn -> dựng lại. */
     private fun checkHealth() {
+        if (stopping || closing) return
         // Tự nối lại ADB khi mất kết nối (sau cập nhật app, bật lại gỡ lỗi Wi-Fi, đổi mạng...)
         AdbSession.ensureInBackground(this)
         crosshair.ensure()
@@ -308,21 +341,23 @@ class OverlayService : Service() {
     /**
      * Mỗi nhịp watchdog đọc các sự kiện mở/thoát activity MỚI (UsageStatsManager, chạy trong máy,
      * không qua ADB, rất nhẹ) để biết app đã mở có còn ở trước màn hình không. Thấy không còn vài
-     * lần liên tiếp (tránh nhầm lúc chuyển cửa sổ thoáng qua) -> đóng menu như khi bấm dấu X.
+     * lần liên tiếp (tránh nhầm lúc chuyển cửa sổ thoáng qua) -> gỡ UI ngay, không đợi animation.
      * Chưa cấp quyền "Truy cập dữ liệu sử dụng" thì bỏ qua, không đóng nhầm.
      */
     private fun checkTargetApp() {
-        val pkg = targetPkg ?: return
-        if (closing || !wanted(this)) return
+        val session = targetSession ?: return
+        val generation = session.generation
+        val pkg = session.pkg
+        if (stopping || closing || generation != targetGeneration || targetCloseQueued.get() == generation || !wanted(this)) return
         if (!UsageAccess.granted(this)) {
-            if (!warnedNoUsage) {
-                warnedNoUsage = true
+            if (!session.warnedNoUsage) {
+                session.warnedNoUsage = true
                 DebugLog.w("Tự đóng", "Chưa cấp quyền \"Truy cập dữ liệu sử dụng\" nên menu + tâm ảo KHÔNG tự tắt khi bạn thoát app ($pkg). Cấp quyền trong Cài đặt rồi mở lại ZynTap.")
             }
             return
         }
-        warnedNoUsage = false
-        val tracker = usageTracker ?: UsageAccess.Tracker(applicationContext).also { usageTracker = it }
+        session.warnedNoUsage = false
+        val tracker = session.tracker ?: UsageAccess.Tracker(applicationContext).also { session.tracker = it }
         runCatching { tracker.poll() }.onFailure {
             DebugLog.w("Tự đóng", "Không đọc được app đang ở trước màn hình", it)
             return
@@ -331,33 +366,42 @@ class OverlayService : Service() {
         val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
         val km = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
         if (!pm.isInteractive || km.isKeyguardLocked) {
-            targetMisses = 0
+            session.misses = 0
             return
         }
+        if (stopping || generation != targetGeneration || pkg != targetPkg) return
         if (tracker.isTargetResumed(pkg)) {
-            targetSeen = true
-            targetMisses = 0
-        } else if (targetSeen && tracker.hasLeft(pkg)) {
-            if (++targetMisses >= TARGET_MISS_LIMIT) {
-                DebugLog.i("Tự đóng", "Đã thoát khỏi $pkg -> tự đóng menu, nút main và tâm ảo")
-                handler.post { autoClose() }
+            session.seen = true
+            session.misses = 0
+        } else if (session.seen && tracker.hasLeft(pkg)) {
+            if (++session.misses >= TARGET_MISS_LIMIT) {
+                if (generation != targetGeneration || pkg != targetPkg || stopping) return
+                if (targetCloseQueued.compareAndSet(-1L, generation)) {
+                    handler.post {
+                        // Results from an older launch must never stop a newly selected app.
+                        if (!stopping && generation == targetGeneration && pkg == targetPkg) {
+                            DebugLog.i("Tự đóng", "Đã thoát khỏi $pkg -> gỡ toàn bộ UI ngay")
+                            autoClose()
+                        } else if (!stopping && targetCloseQueued.compareAndSet(generation, -1L)) {
+                            // An old worker can finish just after a new launch reset the queue.
+                            targetHandler.removeCallbacks(targetWatcher)
+                            targetHandler.postDelayed(targetWatcher, TARGET_POLL_MS)
+                        }
+                    }
+                }
             }
         } else {
             // popup / hộp thoại / popup app khác che tạm: chưa phải thoát, không đếm
-            targetMisses = 0
+            session.misses = 0
         }
     }
 
-    /** Đóng như bấm X (có hiệu ứng nếu menu đang mở), hoặc tắt luôn nếu chỉ còn nút tab. */
+    /** App exit must not depend on an animation which may be cancelled during rotation. */
     private fun autoClose() {
-        if (closing) return
-        if (panelView != null && panelCard != null && !panelHidden) {
-            hideConfirm()
-            playCloseAnimation()
-        } else {
-            setWanted(this, false)
-            stopSelf()
-        }
+        if (stopping) return
+        setWanted(this, false)
+        shutdownOverlays()
+        stopSelf()
     }
 
     // ---- lưu / đọc vị trí nút ----------------------------------------------
@@ -478,7 +522,7 @@ class OverlayService : Service() {
 
     /** Dựng lại menu từ đầu (sau khi nạp cấu hình / đổi kích thước) và hiện ngay, không trượt lại. */
     private fun rebuildPanel() {
-        if (closing) return
+        if (stopping || closing) return
         val tab = shownTabIdx
         prefs.edit().putInt(KEY_TAB, tab).apply()
         removePanel()
@@ -547,6 +591,7 @@ class OverlayService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        if (stopping || closing) return
         pointRunner.stopAll()
         circles.cancelTouches()
         // Xoay màn hình: bỏ menu đang mở, đặt lại nút (cutout đổi cạnh nên chờ hệ thống cập nhật)
@@ -569,13 +614,20 @@ class OverlayService : Service() {
         circles.relayoutAll()
         crosshair.ensure()
         stats.ensure()
-        handleView?.postDelayed({ relayoutHandle(); circles.relayoutAll(); crosshair.ensure(); stats.ensure() }, 400)
+        handler.removeCallbacks(rotationRelayout)
+        handler.postDelayed(rotationRelayout, 400L)
+    }
+
+    private val rotationRelayout = Runnable {
+        if (!stopping && !closing) {
+            relayoutHandle(); circles.relayoutAll(); crosshair.ensure(); stats.ensure()
+        }
     }
 
     // ---- nút mở menu (tab bám mép trái) -----------------------------------
 
     private fun ensureHandle() {
-        if (handleView != null) return
+        if (stopping || handleView != null) return
         if (!OverlayPermission.granted(this)) return
         // Vùng chạm luôn đủ to (>= 36x72dp) dù nút nhìn thấy nhỏ thế nào -> không bị mất tương tác
         val visW = dp(HANDLE_W_DP)
@@ -689,6 +741,7 @@ class OverlayService : Service() {
 
     /** Tạo cửa sổ menu (đang ẩn hoàn toàn bên trái) nếu chưa có. */
     private fun ensurePanel() {
+        if (stopping) return
         if (panelView != null) { revealPanel(); setMenuOpenAll(true); return }
         solid = prefs.getBoolean(KEY_SOLID, false)
 
@@ -1204,7 +1257,7 @@ class OverlayService : Service() {
 
     private val statusTick = object : Runnable {
         override fun run() {
-            if (panelView == null || panelHidden) return
+            if (stopping || panelView == null || panelHidden) return
             runCatching { refreshStatus() }
             handler.postDelayed(this, STATUS_MS)
         }
@@ -1284,9 +1337,10 @@ class OverlayService : Service() {
     /** Độ đậm nền tối phía sau; nhạt đi khi đang chỉnh nút để nhìn rõ màn hình mà đặt vị trí. */
     /** Ẩn hoàn toàn menu (card + nền tối) khi đang kéo ghim/nút main; thả ra thì hiện lại. */
     private fun setPanelGhost(on: Boolean) {
+        if (stopping) return
         if (panelGhost == on) return
         panelGhost = on
-        if (closing) return
+        if (stopping || closing) return
         panelControls?.animate()?.cancel()
         // Mờ dần + thu nhẹ khi ẩn, hiện lại thì nở ra: card và nền tối chạy chung một animator cho đồng bộ.
         ghostAnim?.cancel()
@@ -1328,6 +1382,7 @@ class OverlayService : Service() {
 
     /** Bật/tắt khoá đóng nhầm khi đang chỉnh một nút main. */
     private fun setEditing(on: Boolean) {
+        if (stopping) return
         if (on) { pointRunner.stopAll(); circles.cancelTouches() }
         if (editLock == on) return
         editLock = on
@@ -1464,7 +1519,7 @@ class OverlayService : Service() {
     private fun showConfirm() {
         val layer = confirmLayer ?: return
         val dlg = confirmDialog ?: return
-        if (closing) return
+        if (stopping || closing) return
         layer.animate().cancel(); dlg.animate().cancel()
         layer.visibility = View.VISIBLE
         layer.alpha = 0f
@@ -1486,9 +1541,10 @@ class OverlayService : Service() {
     // ---- hiệu ứng đóng menu: thu thành viên tròn logo rồi bay lên ----------
 
     private fun playCloseAnimation() {
+        if (stopping) return
         val card = panelCard ?: return
         val scrim = panelView ?: return
-        if (closing) return
+        if (stopping || closing) return
         closing = true
         setWanted(this, false) // chủ động đóng -> không tự khôi phục
         handler.removeCallbacks(watchdog)
@@ -1552,6 +1608,7 @@ class OverlayService : Service() {
     }
 
     private fun finishClose() {
+        if (stopping) return
         closeAnim = null
         closing = false
         if (wanted(this)) {
@@ -1563,6 +1620,7 @@ class OverlayService : Service() {
             handleView?.alpha = 1f
             startWatchdog()
         } else {
+            shutdownOverlays()
             stopSelf()
         }
     }
@@ -1570,7 +1628,7 @@ class OverlayService : Service() {
     // ---- điều khiển + animation -------------------------------------------
 
     private fun beginPanelDrag() {
-        if (closing) return
+        if (stopping || closing) return
         panelCard?.animate()?.cancel()
         panelView?.animate()?.cancel()
         handleView?.animate()?.cancel()
@@ -1639,7 +1697,7 @@ class OverlayService : Service() {
     }
 
     private fun openPanel() {
-        if (closing) return
+        if (stopping || closing) return
         ensurePanel()
         val card = panelCard ?: return
         val scrim = panelView ?: return
@@ -1647,6 +1705,7 @@ class OverlayService : Service() {
         panelAnimating = true
         // post: đợi cửa sổ menu gắn xong rồi mới chạy animation trượt, nếu không sẽ bị "nhảy" thẳng
         scrim.post {
+            if (stopping || closing || panelView !== scrim) return@post
             card.animate().translationX(0f).setDuration(PANEL_ANIM_MS)
                 .setInterpolator(DecelerateInterpolator(1.6f))
                 .withEndAction { panelAnimating = false }.start()
@@ -1656,7 +1715,7 @@ class OverlayService : Service() {
     }
 
     private fun closePanel() {
-        if (closing) return
+        if (stopping || closing) return
         val card = panelCard
         val scrim = panelView
         if (card == null || scrim == null || panelHidden) {
@@ -1765,7 +1824,10 @@ class OverlayService : Service() {
         editDim = 0f
         editLock = false
         if (::circles.isInitialized) circles.setEditing(null)
-        panelView?.let { runCatching { wm.removeView(it) } }
+        panelView?.let {
+            it.animate().setListener(null).withEndAction(null).cancel()
+            runCatching { wm.removeViewImmediate(it) }
+        }
         panelParams = null
         dropdownLayer = null
         promptLayer = null
@@ -1806,8 +1868,9 @@ class OverlayService : Service() {
     }
 
     private fun removeViews() {
-        handleView?.let { runCatching { wm.removeView(it) } }
+        handleView?.let { runCatching { wm.removeViewImmediate(it) } }
         handleView = null
+        handleParams = null
         removePanel()
         if (::circles.isInitialized) circles.removeAll()
         if (::crosshair.isInitialized) crosshair.remove()

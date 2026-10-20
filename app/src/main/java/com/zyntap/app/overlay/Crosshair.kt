@@ -251,6 +251,7 @@ class CrosshairOverlay(
     private val screenBounds: () -> Rect,
     private val newParams: (width: Int, height: Int, flags: Int) -> WindowManager.LayoutParams,
 ) {
+    private var closed = false
     private var view: CrosshairView? = null
     private var params: WindowManager.LayoutParams? = null
     private var addedAt = 0L
@@ -269,7 +270,7 @@ class CrosshairOverlay(
 
     /** Dựng / cập nhật / gỡ cho khớp cấu hình hiện tại. Gọi lặp lại thoải mái. */
     fun ensure() {
-        if (!OverlayPermission.granted(ctx)) return
+        if (closed || !OverlayPermission.granted(ctx)) return
         val s = settings.spec(d)
         if (!s.dotOn && !s.ringOn) { remove(); return }
         val v = view
@@ -316,6 +317,13 @@ class CrosshairOverlay(
         view?.let { detach(wm, it) }
         view = null; params = null
         sweepOrphans()
+    }
+
+    /** Permanent service shutdown; unlike remove(), late ensure() calls must do nothing. */
+    fun close() {
+        if (closed) return
+        closed = true
+        remove()
     }
 
     /** Mô tả ngắn cho tab Debug log. */

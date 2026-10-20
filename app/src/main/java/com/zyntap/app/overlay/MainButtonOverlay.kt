@@ -380,6 +380,7 @@ class MainButtonOverlay(
 
     private class Entry(val view: MainButtonView, val params: WindowManager.LayoutParams, var addedAt: Long)
 
+    private var closed = false
     private val entries = HashMap<Int, Entry>()
     private var editingId: Int? = null
 
@@ -446,7 +447,7 @@ class MainButtonOverlay(
 
     /** Thêm nút còn thiếu, dựng lại nút bị hệ thống gỡ mất, bỏ nút đã xoá. Gọi lặp lại thoải mái. */
     fun ensureAll() {
-        if (!OverlayPermission.granted(ctx)) return
+        if (closed || !OverlayPermission.granted(ctx)) return
         val now = SystemClock.uptimeMillis()
         entries.entries.toList().forEach { (id, e) ->
             if (repo.find(id) == null) removeView(id)
@@ -554,7 +555,7 @@ class MainButtonOverlay(
     private fun refreshWatcher() {
         // Có nút main là bật proxy: helper phải grab cảm ứng từ trước, vì lúc đang giữ ngón lên nút
         // (chế độ Giữ) mới grab thì hệ thống đã kẹt ngón thật. Cũng cần cho chạm xuyên.
-        val need = OverlayPermission.granted(ctx) && repo.buttons.isNotEmpty()
+        val need = !closed && entries.isNotEmpty() && OverlayPermission.granted(ctx) && repo.buttons.isNotEmpty()
         if (need) watcher.start() else { watcher.stop(); cancelWatched() }
     }
 
@@ -575,6 +576,7 @@ class MainButtonOverlay(
     }
 
     private fun onWatchedFinger(slot: Int, down: Boolean, x: Int, y: Int) {
+        if (closed) return
         if (down) {
             if (watched.containsKey(slot)) return
             val id = buttonAt(x, y) ?: return
@@ -600,6 +602,7 @@ class MainButtonOverlay(
     }
 
     private fun addView(b: MainButton) {
+        if (closed) return
         val win = winSize(b)
         val p = newParams(
             win, win,
@@ -640,12 +643,14 @@ class MainButtonOverlay(
         notifyCancel(id)
         watched.entries.removeAll { it.value == id }
         val e = entries.remove(id) ?: return
-        e.view.animate().cancel()
+        e.view.animate().setListener(null).withEndAction(null).cancel()
         runCatching { wm.removeViewImmediate(e.view) }
+            .onFailure { com.zyntap.app.data.DebugLog.e("Nút main", "Không gỡ được cửa sổ nút $id", it) }
     }
 
     /** Nút mới được tạo. */
     fun onAdded(b: MainButton) {
+        if (closed) return
         if (!entries.containsKey(b.id)) addView(b)
         refreshWatcher()
         entries[b.id]?.view?.let { v ->
@@ -756,6 +761,17 @@ class MainButtonOverlay(
         watcher.stop()
         cancelWatched()
         entries.keys.toList().forEach { removeView(it) }
+    }
+
+    /** Permanent shutdown. removeAll() alone is also used for temporary DPI/config rebuilds. */
+    fun close() {
+        if (closed) return
+        closed = true
+        removeAll()
+        onAction = null
+        onCancel = null
+        onDrag = null
+        canFire = null
     }
 
     private fun attachTouch(id: Int, v: MainButtonView, p: WindowManager.LayoutParams) {
