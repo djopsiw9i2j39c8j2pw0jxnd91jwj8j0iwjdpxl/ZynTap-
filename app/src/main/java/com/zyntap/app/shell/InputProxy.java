@@ -561,7 +561,6 @@ public final class InputProxy {
         startRaw(s, -2);
         hasX[s] = kx;
         hasY[s] = ky;
-        log("nhận nuôi ngón slot " + s + " (mất tracking id: helper vừa khởi động / SYN_DROPPED / BTN_TOUCH nhầm)");
     }
 
     /** Gọi dưới LOCK. Sau SYN_DROPPED: toạ độ [value] thuộc ngón đang chạm có toạ độ gần nhất trên trục đó. */
@@ -743,10 +742,6 @@ public final class InputProxy {
         int at = 0;
         while (at < shown.size() && shown.get(at).pid < pid) at++;
         shown.add(at, new Finger(slot, tap, pid, p.copy()));
-        if (tap == null) {
-            log("ngón thật slot " + slot + " nhận pid " + pid + " chỉ số " + at + "/" + shown.size()
-                    + (!curTaps.isEmpty() ? " (click đang giữ)" : ""));
-        }
         emit(shown.size() == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN, at);
         return true;
     }
@@ -789,7 +784,6 @@ public final class InputProxy {
             boolean keep = f.real() ? want[f.slot] != null : (f.tap.down && !f.tap.finished);
             if (keep) { i++; continue; }
             emit(shown.size() == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP, i);
-            if (f.real()) log("ngón thật slot " + f.slot + " nhả (pid " + f.pid + ")");
             shown.remove(i);
             pidMask &= ~(1 << f.pid);
         }
@@ -800,7 +794,6 @@ public final class InputProxy {
             if (w != null && !w.same(f.sent)) { f.sent = w.copy(); moved = true; if (f.real()) realMoved = true; }
         }
         if (moved) emit(MotionEvent.ACTION_MOVE, -1);
-        if (realMoved) synchronized (STAT) { stRawMove++; }
         // 3) ngón mới -> DOWN, nối vào cuối: thật hay ảo cũng xếp theo lúc chạm xuống
         for (int s = 0; s < REAL_SLOTS; s++) {
             if (want[s] != null && indexOfSlot(s) < 0) {
@@ -955,11 +948,6 @@ public final class InputProxy {
                 p.ev.recycle();
             }
             long took = SystemClock.uptimeMillis() - t0;
-            synchronized (STAT) {
-                if (p.move) stInjMove++; else stInjOther++;
-                if (took > stMaxCall) stMaxCall = took;
-                if (age > stMaxAge) stMaxAge = age;
-            }
             if ((age > 100 || took > 50) && t0 - lastLagLogAt > 1500) {
                 lastLagLogAt = t0;
                 int qn; synchronized (INJ_LOCK) { qn = INJQ.size(); }
@@ -1136,7 +1124,6 @@ public final class InputProxy {
             tapErr("click bị bỏ: hết chỗ pointer");
         } else {
             curReleaseAt = SystemClock.uptimeMillis() + r.hold; // giữ tính từ lúc thật sự chạm xuống
-            synchronized (STAT) { stTapDown += curTaps.size(); }
         }
     }
 
@@ -1168,7 +1155,6 @@ public final class InputProxy {
             while (!stopping) {
                 long now = SystemClock.uptimeMillis();
                 long wait = 1000;
-                if (now - lastStatAt >= STAT_MS) { lastStatAt = now; logStats(); }
                 if (!curTaps.isEmpty() && now >= curReleaseAt) {
                     for (int i = 0; i < curTaps.size(); i++) curTaps.get(i).finished = true;
                     sync();                       // UP cả cụm
