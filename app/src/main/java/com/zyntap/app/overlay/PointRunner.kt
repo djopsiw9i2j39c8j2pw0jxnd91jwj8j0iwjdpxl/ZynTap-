@@ -133,7 +133,7 @@ class PointRunner(
     private fun encode(script: PointScript): String = script.steps.joinToString(" ") { step ->
         when (step) {
             is PointStep.Tap -> "T:${step.x},${step.y}"
-            is PointStep.Multi -> "M:" + step.points.joinToString(";") { (x, y) -> "$x,$y" }
+            is PointStep.Multi -> (if (step.points.size == 1) "T:" else "M:") + step.points.joinToString(";") { (x, y) -> "$x,$y" }
             is PointStep.Wait -> "W:${step.millis}"
         }
     }

@@ -44,12 +44,11 @@ class PointsTab(
     private lateinit var delayField: EditText
     private lateinit var multiXField: EditText
     private lateinit var multiYField: EditText
-    /** Các điểm của dòng Multiclick đang soạn (chưa ghi vào kịch bản tới khi chạm Xong). */
-    private val multiPending = mutableListOf<Pair<Int, Int>>()
     private lateinit var status: TextView
     private var selectedId: Int? = null
     private var loading = false
-    private var manualArmed = false
+    /** Ô nhập vừa được chạm gần nhất (null = vừa rời nhập). Chạm lại CHÍNH ô đó thì hiện ghim chọn điểm; đổi sang ô khác thì không. */
+    private var lastInput: EditText? = null
     private var visible = false
     private fun selected() = selectedId?.let(repo::find)
     private fun round(color: Int, stroke: Int = 0xFF24344E.toInt()) = GradientDrawable().apply {
@@ -102,7 +101,7 @@ class PointsTab(
         caption.addView(label("Tự động lưu", 10.5f).apply { setTextColor(cyan) })
         page.addView(caption)
         editor = EditText(ctx).apply {
-            hint = "828, 191\n300ms\nmulti 18,181 | 400,500"
+            hint = "Click 828, 191\n300ms\nMulticlick 18, 181\nMulticlick 400, 500"
             setTextColor(0xFFC3EAFE.toInt()); setHintTextColor(0xFF405675.toInt())
             scaledTextSize(13.5f); typeface = Typeface.MONOSPACE; gravity = Gravity.TOP or Gravity.START
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
@@ -113,7 +112,7 @@ class PointsTab(
             setHorizontallyScrolling(false)
             setOnTouchListener { v, event ->
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) { picker.close(); keyboard(true) }
-                if (event.actionMasked == MotionEvent.ACTION_UP) focus(this, false)
+                if (event.actionMasked == MotionEvent.ACTION_UP) { lastInput = this; focus(this, false) }
                 v.parent.requestDisallowInterceptTouchEvent(event.actionMasked != MotionEvent.ACTION_UP && event.actionMasked != MotionEvent.ACTION_CANCEL)
                 false
             }
@@ -130,7 +129,7 @@ class PointsTab(
         status = label("", 10.5f).apply { maxLines = 2 }
         page.addView(status, LinearLayout.LayoutParams(-1, dp(30)))
         buildInputs(page)
-        page.addView(label("Chạm X/Y → kéo ghim → chạm ghim → Enter.\nDelay chờ tại dòng đó, trước điểm tiếp theo.\nMulticlick: Enter từng điểm rồi Xong → click tất cả CÙNG LÚC.", 10.5f), LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(6) })
+        page.addView(label("Chạm X/Y → kéo ghim → chạm ghim → Enter.\nDelay chờ tại dòng đó, trước điểm tiếp theo.\nCác dòng Multiclick liền nhau click CÙNG LÚC.", 10.5f), LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(6) })
         root.addView(ScrollView(ctx).apply {
             isFillViewport = true; isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -148,27 +147,20 @@ class PointsTab(
         wirePointFields(xField, yField) { appendPoint() }
         page.addView(pointRow)
 
-        // Multiclick point: nhập từng điểm như Click point, rồi chạm "Xong" để ghi MỘT dòng click TẤT CẢ các điểm CÙNG LÚC
+        // Multiclick point: y hệt Click point (mỗi lần 1 điểm). Các dòng Multiclick liền nhau được click CÙNG LÚC.
         val multiRow = row()
         multiRow.addView(label("Multiclick"), LinearLayout.LayoutParams(dp(78), dp(42)))
         multiXField = field("X"); multiYField = field("Y")
         multiRow.addView(multiXField, LinearLayout.LayoutParams(0, dp(42), 1f))
         multiRow.addView(multiYField, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(8) })
-        val done = TextView(ctx).apply {
-            text = "Xong"; scaledTextSize(12.5f); setTextColor(cyan); gravity = Gravity.CENTER
-            typeface = Typeface.DEFAULT_BOLD
-            background = RippleDrawable(ColorStateList.valueOf(0x2219D3FF), round(0xFF142036.toInt(), cyan), round(-1))
-            setOnClickListener { commitMulti() }
-        }
-        multiRow.addView(done, LinearLayout.LayoutParams(dp(54), dp(42)).apply { marginStart = dp(8) })
-        wirePointFields(multiXField, multiYField) { addMultiPoint() }
+        wirePointFields(multiXField, multiYField) { appendMulti() }
         page.addView(multiRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
         val delayRow = row()
         delayRow.addView(label("Delay"), LinearLayout.LayoutParams(dp(78), dp(42)))
         delayField = field("Nhập delay (ms)").apply {
             setOnTouchListener { _, event ->
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) { picker.close(); keyboard(true) }
-                if (event.actionMasked == MotionEvent.ACTION_UP) focus(this, false)
+                if (event.actionMasked == MotionEvent.ACTION_UP) { lastInput = this; focus(this, false) }
                 false
             }
             setOnEditorActionListener { _, action, event ->
@@ -180,28 +172,38 @@ class PointsTab(
         page.addView(delayRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
     }
 
-    /** Cặp ô X/Y: chạm lần đầu mở ghim chọn điểm, chạm lần sau mở bàn phím; Enter gọi [onEnter]. */
+    /**
+     * Cặp ô X/Y. Chạm một ô: hiện ghim chọn điểm → chọn xong bàn phím tự nhập → chạm lại CHÍNH ô đó thì lại hiện ghim → lặp.
+     * Đổi sang ô khác (X↔Y, sang hàng khác, Delay, kịch bản) thì KHÔNG hiện ghim, chỉ mở bàn phím.
+     * Đang mở ghim mà chạm ô thì đóng ghim, chuyển sang nhập tay. Enter gọi [onEnter].
+     */
     private fun wirePointFields(xf: EditText, yf: EditText, onEnter: () -> Unit) {
         listOf(xf, yf).forEach { input ->
+            var pick = false
             input.setOnTouchListener { _, event ->
-                if (!manualArmed) {
-                    if (event.actionMasked == MotionEvent.ACTION_UP && selected() != null) {
-                        manualArmed = true
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        pick = selected() != null && !picker.isShowing && (lastInput == null || lastInput === input)
+                        if (!pick) { picker.close(); keyboard(true) }
+                    }
+                    MotionEvent.ACTION_UP -> if (pick) {
                         leaveInput()
+                        lastInput = input
                         picker.show(xf.text.toString().toIntOrNull(), yf.text.toString().toIntOrNull()) { x, y ->
                             if (visible) {
                                 xf.setText(x.toString()); yf.setText(y.toString())
                                 showStatus("Đã chọn ($x, $y) · Enter để thêm", false)
+                                lastInput = input
                                 focus(input)
                             }
                         }
+                    } else {
+                        lastInput = input
+                        focus(input, false)
                     }
-                    true
-                } else {
-                    if (event.actionMasked == MotionEvent.ACTION_DOWN) { picker.close(); keyboard(true) }
-                    if (event.actionMasked == MotionEvent.ACTION_UP) focus(input, false)
-                    false
+                    MotionEvent.ACTION_CANCEL -> pick = false
                 }
+                pick   // đang chọn ghim thì nuốt chạm (không focus ô); ngược lại để ô tự nhận chạm
             }
             input.setOnEditorActionListener { _, action, event ->
                 if (isEnter(action, event)) { onEnter(); true } else false
@@ -209,35 +211,14 @@ class PointsTab(
         }
     }
 
-    private fun addMultiPoint() {
+    private fun appendMulti() {
         val x = multiXField.text.toString().toIntOrNull()
         val y = multiYField.text.toString().toIntOrNull()
         val b = bounds()
         if (x == null || y == null || x !in 0 until b.width() || y !in 0 until b.height()) {
             showStatus("X: 0..${b.width()-1} · Y: 0..${b.height()-1}", true); return
         }
-        if (multiPending.size >= PointScriptParser.MAX_MULTI) {
-            showStatus("Multiclick tối đa ${PointScriptParser.MAX_MULTI} điểm · chạm Xong", true); return
-        }
-        multiPending += x to y
-        multiXField.setText(""); multiYField.setText("")
-        manualArmed = false
-        leaveInput()
-        showStatus("Multiclick: ${multiPending.size} điểm · thêm điểm khác hoặc chạm Xong", false)
-    }
-
-    private fun commitMulti() {
-        if (selected() == null) return
-        // Điểm đang nằm trong ô X/Y mà chưa Enter thì tính luôn.
-        val px = multiXField.text.toString().toIntOrNull()
-        val py = multiYField.text.toString().toIntOrNull()
-        if (px != null && py != null) addMultiPoint()
-        if (multiPending.size < 2) {
-            showStatus("Multiclick cần ít nhất 2 điểm (nhập X/Y rồi Enter)", true); return
-        }
-        append("multi " + multiPending.joinToString(" | ") { "${it.first},${it.second}" })
-        multiPending.clear()
-        manualArmed = false
+        append("Multiclick $x, $y")
         leaveInput()
     }
 
@@ -262,8 +243,7 @@ class PointsTab(
         if (x == null || y == null || x !in 0 until b.width() || y !in 0 until b.height()) {
             showStatus("X: 0..${b.width()-1} · Y: 0..${b.height()-1}", true); return
         }
-        append("$x, $y")
-        manualArmed = false
+        append("Click $x, $y")
         leaveInput()
     }
 
@@ -301,11 +281,11 @@ class PointsTab(
     }
 
     private fun select(id: Int?) {
-        picker.close(); selectedId = id; manualArmed = false
+        picker.close(); selectedId = id; lastInput = null
         loading = true
         editor.setText(selected()?.pointScript.orEmpty())
         xField.setText(""); yField.setText(""); delayField.setText("")
-        multiXField.setText(""); multiYField.setText(""); multiPending.clear()
+        multiXField.setText(""); multiYField.setText("")
         loading = false
         val button = selected()
         mainField.text = button?.let { "${it.code}  ·  ${it.name}     ▾" } ?: "Chưa có main · Tạo ở tab 1"
@@ -322,6 +302,7 @@ class PointsTab(
         if (!::editor.isInitialized) return
         (ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(editor.windowToken, 0)
         listOf(editor, xField, yField, delayField, multiXField, multiYField).forEach { it.clearFocus() }
+        lastInput = null
         keyboard(false)
     }
 
