@@ -103,6 +103,9 @@ class OverlayService : Service() {
     private lateinit var configStore: ConfigStore
     private lateinit var crosshairSettings: CrosshairSettings
     private lateinit var crosshair: CrosshairOverlay
+    private lateinit var statsSettings: StatsSettings
+    private lateinit var stats: StatsBarOverlay
+    private var settingsTab: SettingsTab? = null
     private lateinit var pointPicker: PointPickerOverlay
     private lateinit var pointRunner: PointRunner
     private var inputActive = false
@@ -132,6 +135,7 @@ class OverlayService : Service() {
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         // Dọn tâm ảo còn sót lại từ lần chạy trước (nếu lần đó bị tắt giữa chừng)
         runCatching { CrosshairOverlay.sweepOrphans() }
+        runCatching { StatsBarOverlay.sweepOrphans() }
         uiDensitySig = UiScale.density(resources)
         repo = MainButtonRepo(this)
         configStore = ConfigStore(this)
@@ -144,6 +148,9 @@ class OverlayService : Service() {
         )
         crosshairSettings = CrosshairSettings(this)
         crosshair = CrosshairOverlay(this, wm, crosshairSettings, { realBounds }) { w, h, f -> overlayParams(w, h, f) }
+        statsSettings = StatsSettings(this)
+        stats = StatsBarOverlay(this, wm, statsSettings, { realBounds }, { w, h, f -> overlayParams(w, h, f) }, { targetPkg })
+        stats.onDrag = { dragging -> setPanelGhost(dragging) } // kéo thanh thông số -> menu mờ đi, thả -> hiện lại
         pointRunner = PointRunner(this, { Rect(realBounds) }, { x, y ->
             panelBlocksInput() || handleContainsPoint(x, y) // nút main đè lên điểm nhấn tự chạm xuyên nên không chặn
         }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
@@ -194,6 +201,7 @@ class OverlayService : Service() {
                 ensureHandle()
                 circles.ensureAll()
                 crosshair.ensure()
+                stats.ensure()
                 startWatchdog()
                 AdbSession.ensureInBackground(this)
             }
@@ -208,6 +216,7 @@ class OverlayService : Service() {
         targetHandler.removeCallbacksAndMessages(null)
         targetThread.quitSafely()
         safely("tâm ảo") { if (::crosshair.isInitialized) crosshair.remove() }
+        safely("thanh thông số") { if (::stats.isInitialized) stats.close() }
         safely("nút main") { if (::circles.isInitialized) circles.removeAll() }
         safely("ô chọn điểm") { if (::pointPicker.isInitialized) pointPicker.close() }
         safely("bộ chạy điểm nhấn") { if (::pointRunner.isInitialized) pointRunner.close() }
@@ -268,6 +277,7 @@ class OverlayService : Service() {
         // Tự nối lại ADB khi mất kết nối (sau cập nhật app, bật lại gỡ lỗi Wi-Fi, đổi mạng...)
         AdbSession.ensureInBackground(this)
         crosshair.ensure()
+        stats.ensure()
         val h = handleView
         if (h == null) {
             ensureHandle()
@@ -551,12 +561,14 @@ class OverlayService : Service() {
             ensureHandle()
             circles.ensureAll()
             crosshair.remove() // dựng lại theo hệ số co giãn mới
+            stats.remove()
         }
         handleView?.alpha = 1f
         relayoutHandle()
         circles.relayoutAll()
         crosshair.ensure()
-        handleView?.postDelayed({ relayoutHandle(); circles.relayoutAll(); crosshair.ensure() }, 400)
+        stats.ensure()
+        handleView?.postDelayed({ relayoutHandle(); circles.relayoutAll(); crosshair.ensure(); stats.ensure() }, 400)
     }
 
     // ---- nút mở menu (tab bám mép trái) -----------------------------------
@@ -676,7 +688,7 @@ class OverlayService : Service() {
 
     /** Tạo cửa sổ menu (đang ẩn hoàn toàn bên trái) nếu chưa có. */
     private fun ensurePanel() {
-        if (panelView != null) { revealPanel(); circles.setMenuOpen(true); return }
+        if (panelView != null) { revealPanel(); setMenuOpenAll(true); return }
         solid = prefs.getBoolean(KEY_SOLID, false)
 
         val params = overlayParams(
@@ -784,14 +796,17 @@ class OverlayService : Service() {
         val tab0 = CrosshairTab(this, crosshairSettings) { crosshair.ensure() }
         val tab4 = DebugTab(this) { debugInfo() }
         debugTab = tab4
+        val tab5 = SettingsTab(this, statsSettings, dd, stats) { stats.ensure() }
+        settingsTab = tab5
 
-        // Thứ tự: 0 = Cài tâm ảo, 1 = Tạo nút chính, 2 = Chỉnh điểm nhấn, 3 = Cài cấu hình, 4 = Debug log
+        // Thứ tự: 0 = Cài tâm ảo, 1 = Tạo nút chính, 2 = Chỉnh điểm nhấn, 3 = Cài cấu hình, 4 = Debug log, 5 = Cài đặt
         val tabViews = listOf(
             tab0.build(),
             tab1.build(),
             tab2.build(),
             tab3.build(),
             tab4.build(),
+            tab5.build(),
         )
         // Mỗi lần đóng menu là cả cửa sổ bị gỡ và dựng lại -> phải nhớ tab đang chọn ở ngoài,
         // nếu không sẽ luôn quay về tab 1.
@@ -869,11 +884,12 @@ class OverlayService : Service() {
         cardBg = bg
         panelAddedAt = SystemClock.uptimeMillis()
         applySolid(if (solid) 1f else 0f)
-        circles.setMenuOpen(true)
+        setMenuOpenAll(true)
         runCatching { wm.addView(scrim, params) }.onFailure {
             DebugLog.e("Giao diện", "Không gắn được cửa sổ menu", it)
             removePanel()
         }
+        stats.raise() // thanh thông số phải nằm TRÊN menu thì mới kéo được
         startStatusTick()
     }
 
@@ -923,10 +939,10 @@ class OverlayService : Service() {
         return row
     }
 
-    private val tabNames = listOf("Cài tâm ảo", "Tạo nút chính", "Chỉnh điểm nhấn", "Cài cấu hình", "Debug log")
+    private val tabNames = listOf("Cài tâm ảo", "Tạo nút chính", "Chỉnh điểm nhấn", "Cài cấu hình", "Debug log", "Cài đặt")
     private val tabIcons = intArrayOf(
         R.drawable.ic_tab_crosshair, R.drawable.ic_tab_pointer, R.drawable.ic_tab_focus,
-        R.drawable.ic_tab_sliders, R.drawable.ic_tab_terminal,
+        R.drawable.ic_tab_sliders, R.drawable.ic_tab_terminal, R.drawable.ic_tab_settings,
     )
 
     /** Cột bên trái: logo + tên app ở trên cùng, bên dưới là các tab xếp dọc. */
@@ -942,8 +958,9 @@ class OverlayService : Service() {
         // Không còn đường kẻ dưới logo; chừa khoảng trống bằng đúng chiều cao cũ (1dp kẻ + 11dp)
         col.addView(View(this), LinearLayout.LayoutParams(1, dp(12)))
 
-        val tabH = dp(42)
-        val tabGap = dp(6)
+        // 6 tab: co chiều cao mỗi tab khi card thấp (máy nhỏ) để cột không bị tràn, đẩy khung trạng thái ra ngoài
+        val tabGap = dp(4)
+        val tabH = ((cardH - dp(132) - tabGap * (tabNames.size - 1)) / tabNames.size).coerceIn(dp(28), dp(42))
         val step = tabH + tabGap
 
         // Khung chứa tab: thanh sáng nằm dưới, trượt tới tab được chọn
@@ -1471,10 +1488,11 @@ class OverlayService : Service() {
         solidAnim?.cancel()
         editDimAnim?.cancel()
         promptLayer?.close()
-        circles.setMenuOpen(false)
+        setMenuOpenAll(false)
         circles.setEditing(null)
         circles.fadeAll(0f, 250L)   // các nút tròn mờ đi cùng lúc menu thu lại
         crosshair.fadeOut(250L)
+        stats.fadeOut(250L)
         card.animate().cancel(); scrim.animate().cancel()
 
         // 1) Nội dung + nút mờ đi, chỉ còn lại khung card
@@ -1533,6 +1551,7 @@ class OverlayService : Service() {
             removePanel()
             ensureHandle()
             crosshair.restore()
+            stats.restore()
             handleView?.alpha = 1f
             startWatchdog()
         } else {
@@ -1636,7 +1655,7 @@ class OverlayService : Service() {
             handleView?.alpha = 1f
             return
         }
-        circles.setMenuOpen(false) // menu thu lại: nút 0% biến mất
+        setMenuOpenAll(false) // menu thu lại: nút 0% biến mất, thanh thông số chạm xuyên
         mainTab?.exitEdit()
         pointsTab?.exit()
         configTab?.exit()
@@ -1681,7 +1700,7 @@ class OverlayService : Service() {
         resetPanelState()
         confirmLayer?.let { it.animate().cancel(); it.visibility = View.GONE }
         panelHidden = true
-        if (::circles.isInitialized) circles.setMenuOpen(false)
+        if (::circles.isInitialized) setMenuOpenAll(false)
         handler.removeCallbacks(statusTick)
         stopHaloBreath()
         v.visibility = View.INVISIBLE
@@ -1722,12 +1741,14 @@ class OverlayService : Service() {
         statusLinkDot = null; statusLinkHalo = null; statusLinkText = null
         lastStatusKey = -1
         panelHidden = false
-        if (::circles.isInitialized) circles.setMenuOpen(false)
+        if (::circles.isInitialized) setMenuOpenAll(false)
         resetGhost()
         pointsTab?.exit()
         configTab?.exit()
         debugTab?.dispose()
         debugTab = null
+        settingsTab?.dispose()
+        settingsTab = null
         pointPicker.close()
         promptLayer?.close()
         inputActive = false
@@ -1771,6 +1792,7 @@ class OverlayService : Service() {
             append("Vòng helper: ${w?.stage ?: "chưa chạy"}\n")
             append("Quyền vẽ đè: ${yn(OverlayPermission.granted(this@OverlayService))} · Truy cập dữ liệu sử dụng: ${yn(UsageAccess.granted(this@OverlayService))}\n")
             append("Tâm ảo: ${if (::crosshair.isInitialized) crosshair.state() else "?"}\n")
+            append("Thanh thông số: ${if (::stats.isInitialized) stats.state() else "?"}\n")
             append("App đang theo dõi để tự đóng: ${targetPkg ?: "không có"}")
         }
     }
@@ -1781,9 +1803,16 @@ class OverlayService : Service() {
         removePanel()
         if (::circles.isInitialized) circles.removeAll()
         if (::crosshair.isInitialized) crosshair.remove()
+        if (::stats.isInitialized) stats.remove()
     }
 
     private fun dp(v: Int): Int = (v * UiScale.density(resources)).toInt()
+
+    /** Menu mở/đóng: nút main hiện rõ hơn + thanh thông số chuyển giữa "kéo được" và "chạm xuyên". */
+    private fun setMenuOpenAll(open: Boolean) {
+        circles.setMenuOpen(open)
+        if (::stats.isInitialized) stats.setDraggable(open)
+    }
 
     companion object {
         const val ACTION_SHOW = "com.zyntap.app.overlay.SHOW"
