@@ -941,6 +941,12 @@ class OverlayService : Service() {
     }
 
     private val tabNames = listOf("Cài tâm ảo", "Tạo nút chính", "Chỉnh điểm nhấn", "Cài cấu hình", "Debug log", "Cài đặt")
+    /**
+     * Thứ tự HIỂN THỊ ở thanh bên (từ trên xuống): số thứ tự tab bên trong (khớp [tabNames] / [tabIcons]).
+     * Chỉ đổi thứ tự hiện, số thứ tự bên trong giữ nguyên nên logic các tab không bị lệch.
+     * Hiện tại: Debug log, Tạo nút chính, Chỉnh điểm nhấn, Cài tâm ảo, Cài đặt, Cài cấu hình.
+     */
+    private val tabOrder = intArrayOf(4, 1, 2, 0, 5, 3)
     private val tabIcons = intArrayOf(
         R.drawable.ic_tab_crosshair, R.drawable.ic_tab_pointer, R.drawable.ic_tab_focus,
         R.drawable.ic_tab_sliders, R.drawable.ic_tab_terminal, R.drawable.ic_tab_settings,
@@ -1022,9 +1028,10 @@ class OverlayService : Service() {
                 }
             }
             current = i
-            onSelect(i)
+            onSelect(tabOrder[i])   // i = vị trí hiển thị; tab bên trong = tabOrder[i]
         }
-        tabNames.forEachIndexed { i, name ->
+        tabOrder.forEachIndexed { i, logical ->
+            val name = tabNames[logical]
             val t = TextView(this).apply {
                 text = name
                 scaledTextSize(13f)
@@ -1033,7 +1040,7 @@ class OverlayService : Service() {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(10), 0, dp(6), 0)
                 compoundDrawablePadding = dp(8)
-                androidx.core.content.ContextCompat.getDrawable(this@OverlayService, tabIcons[i])?.mutate()?.let { ic ->
+                androidx.core.content.ContextCompat.getDrawable(this@OverlayService, tabIcons[logical])?.mutate()?.let { ic ->
                     ic.setBounds(0, 0, dp(18), dp(18))
                     setCompoundDrawablesRelative(ic, null, null, null)
                 }
@@ -1054,7 +1061,7 @@ class OverlayService : Service() {
         col.addView(buildStatus(), LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
         ).apply { marginStart = dp(5); marginEnd = -dp(5) })
-        select(initialTab.coerceIn(0, tabNames.lastIndex), animate = false)
+        select(tabOrder.indexOf(initialTab).coerceAtLeast(0), animate = false)
         return col
     }
 
