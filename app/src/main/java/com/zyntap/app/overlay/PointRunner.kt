@@ -6,11 +6,11 @@ import com.zyntap.app.data.AdbSession
 import com.zyntap.app.data.DebugLog
 import com.zyntap.app.data.ZynAdbConnectionManager
 import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 /**
- * Service-owned scheduler: main-thread state, cancellable delays.
+ * Service-owned scheduler. Cả kịch bản (cụm click + delay do người dùng đặt) được mã hoá và gửi cho helper bằng MỘT lệnh,
+ * helper tự chạy liền tay: giữa các click TUYỆT ĐỐI không có độ trễ nào ngoài các dòng `300ms` người dùng tự đặt
+ * (không còn mỗi click một lệnh ADB, không còn chờ hold/nghỉ/16ms mỗi vòng).
  * Click chỉ đi qua helper [TouchWatcher] (ngón ảo chung luồng với ngón thật). KHÔNG có `input tap`: click lỗi thì bỏ.
  */
 class PointRunner(
@@ -25,7 +25,6 @@ class PointRunner(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val runs = mutableMapOf<Int, Run>()
     private val touches = MainTouchGate()
-    private val injectionLock = Mutex()
     private var lastReport = 0L
     private var lastSkipLog = 0L
 
@@ -59,13 +58,25 @@ class PointRunner(
     }
 
     fun stop(id: Int) {
-        val run = runs.remove(id) ?: return
-        run.job?.cancel()
+        val run = runs.remove(id)
+        run?.job?.cancel()
+        // Báo helper dừng kịch bản SAU KHI lệnh RUN (nếu đang gửi dở) đã đi xong, để STOP không chạy trước RUN.
+        val pending = run?.job
+        scope.launch {
+            pending?.join()
+            TouchWatcher.current?.stopScript(id)
+        }
     }
 
     fun stopAll() {
         touches.clear()
-        runs.keys.toList().forEach(::stop)
+        val pending = runs.values.mapNotNull { it.job }
+        pending.forEach { it.cancel() }
+        runs.clear()
+        scope.launch {
+            pending.forEach { it.join() }
+            TouchWatcher.current?.stopAllScripts()
+        }
     }
 
     private fun start(button: MainButton, repeat: Boolean): Boolean {
@@ -77,12 +88,11 @@ class PointRunner(
             message(script.errors.firstOrNull() ?: "${button.code}: chưa có điểm nhấn ở tab 2")
             return false
         }
-        val taps = script.steps.filterIsInstance<PointStep.Tap>()
-        if (taps.any { targetBlocked(it.x, it.y) }) {
+        if (script.allPoints.any { (x, y) -> targetBlocked(x, y) }) {
             message("Điểm nhấn đang nằm dưới menu đang mở hoặc nút mở menu. Hãy thu menu hoặc dời nút mở menu.")
             return false
         }
-        // Click 1 lần: giữ lâu hơn. Chạm xuyên: chờ ngón thật nhả đủ lâu rồi mới click (tránh game nuốt click đầu).
+        // Không giữ, không nghỉ: DOWN rồi UP liền nhau. Chạm xuyên: chờ ngón thật nhả đủ lâu rồi mới click (tránh game nuốt click đầu).
         val holdMs = if (repeat) TouchWatcher.TAP_HOLD_MS else TouchWatcher.TAP_HOLD_ONCE_MS
         val gapMs = if (!repeat && button.passThrough) TouchWatcher.TAP_GAP_AFTER_UP_MS else 0L
         val run = Run()
@@ -105,24 +115,9 @@ class PointRunner(
                         }
                     }
                 }
-                do {
-                    for (step in script.steps) {
-                        ensureActive()
-                        if (bounds() != screen) error("Màn hình đã đổi kích thước. Chọn lại tọa độ.")
-                        when (step) {
-                            is PointStep.Wait -> delay(step.millis)
-                            is PointStep.Tap -> {
-                                if (targetBlocked(step.x, step.y)) error("Điểm nhấn trùng cửa sổ ZynTap")
-                                injectionLock.withLock {
-                                    ensureActive()
-                                    tap(step, holdMs, gapMs)
-                                }
-                            }
-                        }
-                    }
-                    // A loop without delays still yields; never busy-spins on the UI thread.
-                    if (repeat) delay(16)
-                } while (repeat && isActive)
+                ensureActive()
+                if (bounds() != screen) error("Màn hình đã đổi kích thước. Chọn lại tọa độ.")
+                sendScript(button.id, repeat, holdMs, gapMs, encode(script))
             } catch (_: CancellationException) {
                 // UP / CANCEL / rotation / service teardown.
             } catch (e: Exception) {
@@ -134,31 +129,32 @@ class PointRunner(
         return true
     }
 
+    /** `T:x,y` (1 click) · `M:x,y;x,y` (nhiều click CÙNG LÚC) · `W:ms` (delay người dùng đặt). */
+    private fun encode(script: PointScript): String = script.steps.joinToString(" ") { step ->
+        when (step) {
+            is PointStep.Tap -> "T:${step.x},${step.y}"
+            is PointStep.Multi -> "M:" + step.points.joinToString(";") { (x, y) -> "$x,$y" }
+            is PointStep.Wait -> "W:${step.millis}"
+        }
+    }
+
     /**
-     * Một click qua helper (ngón ảo chạy song song với ngón thật trong cùng một luồng chạm).
-     * Lỗi / helper chưa sẵn sàng thì CHỈ BỎ click này: tuyệt đối không có `input tap` hay đường lui nào khác
+     * Gửi cả kịch bản cho helper (ngón ảo chạy song song với ngón thật trong cùng một luồng chạm).
+     * Lỗi / helper chưa sẵn sàng thì CHỈ BỎ lần chạy này: tuyệt đối không có `input tap` hay đường lui nào khác
      * (nó là luồng chạm riêng, chen vào là hệ thống huỷ luôn ngón thật đang đè).
      */
-    private suspend fun tap(point: PointStep.Tap, holdMs: Long, gapMs: Long) {
+    private suspend fun sendScript(id: Int, repeat: Boolean, holdMs: Long, gapMs: Long, ops: String) {
         currentCoroutineContext().ensureActive()
         val watcher = TouchWatcher.current
-        if (watcher?.tap(point.x, point.y, holdMs, gapMs) == true) return
+        if (watcher?.runScript(id, repeat, holdMs, gapMs, ops) == true) return
 
-        // Click bị bỏ. Giãn nhịp log để vòng Giữ (click liên tục) không làm ngập Debug log.
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastSkipLog > 1000) {
             lastSkipLog = now
-            DebugLog.w("Bơm", "Bỏ qua click (${point.x},${point.y}): ${if (watcher == null) "chưa có helper bơm cảm ứng" else "helper chưa bơm được (chưa READY / không grab được)"} — không có đường lui nào khác")
+            DebugLog.w("Bơm", "Bỏ qua kịch bản click: ${if (watcher == null) "chưa có helper bơm cảm ứng" else "helper chưa bơm được (chưa READY / không grab được)"} — không có đường lui nào khác")
         }
-        // Helper đang khởi động lại / chưa bơm được: ép bơm lại (đã tự giãn nhịp bên trong) để click sau còn có đường đi.
-        if (watcher != null && !watcher.proxyReady) watcher.requestReinject("click bị bỏ vì helper chưa sẵn sàng bơm")
-        // Không quay vòng nóng khi click liên tục bị bỏ.
-        delay(SKIP_PAUSE_MS)
-    }
-
-    private companion object {
-        /** Nghỉ khi một click bị bỏ, để vòng Giữ không chạy nóng. */
-        const val SKIP_PAUSE_MS = 50L
+        // Helper đang khởi động lại / chưa bơm được: ép bơm lại (đã tự giãn nhịp bên trong) để lần bấm sau còn có đường đi.
+        if (watcher != null && !watcher.proxyReady) watcher.requestReinject("kịch bản bị bỏ vì helper chưa sẵn sàng bơm")
     }
 
     fun close() {

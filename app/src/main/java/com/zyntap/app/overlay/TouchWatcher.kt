@@ -449,25 +449,33 @@ class TouchWatcher(
     }
 
     /**
-     * Click tại ([x], [y]) (pixel màn hình hiện tại) qua helper: một ngón ảo chạy song song với ngón thật trong
-     * CÙNG một luồng chạm. Bắn rồi quên: helper lo giữ/nhả và tự cấp mã pointer; ở đây chỉ chờ đúng khoảng giữ + nhả
-     * tối thiểu để bước kế tiếp của kịch bản không dồn click.
-     *
-     * Click lỗi thì CHỈ BỎ click đó: không thử lại, không có đường lui nào khác (không `input tap`).
-     * @return true nếu đã gửi cho helper; false nếu click bị bỏ (helper chưa sẵn sàng / thụ động / ADB lỗi).
+     * Chạy cả kịch bản [ops] (đã mã hoá: `T:x,y` · `M:x,y;x,y` · `W:ms`) TRONG helper bằng MỘT lệnh duy nhất.
+     * Click nối click không còn đi vòng qua ADB nên giữa các click không có độ trễ nào ngoài `W` do người dùng đặt.
+     * Bắn rồi quên; lỗi thì CHỈ BỎ (không `input tap`, không đường lui).
+     * @return true nếu đã gửi cho helper; false nếu bị bỏ (helper chưa sẵn sàng / thụ động / ADB lỗi).
      */
-    suspend fun tap(x: Int, y: Int, holdMs: Long = TAP_HOLD_MS, gapMs: Long = 0L): Boolean {
+    suspend fun runScript(id: Int, repeat: Boolean, holdMs: Long, gapMs: Long, ops: String): Boolean {
         val l = link ?: return false
         if (!l.injecting) return false
         try {
-            withContext(Dispatchers.IO) { l.send("TAP $x $y $holdMs $gapMs") }
+            withContext(Dispatchers.IO) { l.send("RUN $id ${if (repeat) 1 else 0} $holdMs $gapMs $ops") }
         } catch (e: IOException) {
-            DebugLog.w("Bơm", "Gửi click ($x,$y) cho helper lỗi, bỏ click này", e)
-            requestReinject("gửi click cho helper lỗi (ADB đứt?)")
+            DebugLog.w("Bơm", "Gửi kịch bản cho helper lỗi, bỏ lần chạy này", e)
+            requestReinject("gửi kịch bản cho helper lỗi (ADB đứt?)")
             return false
         }
-        delay(holdMs + TAP_RELEASE_GAP_MS)
         return true
+    }
+
+    /** Dừng kịch bản của nút [id] (nhả nút Giữ, mở menu...). Không chờ, không phản hồi. */
+    fun stopScript(id: Int) {
+        val l = link ?: return
+        scope.launch(Dispatchers.IO) { runCatching { l.send("STOP $id") } }
+    }
+
+    fun stopAllScripts() {
+        val l = link ?: return
+        scope.launch(Dispatchers.IO) { runCatching { l.send("STOPALL") } }
     }
 
     @Suppress("DEPRECATION")
@@ -862,9 +870,6 @@ class TouchWatcher(
         /** Watcher đang chạy (để PointRunner gửi click qua proxy). */
         @Volatile var current: TouchWatcher? = null
 
-        /** Khoảng nhả tối thiểu giữa 2 click liên tiếp (khớp helper): 2 lần chạm phải tách bạch, không dính cùng khung hình. */
-        const val TAP_RELEASE_GAP_MS = 10L
-
         private const val RETRY_MS = 3_000L
         private const val MAX_PROXY_FAILS = 3
         private const val FAST_RETRY_MS = 400L
@@ -879,8 +884,10 @@ class TouchWatcher(
         private const val STUCK_MS = 15_000L
         private const val OPEN_TIMEOUT_MS = 8_000L
         private const val CMD_TIMEOUT_MS = 8_000L
-        const val TAP_HOLD_MS = 30L
-        const val TAP_HOLD_ONCE_MS = 30L
+        /** Giữ mỗi click: 0 = DOWN rồi UP liền nhau, không chờ (tốc độ tối đa, giữa các click không có delay). */
+        const val TAP_HOLD_MS = 0L
+        const val TAP_HOLD_ONCE_MS = 0L
+        /** Chỉ dùng khi bật "Chạm xuyên" + chế độ Thả: chờ ngón thật nhả xong mới click (tránh game nuốt click đầu). */
         const val TAP_GAP_AFTER_UP_MS = 30L
         private val PATH_RE = Regex("^/dev/input/event\\d+$")
     }

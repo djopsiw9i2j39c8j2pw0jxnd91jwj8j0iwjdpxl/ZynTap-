@@ -477,8 +477,7 @@ class MainButtonOverlay(
         pointsKey = key
         pointsScreen = Rect(s)
         pointsCache = repo.buttons.filter { it.pointScript.isNotBlank() }.flatMap { b ->
-            PointScriptParser.parse(b.pointScript, s.width(), s.height()).steps
-                .filterIsInstance<PointStep.Tap>().map { it.x to it.y }
+            PointScriptParser.parse(b.pointScript, s.width(), s.height()).allPoints
         }
         return pointsCache
     }
