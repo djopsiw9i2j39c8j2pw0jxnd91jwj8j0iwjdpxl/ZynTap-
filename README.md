@@ -45,6 +45,12 @@ trong thư mục riêng của app (`data/ZynAdbConnectionManager.kt`). Menu nổ
   Chạm X/Y lần đầu để mở ghim nền trong suốt; kéo ghim, nhả rồi chạm ghim để chọn tọa độ tại dấu cộng/mũi ghim.
   Chạm lại X/Y khi ghim đang mở để chuyển sang nhập tay. Chọn ghim xong hiện bàn phím; Enter thêm `x, y` và xuống dòng.
   Ô Delay nhận mili giây; Enter thêm `300ms` và xuống dòng. Có báo lỗi dòng sai/toạ độ ngoài màn hình.
+  Dòng Click point ghi `Click x, y` (định dạng cũ `x, y` vẫn chạy). **Multiclick point** nhập y hệt Click point, mỗi lần
+  1 điểm, Enter ghi `Multiclick x, y`; các dòng Multiclick nằm liền nhau được click CÙNG MỘT LÚC (tối đa 10 điểm),
+  chỉ 1 dòng thì click 1 điểm. Chạm ô X/Y: hiện ghim → chọn xong bàn phím tự nhập → chạm lại đúng ô đó thì lại hiện ghim;
+  đổi sang ô khác thì chỉ mở bàn phím.
+  **Tốc độ click**: cả kịch bản chạy ngay trong helper (một lệnh ADB duy nhất), giữ = 0ms, nghỉ giữa click = 0ms;
+  giữa các click không có delay nào trừ các dòng `300ms` do người dùng tự đặt.
 - **Cài cấu hình**: vẫn giữ placeholder, không nằm trong đợt cập nhật này.
 - **Debug log** (tab 5): ô in log các lỗi của app — bơm/click, ADB, helper cảm ứng, tâm ảo, dọn dẹp khi tắt, crash.
   Nút **Chỉ lỗi** lọc cảnh báo + lỗi, **Kiểm tra** ghi trạng thái hiện tại (ADB, helper bơm, quyền, tâm ảo) vào log,
@@ -116,6 +122,27 @@ app/src/main/res/   icon launcher, logo trong suốt (drawable-nodpi/logo_transp
   - Android 12+ chặn chạm xuyên qua cửa sổ phủ đục hơn 0.8 nên nút chạm xuyên bị đặt độ đục cửa sổ 0.8 (nhìn mờ hơn một chút).
   - Lúc đang chỉnh nút (kéo vị trí) nút vẫn nhận chạm bình thường; chỉnh xong mới xuyên lại.
   - Chưa kiểm thử trên máy thật: bộ giải mã input_event nhị phân + ánh xạ toạ độ/xoay màn hình, luồng ADB + cửa sổ phủ cần thử trên thiết bị.
+
+## Thay đổi 1.00.29 — tab "Cài đặt" + thanh thông số nổi
+
+- **Tab 6 "Cài đặt"** (`overlay/StatsBar.kt`): 1 dropdown chọn mục (FPS / Pin / Giờ / Dữ liệu mạng) + 1 công tắc bật/tắt mục đó. Ô xem trước ở trên cùng là thanh thật với số liệu thật.
+- **Thanh thông số**: viên thuốc tối bán trong suốt, chỉ chứa các mục đang bật; số FPS đổi màu (xanh ≥55, vàng ≥30, đỏ), pin có biểu tượng tự vẽ (xanh dương khi sạc, vàng/đỏ khi yếu), mạng hiện ↓/↑ theo thời gian thực.
+  - Menu thu/đóng: cửa sổ `FLAG_NOT_TOUCHABLE` (chạm xuyên hoàn toàn, nhỏ gọn, không che thao tác).
+  - Menu mở: thanh có viền sáng + tay nắm, kéo được (menu mờ đi trong lúc kéo như kéo nút main); vị trí lưu theo tỉ lệ màn hình, xoay màn hình vẫn nằm đúng chỗ.
+- **Nguồn số liệu**: pin = `ACTION_BATTERY_CHANGED`; mạng = `TrafficStats` (không cần quyền); giờ = giờ máy;
+  **FPS = `dumpsys SurfaceFlinger --latency <layer game>` qua ADB Wi-Fi** (đếm khung thực sự lên màn hình trong 1s cuối; layer tìm tự động theo app mở từ ZynTap). Cần ADB đang nối, không thì hiện `--`.
+- Cột tab bên trái tự co chiều cao tab khi card thấp để đủ 6 tab. Chưa chạy thử trên máy thật; Kotlin chưa biên dịch ở môi trường này — build trên GitHub Actions để xác nhận.
+
+## Thay đổi 1.00.28 — sửa "hệ thống từ chối sự kiện" trên Android 14–16
+
+Log: mọi `injectInputEvent` (kể cả DOWN 1 ngón) trả về `false` -> helper tự thoát, click bị bỏ.
+Nguyên nhân: từ Android 14, system_server (InputDispatcher/InputVerifier) kiểm tra luồng chạm của sự kiện bơm không kèm targetUid, trạng thái khoá theo `deviceId`:
+1. `ACTION_CANCEL` không có `FLAG_CANCELED` (0x20) -> bị từ chối.
+2. Bơm bằng `deviceId` THẬT của tấm cảm ứng: chỉ cần một lần CANCEL/UP bị từ chối hoặc helper chết giữa chừng là deviceId đó kẹt "đang chạm"
+   và mọi DOWN sau đó đều bị từ chối ("already down") tới khi khởi động lại máy.
+Sửa trong `shell/InputProxy.java`: CANCEL có `FLAG_CANCELED`; sự kiện bơm dùng mã thiết bị ảo riêng (`injDev`), đổi mới mỗi lần helper chạy và mỗi lần
+dựng lại luồng (bỏ hàng đợi cũ, CANCEL luồng cũ ở chế độ "soft" không tính lỗi); log in rõ `dev=` của sự kiện bị từ chối.
+Chưa thử trên máy thật — cần build lại + chạy thử; nếu vẫn lỗi hãy gửi lại log.
 
 ## Thay đổi 1.00.25 — click chung một luồng, bỏ hẳn `input tap`
 
