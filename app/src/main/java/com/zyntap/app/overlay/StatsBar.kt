@@ -548,6 +548,54 @@ class StatsBarOverlay(
         return if (n.isEmpty() || n.contains('\'')) null else n
     }
 
+    // ---- cách 2: `dumpsys SurfaceFlinger --timestats` (SurfaceFlinger tự đếm totalFrames từng layer) ----
+    private var tsEnabled = false
+    private var tsLayer: String? = null
+    private var tsPrevFrames = -1L
+    private var tsPrevAt = 0L
+
+    private fun measureViaTimeStats(mgr: ZynAdbConnectionManager, pkg: String?): Int {
+        if (pkg == null) return -1
+        if (!tsEnabled) {
+            runAdb(mgr, "dumpsys SurfaceFlinger --timestats -enable", 3000L)
+            tsEnabled = true
+        }
+        val out = runAdb(mgr, "dumpsys SurfaceFlinger --timestats -dump", 4000L) ?: return -1
+        val now = SystemClock.elapsedRealtime()
+        // Tách theo từng khối "layerName = ..." rồi đọc "totalFrames = N"
+        val frames = HashMap<String, Long>()
+        var cur: String? = null
+        for (raw in out.lineSequence()) {
+            val ln = raw.trim()
+            if (ln.startsWith("layerName")) {
+                cur = ln.substringAfter('=').trim()
+            } else if (cur != null && ln.startsWith("totalFrames")) {
+                val n = ln.substringAfter('=').trim().toLongOrNull()
+                if (n != null) frames[cur] = n
+                cur = null
+            }
+        }
+        val mine = frames.filterKeys { it.contains(pkg) }
+        if (mine.isEmpty()) { setWhy("timestats không có layer của $pkg (${frames.size} layer)"); return -1 }
+        var name = tsLayer
+        if (name == null || !mine.containsKey(name)) {
+            name = mine.keys.firstOrNull { it.contains("SurfaceView") && it.contains("BLAST") }
+                ?: mine.keys.firstOrNull { it.contains("SurfaceView") }
+                ?: mine.maxByOrNull { it.value }!!.key
+            tsLayer = name; tsPrevFrames = -1L
+            setWhy("đo bằng timestats: $name")
+        }
+        val total = mine[name] ?: return -1
+        val prevF = tsPrevFrames
+        val prevT = tsPrevAt
+        tsPrevFrames = total; tsPrevAt = now
+        if (prevF < 0L || now - prevT <= 0L) return -1
+        val df = total - prevF
+        if (df < 0L) { tsLayer = null; return -1 } // bộ đếm bị đặt lại
+        val fps = df * 1000.0 / (now - prevT)
+        return Math.round(fps).toInt().coerceIn(0, 999)
+    }
+
     private fun measureFps(): Int {
         val mgr = ZynAdbConnectionManager.get(ctx.applicationContext)
         if (!mgr.isConnected) { setWhy("chưa nối ADB Wi-Fi"); return -1 }
@@ -598,8 +646,11 @@ class StatsBarOverlay(
             if (t.size >= 2) { ts = t; break }
         }
         if (ts.size < 2) {
+            // --latency không cho mốc thời gian (Android mới) -> dùng bộ đếm khung hình có sẵn của SurfaceFlinger
+            val viaStats = measureViaTimeStats(mgr, layerPkg)
+            if (viaStats >= 0) return viaStats
             layerName = null // layer có thể đã đổi (đổi cảnh, mở lại game) -> dò lại lần sau
-            setWhy("layer không có mốc thời gian khung hình; mẫu: " + lat.trim().take(160).replace('\n', '|'))
+            setWhy("--latency trống (" + lat.trim().take(80).replace('\n', '|') + ") và timestats cũng không đo được")
             return -1
         }
         ts = ts.sorted()
