@@ -16,6 +16,7 @@ import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.Choreographer
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -46,7 +47,7 @@ import kotlin.math.abs
 
 /** Các mục có thể hiện trên thanh. Thứ tự ở đây = thứ tự trên thanh. */
 enum class StatKind(val key: String, val title: String, val desc: String) {
-    FPS("fps", "FPS", "Số khung hình/giây của game đang mở (đo qua ADB Wi-Fi)."),
+    FPS("fps", "FPS", "Ước tính nhịp khung hình màn hình, lấy mẫu mỗi 0,5 giây; không phải FPS render riêng của game."),
     BATTERY("battery", "Pin", "Phần trăm pin; đổi màu khi đang sạc hoặc pin yếu."),
     TIME("time", "Giờ", "Giờ hiện tại của máy."),
     NET("net", "Dữ liệu mạng", "Tốc độ tải xuống / tải lên theo thời gian thực."),
@@ -414,6 +415,7 @@ class StatsBarOverlay(
         if (view == null && previews.isEmpty()) {
             main.removeCallbacks(tick)
             ticking = false
+            stopScreenFpsMeter()
         }
     }
 
@@ -448,11 +450,20 @@ class StatsBarOverlay(
             lastRx = rx; lastTx = tx; lastNetAt = now
         }
         val bat = readBattery()
-        if (settings.isOn(StatKind.FPS)) requestFpsSample()
+        if (settings.isOn(StatKind.FPS)) {
+            startScreenFpsMeter()
+            requestFpsSample()
+        } else {
+            stopScreenFpsMeter()
+        }
         val pattern = if (android.text.format.DateFormat.is24HourFormat(ctx)) "HH:mm" else "h:mm a"
         val time = SimpleDateFormat(pattern, Locale.getDefault()).format(Date())
+        val nowForFps = SystemClock.elapsedRealtime()
+        val measuredGameFps = fpsValue.takeIf { it >= 0 && nowForFps - fpsUpdatedAt < 3500L }
+        val measuredScreenFps = screenFpsValue.takeIf { it >= 0 && nowForFps - screenFpsUpdatedAt < 1500L }
         val snap = StatSnapshot(
-            fps = if (settings.isOn(StatKind.FPS) && SystemClock.elapsedRealtime() - fpsUpdatedAt < 3500L) fpsValue else -1,
+            // Nếu ADB đọc được FPS game thì ưu tiên; nếu không, hiện nhịp VSync của màn hình.
+            fps = if (settings.isOn(StatKind.FPS)) (measuredGameFps ?: measuredScreenFps ?: -1) else -1,
             batteryPct = bat.first, charging = bat.second,
             time = time, rxBps = rxBps, txBps = txBps,
         )
@@ -473,9 +484,63 @@ class StatsBarOverlay(
         stopTickerIfIdle()
     }
 
+    // ---- FPS màn hình: đếm nhịp VSync theo cửa sổ 500 ms ----
+    // Đây là tốc độ callback khung hình của màn hình/overlay, KHÔNG phải FPS render riêng của game.
+    // Khi ADB đọc được FPS render của game thì số liệu game vẫn được ưu tiên.
+    @Volatile private var screenFpsValue = -1
+    @Volatile private var screenFpsUpdatedAt = 0L
+    private var screenFrameCount = 0
+    private var screenSampleStartedAt = 0L
+    private var screenFpsRunning = false
+    private val choreographer by lazy { Choreographer.getInstance() }
+    private val screenFrameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!screenFpsRunning) return
+            screenFrameCount++
+            choreographer.postFrameCallback(this)
+        }
+    }
+    private val screenFpsSample = object : Runnable {
+        override fun run() {
+            if (!screenFpsRunning) return
+            val now = SystemClock.elapsedRealtime()
+            val start = screenSampleStartedAt
+            val elapsed = now - start
+            if (start > 0L && elapsed >= 250L) {
+                val measured = (screenFrameCount * 1000.0 / elapsed).toInt().coerceIn(0, 240)
+                screenFpsValue = measured
+                screenFpsUpdatedAt = now
+                screenFrameCount = 0
+                screenSampleStartedAt = now
+            } else if (start == 0L) {
+                screenSampleStartedAt = now
+                screenFrameCount = 0
+            }
+            main.postDelayed(this, 500L)
+        }
+    }
+
+    private fun startScreenFpsMeter() {
+        if (screenFpsRunning) return
+        screenFpsRunning = true
+        screenFrameCount = 0
+        screenSampleStartedAt = SystemClock.elapsedRealtime()
+        choreographer.postFrameCallback(screenFrameCallback)
+        main.removeCallbacks(screenFpsSample)
+        main.postDelayed(screenFpsSample, 500L)
+    }
+
+    private fun stopScreenFpsMeter() {
+        if (!screenFpsRunning) return
+        screenFpsRunning = false
+        choreographer.removeFrameCallback(screenFrameCallback)
+        main.removeCallbacks(screenFpsSample)
+        screenFpsValue = -1
+        screenFpsUpdatedAt = 0L
+    }
+
     // ---- FPS game: SurfaceFlinger TimeStats (ưu tiên) + --latency dự phòng ----
-    // TimeStats đo frame đã được compositor trình chiếu; Choreographer của overlay
-    // không thể đại diện cho FPS render của game khác.
+    // Chỉ hiện số này nếu quyền ADB/ROM thực sự cung cấp dữ liệu lớp của game.
     @Volatile private var fpsValue = -1
     @Volatile private var fpsUpdatedAt = 0L
     private val fpsSampling = AtomicBoolean(false)
@@ -486,6 +551,9 @@ class StatsBarOverlay(
     private var previousLayer = ""
     private var previousFrames = -1L
     private var previousSampleAt = 0L
+    private var lastLoggedPkg = ""
+    private var lastLoggedLayer = ""
+    private var lastNoLayerLogAt = 0L
 
     private data class LayerStats(val name: String, val frames: Long, val averageFps: Double)
 
@@ -500,14 +568,25 @@ class StatsBarOverlay(
                     return@execute
                 }
 
-                val focusOut = runCatching { runAdbText(manager, FOCUS_CMD, 16_000) }.getOrDefault("")
-                val focusedPkg = FOCUS_RE.find(focusOut)?.groupValues?.getOrNull(1)
-                    ?.takeIf { PKG_RE.matches(it) && it != "com.zyntap.app" }
-                val pkg = focusedPkg ?: targetPkg()?.takeIf { PKG_RE.matches(it) }
+                // Lấy ứng dụng đang ở foreground từ ActivityTaskManager trước; một số ROM
+                // không còn in mCurrentFocus theo định dạng cũ của WindowManager.
+                val activityOut = runCatching { runAdbText(manager, ACTIVITY_CMD, 120_000) }.getOrDefault("")
+                val focusedPkg = ACTIVITY_PKG_RE.findAll(activityOut)
+                    .mapNotNull { it.groupValues.getOrNull(1) }
+                    .firstOrNull { PKG_RE.matches(it) && it != "com.zyntap.app" }
+                    ?: runCatching { runAdbText(manager, FOCUS_CMD, 16_000) }.getOrDefault("")
+                        .let { FOCUS_RE.find(it)?.groupValues?.getOrNull(1) }
+                        ?.takeIf { PKG_RE.matches(it) && it != "com.zyntap.app" }
+                val pkg = focusedPkg ?: targetPkg()?.takeIf { PKG_RE.matches(it) && it != "com.zyntap.app" }
                 if (pkg.isNullOrBlank()) {
+                    DebugLog.w("FPS", "Không xác định được app foreground; activityOutput=${activityOut.take(220).replace('\n', ' ')}")
                     publishFps(-1)
                     previousLayer = ""; previousFrames = -1L; previousSampleAt = 0L
                     return@execute
+                }
+                if (lastLoggedPkg != pkg) {
+                    lastLoggedPkg = pkg
+                    DebugLog.i("FPS", "Đang tìm layer FPS cho app: $pkg")
                 }
 
                 // Bật bộ đếm một lần trong phiên; không clear mỗi giây vì sẽ mất mẫu để so sánh.
@@ -515,7 +594,8 @@ class StatsBarOverlay(
                     val enabled = runCatching {
                         runAdbText(manager, "dumpsys SurfaceFlinger --timestats -clear -enable", 8_000)
                     }.getOrDefault("")
-                    DebugLog.i("FPS", "Đã yêu cầu SurfaceFlinger TimeStats (output=${enabled.length})")
+                    val enableHint = enabled.trim().take(180).replace('\n', ' ')
+                    DebugLog.i("FPS", "TimeStats enable đã gửi; output=${enabled.length}${if (enableHint.isNotEmpty()) ", $enableHint" else ""}")
                 }
 
                 val dump = runCatching {
@@ -529,6 +609,10 @@ class StatsBarOverlay(
 
                 if (chosen != null) {
                     val now = SystemClock.elapsedRealtime()
+                    if (lastLoggedLayer != chosen.name) {
+                        lastLoggedLayer = chosen.name
+                        DebugLog.i("FPS", "Đã tìm thấy layer: ${chosen.name.take(180)}; totalFrames=${chosen.frames}")
+                    }
                     if (chosen.name == previousLayer && previousFrames >= 0L && chosen.frames >= previousFrames && previousSampleAt > 0L) {
                         val elapsed = (now - previousSampleAt).coerceAtLeast(1L)
                         val delta = chosen.frames - previousFrames
@@ -544,9 +628,21 @@ class StatsBarOverlay(
                     return@execute
                 }
 
+                if (lastNoLayerLogAt == 0L || SystemClock.elapsedRealtime() - lastNoLayerLogAt > 10_000L) {
+                    lastNoLayerLogAt = SystemClock.elapsedRealtime()
+                    val layerNames = Regex("(?m)^\\s*layerName\\s*=\\s*(.*)$").findAll(dump)
+                        .map { it.groupValues[1].trim() }.filter { it.contains(pkg, ignoreCase = true) }
+                        .take(4).joinToString(" | ")
+                    DebugLog.w("FPS", "TimeStats không khớp layer app=$pkg, dump=${dump.length} chars, match=${if (layerNames.isEmpty()) "none" else layerNames}; đầu ra=${dump.take(180).replace('\n', ' ')}")
+                }
                 // Fallback cho ROM không xuất TimeStats: lấy timestamp present từ SurfaceFlinger --latency.
                 val fallback = readLatencyFps(manager, pkg)
-                if (fallback >= 0) publishFps(fallback) else publishFps(-1)
+                if (fallback >= 0) {
+                    publishFps(fallback)
+                    DebugLog.i("FPS", "Đọc được FPS qua --latency: $fallback")
+                } else {
+                    publishFps(-1)
+                }
                 previousLayer = ""; previousFrames = -1L; previousSampleAt = 0L
             } catch (t: Throwable) {
                 DebugLog.w("FPS", "Không đọc được FPS thật: ${t.message ?: t.javaClass.simpleName}")
@@ -847,6 +943,8 @@ class StatsBarOverlay(
         private val WS_RE = Regex("\\s+")
         private val RLS_RE = Regex("RequestedLayerState\\{[0-9a-fA-F]+\\s+(.+?)(?:\\s+parentId=.*|\\s+ROOT.*|\\}.*)?$")
         private val FOCUS_RE = Regex("([A-Za-z0-9_.]+)/[A-Za-z0-9_.$]+")
+        private val ACTIVITY_PKG_RE = Regex("(?m)(?:mResumedActivity|topResumedActivity|ResumedActivity)[:=\\s]+.*?\\b([A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+)/[A-Za-z0-9_.$]+")
+        private const val ACTIVITY_CMD = "dumpsys activity activities 2>/dev/null"
         private const val FOCUS_CMD =
             "dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | head -n 2"
 
