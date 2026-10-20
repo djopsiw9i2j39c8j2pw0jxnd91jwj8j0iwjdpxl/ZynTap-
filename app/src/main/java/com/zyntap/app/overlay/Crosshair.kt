@@ -105,9 +105,9 @@ class CrosshairSettings(context: Context) {
 
     companion object {
         const val SIZE_MIN = 8
-        const val SIZE_MAX = 120
+        const val SIZE_MAX = 200
         const val RING_MIN = 20
-        const val RING_MAX = 400
+        const val RING_MAX = 1000
         const val THICK_MIN = 1
         const val THICK_MAX = 12
         const val ALPHA_MIN = 10
