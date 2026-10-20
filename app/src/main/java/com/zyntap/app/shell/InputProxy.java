@@ -219,6 +219,24 @@ public final class InputProxy {
     private static long lastRealUpAt = 0;       // uptime lúc ngón thật gần nhất vừa nhả (chỉ đụng dưới LOCK)
     private static int deviceId = 0;
 
+    /**
+     * Mã thiết bị dùng cho sự kiện BƠM vào hệ thống (khác [deviceId] của tấm cảm ứng thật).
+     * Android 14+ kiểm tra tính nhất quán luồng chạm của mọi sự kiện bơm không kèm targetUid (InputVerifier, khoá theo deviceId):
+     * DOWN khi deviceId đó đang "chạm dở" -> bị từ chối (FAILED), CANCEL thiếu FLAG_CANCELED -> bị từ chối.
+     * Dùng thẳng deviceId thật thì chỉ cần MỘT lần luồng bị lệch (CANCEL/UP bị từ chối, helper chết giữa chừng...) là trạng thái
+     * "đang chạm" kẹt lại trong system_server và MỌI DOWN sau đó đều bị từ chối cho tới khi khởi động lại máy.
+     * Nên dùng mã ảo riêng, đổi mới mỗi lần helper chạy và mỗi lần phải dựng lại luồng -> luôn bắt đầu từ trạng thái sạch.
+     */
+    private static int injDev = 0;
+    private static int injGen = 0;
+    private static final int INJ_DEV_BASE = 0x5A000000;
+    private static final int FLAG_CANCELED = 0x20; // MotionEvent.FLAG_CANCELED (@hide) — bắt buộc với ACTION_CANCEL
+
+    private static int nextInjDev() {
+        int pid = android.os.Process.myPid() & 0xFFFF;
+        return INJ_DEV_BASE + (pid << 6) + ((injGen++) & 0x3F);
+    }
+
     /** Hàng đợi click chờ tới lượt + click đang giữ (tối đa một ngón ảo cùng lúc). Chỉ đụng dưới LOCK. */
     private static final ArrayDeque<Tap> tapQ = new ArrayDeque<>();
     private static Tap curTap = null;
@@ -271,6 +289,7 @@ public final class InputProxy {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> { urgentRelease = true; shutdown(); }, "zyn-hook"));
         devIn = new FileInputStream(devPath);
         deviceId = findDeviceId(devName);
+        injDev = nextInjDev();
 
         // Chuẩn bị bộ phát; nếu không có thì không grab (grab mà không phát lại được = mất cảm ứng).
         Injector inj = null;
@@ -281,6 +300,7 @@ public final class InputProxy {
             injecting = grabbed;
         }
         OUT.println("READY grab=" + (grabbed ? 1 : 0) + " inj=" + (injecting ? 1 : 0) + " dev=" + deviceId);
+        log("bơm bằng mã thiết bị ảo " + injDev + " (thật: " + deviceId + ")");
 
         startOutThread();
         if (injecting) startInjectThread();
@@ -768,8 +788,10 @@ public final class InputProxy {
         if (!injecting || shown.isEmpty()) return;
         ArrayList<Finger> keep = new ArrayList<>(shown);
         log("inject lỗi -> dựng lại luồng chạm (" + keep.size() + " ngón) để ngón thật không bị đơ");
-        emit(MotionEvent.ACTION_CANCEL, -1);
+        dropPendingInject();                        // sự kiện còn xếp hàng thuộc luồng cũ: sẽ bị từ chối hết, bỏ đi
+        emit(MotionEvent.ACTION_CANCEL, -1, true); // luồng cũ: huỷ cho gọn, hệ thống có từ chối cũng kệ
         shown.clear();
+        injDev = nextInjDev();                     // luồng mới trên mã thiết bị mới = trạng thái kiểm tra sạch
         downTime = SystemClock.uptimeMillis();
         for (Finger f : keep) {
             shown.add(f);
@@ -778,7 +800,9 @@ public final class InputProxy {
     }
 
     /** Gọi dưới LOCK. [actionIndex] = chỉ số trong [shown] của ngón có DOWN/UP (bỏ qua với MOVE/CANCEL). */
-    private static void emit(int baseAction, int actionIndex) {
+    private static void emit(int baseAction, int actionIndex) { emit(baseAction, actionIndex, false); }
+
+    private static void emit(int baseAction, int actionIndex, boolean soft) {
         int n = shown.size();
         if (n == 0) return;
         MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[n];
@@ -802,9 +826,10 @@ public final class InputProxy {
             action = baseAction | (actionIndex << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
         }
         long now = SystemClock.uptimeMillis();
+        int flags = baseAction == MotionEvent.ACTION_CANCEL ? FLAG_CANCELED : 0;
         MotionEvent ev = MotionEvent.obtain(downTime, now, action, n, props, coords,
-                0, 0, 1f, 1f, deviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
-        enqueueInject(ev, baseAction == MotionEvent.ACTION_MOVE);
+                0, 0, 1f, 1f, injDev, 0, InputDevice.SOURCE_TOUCHSCREEN, flags);
+        enqueueInject(ev, baseAction == MotionEvent.ACTION_MOVE, soft);
     }
 
     // ---- phát sự kiện: hàng đợi + luồng riêng ------------------------------------------------------
@@ -817,7 +842,8 @@ public final class InputProxy {
     private static final class Pending {
         final MotionEvent ev;
         final boolean move;
-        Pending(MotionEvent ev, boolean move) { this.ev = ev; this.move = move; }
+        final boolean soft; // sự kiện dọn dẹp: bị từ chối thì không tính là lỗi, không kích hoạt dựng lại luồng
+        Pending(MotionEvent ev, boolean move, boolean soft) { this.ev = ev; this.move = move; this.soft = soft; }
     }
 
     private static final Object INJ_LOCK = new Object();
@@ -836,14 +862,21 @@ public final class InputProxy {
     private static long lastStatAt = 0;
     private static final long STAT_MS = 3000;
 
-    private static void enqueueInject(MotionEvent ev, boolean move) {
+    private static void enqueueInject(MotionEvent ev, boolean move, boolean soft) {
         synchronized (INJ_LOCK) {
             if (move) {
                 Pending tail = INJQ.peekLast();
                 if (tail != null && tail.move) { INJQ.pollLast(); tail.ev.recycle(); }
             }
-            INJQ.addLast(new Pending(ev, move));
+            INJQ.addLast(new Pending(ev, move, soft));
             INJ_LOCK.notifyAll();
+        }
+    }
+
+    private static void dropPendingInject() {
+        synchronized (INJ_LOCK) {
+            for (Pending q : INJQ) q.ev.recycle();
+            INJQ.clear();
         }
     }
 
@@ -875,7 +908,7 @@ public final class InputProxy {
                 while (root.getCause() != null && root.getCause() != root) root = root.getCause();
                 log("inject fail: " + t + (root != t ? " <- " + root : "")
                     + " [action=" + (p.ev instanceof MotionEvent ? ((MotionEvent) p.ev).getActionMasked() : -1)
-                    + " sdk=" + Build.VERSION.SDK_INT + "]");
+                    + " dev=" + (p.ev.getDeviceId()) + " sdk=" + Build.VERSION.SDK_INT + "]");
             } finally {
                 p.ev.recycle();
             }
@@ -890,7 +923,7 @@ public final class InputProxy {
                 int qn; synchronized (INJ_LOCK) { qn = INJQ.size(); }
                 log("phát chạm chậm: chờ " + age + "ms, gọi hệ thống " + took + "ms, hàng đợi " + qn);
             }
-            if (ok) injectFails = 0; else onInjectFailure(p.move);
+            if (ok) injectFails = 0; else if (!p.soft) onInjectFailure(p.move);
             synchronized (INJ_LOCK) {
                 injBusy = false;
                 INJ_LOCK.notifyAll();
@@ -1064,7 +1097,7 @@ public final class InputProxy {
                 tapQ.clear();
                 curTap = null;
                 if (injecting && !shown.isEmpty()) {
-                    emit(MotionEvent.ACTION_CANCEL, -1);
+                    emit(MotionEvent.ACTION_CANCEL, -1, true);
                     shown.clear();
                     pidMask = 0;
                 }
