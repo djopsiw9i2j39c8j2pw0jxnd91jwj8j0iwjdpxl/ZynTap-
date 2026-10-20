@@ -243,13 +243,12 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
             if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
         row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val box = FrameLayout(context)
+        // Không có ô vuông: hàng được chọn = nền xanh nhạt + chữ xanh + dấu tích bên phải (giống dropdown thường)
         val tick = ImageView(context).apply {
             setImageResource(R.drawable.ic_check)
-            setColorFilter(0xFF06101C.toInt())
+            setColorFilter(0xFF19D3FF.toInt())
         }
-        box.addView(tick, FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
-        row.addView(box, LinearLayout.LayoutParams(dp(22), dp(22)))
+        row.addView(tick, LinearLayout.LayoutParams(dp(18), dp(18)))
         val set = { on: Boolean ->
             row.background = RippleDrawable(
                 ColorStateList.valueOf(0x33FFFFFF),
@@ -259,11 +258,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
                 },
                 GradientDrawable().apply { setColor(0xFFFFFFFF.toInt()); cornerRadius = dpf(10f) },
             )
-            box.background = GradientDrawable().apply {
-                cornerRadius = dpf(6f)
-                if (on) setColor(0xFF19D3FF.toInt()) else { setColor(0x00000000); setStroke(dp(1), 0xFF4A5C80.toInt()) }
-            }
-            tick.visibility = if (on) View.VISIBLE else View.INVISIBLE
+            tick.visibility = if (on) View.VISIBLE else View.GONE
             tv.setTextColor(if (on) 0xFF19D3FF.toInt() else 0xFFE8EEFA.toInt())
         }
         return CheckItem(row, set)

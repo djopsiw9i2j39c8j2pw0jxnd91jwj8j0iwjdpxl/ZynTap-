@@ -449,7 +449,6 @@ class StatsBarOverlay(
         val bat = readBattery()
         val pattern = if (android.text.format.DateFormat.is24HourFormat(ctx)) "HH:mm" else "h:mm a"
         val time = SimpleDateFormat(pattern, Locale.getDefault()).format(Date())
-        if (settings.isOn(StatKind.FPS)) requestFps()
         val snap = StatSnapshot(
             fps = if (settings.isOn(StatKind.FPS)) fpsValue else -1,
             batteryPct = bat.first, charging = bat.second,
@@ -472,228 +471,8 @@ class StatsBarOverlay(
         stopTickerIfIdle()
     }
 
-    // ---- đo FPS (luồng nền) ----
-    private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "zyn-fps").apply { isDaemon = true } }
-    @Volatile private var fpsBusy = false
-    @Volatile private var fpsValue = -1
-    private var layerName: String? = null     // chỉ đụng ở luồng io
-    private var layerPkg: String? = null
-    private var layerAt = 0L
-    private var lastNewest = 0L
-    private var stall = 0
-    private var lastFpsErrAt = 0L
-    @Volatile private var fpsWhy = ""
-
-    private fun requestFps() {
-        if (fpsBusy) return
-        fpsBusy = true
-        try {
-            io.execute {
-                try {
-                    fpsValue = measureFps()
-                } catch (_: InterruptedException) {
-                    fpsValue = -1 // dịch vụ đang tắt -> không phải lỗi
-                } catch (t: Throwable) {
-                    fpsValue = -1
-                    val n = SystemClock.elapsedRealtime()
-                    if (n - lastFpsErrAt > 30_000L) {
-                        lastFpsErrAt = n
-                        DebugLog.w("Thanh thông số", "Đo FPS lỗi", t)
-                    }
-                } finally {
-                    fpsBusy = false
-                }
-            }
-        } catch (t: Throwable) {
-            fpsBusy = false
-        }
-    }
-
-    /**
-     * FPS của game = tốc độ SurfaceFlinger thực sự hiển thị khung hình của layer game.
-     * `dumpsys SurfaceFlinger --latency <layer>` trả về tối đa 127 khung gần nhất: mỗi dòng 3 mốc thời gian (ns),
-     * cột 2 = lúc khung thực sự lên màn hình. Đếm số khung trong 1 giây cuối.
-     * @return số FPS (>= 0) hoặc -1 nếu chưa đo được (chưa nối ADB, chưa tìm thấy layer...)
-     */
-    private fun setWhy(m: String) {
-        if (m != fpsWhy) {
-            fpsWhy = m
-            DebugLog.i("Thanh thông số", "FPS: $m")
-        }
-    }
-
-    /** Gói app đang ở trước màn hình (cửa sổ nổi của ZynTap không giành focus nên không bị nhầm). */
-    private fun focusedPkg(mgr: ZynAdbConnectionManager): String? {
-        val out = runAdb(mgr, FOCUS_CMD, 3000L) ?: return null
-        val m = FOCUS_RE.find(out) ?: return null
-        val p = m.groupValues[1]
-        return if (PKG_RE.matches(p) && p != ctx.packageName) p else null
-    }
-
-    private fun findLayer(mgr: ZynAdbConnectionManager, pkg: String): String? {
-        val out = runAdb(mgr, LIST_CMD.replace("@PKG@", pkg), 3500L) ?: return null
-        val name = out.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
-        return if (name == null) null else cleanLayerName(name)
-    }
-
-    /**
-     * Android 14+: `--list` có thể in nguyên dòng "RequestedLayerState{4d18f86 SurfaceView[pkg/Act]@0(BLAST)#3211 parentId=3210}".
-     * Tên layer thật chỉ là phần giữa mã băm và " parentId=...".
-     */
-    private fun cleanLayerName(raw: String): String? {
-        var n = raw.trim()
-        val m = RLS_RE.find(n)
-        if (m != null) n = m.groupValues[1].trim()
-        n = n.trimEnd('}', ' ')
-        return if (n.isEmpty() || n.contains('\'')) null else n
-    }
-
-    // ---- cách 2: `dumpsys SurfaceFlinger --timestats` (SurfaceFlinger tự đếm totalFrames từng layer) ----
-    private var tsEnabled = false
-    private var tsLayer: String? = null
-    private var tsPrevFrames = -1L
-    private var tsPrevAt = 0L
-
-    private fun measureViaTimeStats(mgr: ZynAdbConnectionManager, pkg: String?): Int {
-        if (pkg == null) return -1
-        if (!tsEnabled) {
-            runAdb(mgr, "dumpsys SurfaceFlinger --timestats -enable", 3000L)
-            tsEnabled = true
-        }
-        val out = runAdb(mgr, "dumpsys SurfaceFlinger --timestats -dump", 4000L) ?: return -1
-        val now = SystemClock.elapsedRealtime()
-        // Tách theo từng khối "layerName = ..." rồi đọc "totalFrames = N"
-        val frames = HashMap<String, Long>()
-        var cur: String? = null
-        for (raw in out.lineSequence()) {
-            val ln = raw.trim()
-            if (ln.startsWith("layerName")) {
-                cur = ln.substringAfter('=').trim()
-            } else if (cur != null && ln.startsWith("totalFrames")) {
-                val n = ln.substringAfter('=').trim().toLongOrNull()
-                if (n != null) frames[cur] = n
-                cur = null
-            }
-        }
-        val mine = frames.filterKeys { it.contains(pkg) }
-        if (mine.isEmpty()) { setWhy("timestats không có layer của $pkg (${frames.size} layer)"); return -1 }
-        var name = tsLayer
-        if (name == null || !mine.containsKey(name)) {
-            name = mine.keys.firstOrNull { it.contains("SurfaceView") && it.contains("BLAST") }
-                ?: mine.keys.firstOrNull { it.contains("SurfaceView") }
-                ?: mine.maxByOrNull { it.value }!!.key
-            tsLayer = name; tsPrevFrames = -1L
-            setWhy("đo bằng timestats: $name")
-        }
-        val total = mine[name] ?: return -1
-        val prevF = tsPrevFrames
-        val prevT = tsPrevAt
-        tsPrevFrames = total; tsPrevAt = now
-        if (prevF < 0L || now - prevT <= 0L) return -1
-        val df = total - prevF
-        if (df < 0L) { tsLayer = null; return -1 } // bộ đếm bị đặt lại
-        val fps = df * 1000.0 / (now - prevT)
-        return Math.round(fps).toInt().coerceIn(0, 999)
-    }
-
-    private fun measureFps(): Int {
-        val mgr = ZynAdbConnectionManager.get(ctx.applicationContext)
-        if (!mgr.isConnected) { setWhy("chưa nối ADB Wi-Fi"); return -1 }
-        val now = SystemClock.elapsedRealtime()
-        if (layerName == null || now - layerAt > 30_000L) {
-            // Ưu tiên app đã mở từ ZynTap; không thấy layer (hoặc chưa có app) thì dò theo app đang ở trước màn hình
-            val cands = ArrayList<String>()
-            targetPkg()?.takeIf { PKG_RE.matches(it) }?.let { cands.add(it) }
-            var found: String? = null
-            var foundPkg: String? = null
-            for (c in cands) { found = findLayer(mgr, c); if (found != null) { foundPkg = c; break } }
-            if (found == null) {
-                val fp = focusedPkg(mgr)
-                if (fp != null && fp !in cands) { found = findLayer(mgr, fp); if (found != null) foundPkg = fp }
-            }
-            if (found == null) {
-                layerName = null
-                layerAt = now - 25_000L // thử dò lại sau ~5 giây
-                setWhy("chưa tìm thấy layer của game (app: ${cands.firstOrNull() ?: "không rõ"})")
-                return -1
-            }
-            layerName = found
-            layerPkg = foundPkg
-            layerAt = now
-            lastNewest = 0L; stall = 0
-            setWhy("đo layer: $found")
-        }
-        val layer = layerName ?: return -1
-        var lat = runAdb(mgr, "dumpsys SurfaceFlinger --latency '$layer'", 2500L)
-        if (lat == null) { setWhy("đọc latency quá thời gian"); return -1 }
-        if (lat.lineSequence().count { it.isNotBlank() } < 3 && layer.contains('#')) {
-            // Một số bản Android khớp theo tên không kèm "#id"
-            lat = runAdb(mgr, "dumpsys SurfaceFlinger --latency '${layer.substringBeforeLast('#')}'", 2500L) ?: lat
-        }
-
-        // Mỗi dòng 3 mốc (ns): cột 1 = lúc lên màn hình. Một số máy (Android 11+ BLAST) để cột 1 = 0 -> lùi về cột 2 / cột 0.
-        val rows = ArrayList<List<Long>>()
-        for (ln in lat.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.drop(1)) {
-            val parts = ln.split(WS_RE)
-            if (parts.size < 3) continue
-            val v = parts.take(3).map { it.toLongOrNull() ?: 0L }
-            rows.add(v)
-        }
-        fun valid(x: Long) = x > 0L && x < Long.MAX_VALUE / 2
-        var ts: List<Long> = emptyList()
-        for (col in intArrayOf(1, 2, 0)) {
-            val t = rows.map { it[col] }.filter { valid(it) }
-            if (t.size >= 2) { ts = t; break }
-        }
-        if (ts.size < 2) {
-            // --latency không cho mốc thời gian (Android mới) -> dùng bộ đếm khung hình có sẵn của SurfaceFlinger
-            val viaStats = measureViaTimeStats(mgr, layerPkg)
-            if (viaStats >= 0) return viaStats
-            layerName = null // layer có thể đã đổi (đổi cảnh, mở lại game) -> dò lại lần sau
-            setWhy("--latency trống (" + lat.trim().take(80).replace('\n', '|') + ") và timestats cũng không đo được")
-            return -1
-        }
-        ts = ts.sorted()
-        val newest = ts[ts.size - 1]
-        if (newest == lastNewest) stall++ else stall = 0
-        lastNewest = newest
-        if (stall >= 2) return 0 // game đứng hình / không vẽ nữa
-        val firstIdx = ts.indexOfFirst { it >= newest - 1_000_000_000L }
-        val cnt = ts.size - firstIdx
-        if (cnt < 2) return 0
-        val span = (newest - ts[firstIdx]).coerceAtLeast(1L)
-        val fps = (cnt - 1) * 1_000_000_000.0 / span
-        return Math.round(fps).toInt().coerceIn(0, 999)
-    }
-
-    private fun runAdb(mgr: ZynAdbConnectionManager, cmd: String, timeoutMs: Long): String? {
-        val sb = StringBuilder()
-        val holder = arrayOfNulls<AdbStream>(1)
-        val done = CountDownLatch(1)
-        val worker = Thread({
-            try {
-                val s = mgr.openStream("exec:$cmd")
-                holder[0] = s
-                s.openInputStream().bufferedReader().use { r ->
-                    val cb = CharArray(4096)
-                    while (true) {
-                        val n = r.read(cb)
-                        if (n < 0) break
-                        synchronized(sb) { if (sb.length < 200_000) sb.append(cb, 0, n) }
-                    }
-                }
-            } catch (_: Throwable) {
-            } finally {
-                done.countDown()
-            }
-        }, "zyn-fps-adb")
-        worker.isDaemon = true
-        worker.start()
-        val ok = done.await(timeoutMs, TimeUnit.MILLISECONDS)
-        runCatching { holder[0]?.close() }
-        if (!ok) return null
-        return synchronized(sb) { sb.toString() }
-    }
+    // ---- FPS: TẠM THỜI giả lập 60 (logic đo thật đã gỡ, sẽ làm lại sau) ----
+    private val fpsValue = 60
 
     // ---- cửa sổ ----
 
@@ -886,7 +665,6 @@ class StatsBarOverlay(
         main.removeCallbacksAndMessages(null)
         ticking = false
         previews.clear()
-        runCatching { io.shutdownNow() }
     }
 
     fun state(): String {
@@ -897,7 +675,7 @@ class StatsBarOverlay(
             v.isAttachedToWindow -> "đang hiện"
             else -> "cửa sổ chưa gắn"
         }
-        return "tổng=${settings.enabled} · bật: ${if (on.isEmpty()) "không" else on} · $w · fps=$fpsValue ($fpsWhy)"
+        return "tổng=${settings.enabled} · bật: ${if (on.isEmpty()) "không" else on} · $w · fps=$fpsValue (giả lập)"
     }
 
     companion object {
