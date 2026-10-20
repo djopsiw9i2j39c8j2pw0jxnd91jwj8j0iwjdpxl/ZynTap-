@@ -61,7 +61,20 @@ class StatsSettings(context: Context) {
         prefs.edit().putBoolean("on_" + k.key, v).apply()
     }
 
-    fun anyOn(): Boolean = StatKind.values().any { isOn(it) }
+    /** Có mục nào được chọn hiển thị không (bất kể công tắc tổng). */
+    fun anyItem(): Boolean = StatKind.values().any { isOn(it) }
+
+    /**
+     * Công tắc TỔNG "Hiện thanh trạng thái". Bản cũ chưa có khóa này: nếu trước đó đã bật mục nào thì coi như đang bật.
+     */
+    var enabled: Boolean
+        get() = prefs.getBoolean("enabled", anyItem())
+        set(v) {
+            prefs.edit().putBoolean("enabled", v).apply()
+        }
+
+    /** Thanh thật sự hiện trên màn hình: công tắc tổng bật VÀ có ít nhất 1 mục. */
+    fun anyOn(): Boolean = enabled && anyItem()
 
     var posX: Float
         get() = prefs.getFloat("pos_x", 0.5f).coerceIn(0f, 1f)
@@ -93,11 +106,12 @@ private val C_CYAN = 0xFF19D3FF.toInt()
 private val C_FG = 0xFFE8EEFA.toInt()
 private val C_MUTED = 0xFF8D9DBA.toInt()
 
+/** Dạng gọn (1.2M / 340K / 0K) để thanh không phình khi bật nhiều mục. */
 private fun fmtRate(b: Long): String = when {
     b < 0L -> "--"
-    b >= 1_000_000L -> String.format(Locale.US, "%.1f MB/s", b / 1_000_000.0)
-    b >= 1_000L -> String.format(Locale.US, "%d KB/s", b / 1_000L)
-    else -> "$b B/s"
+    b >= 10_000_000L -> String.format(Locale.US, "%dM", b / 1_000_000L)
+    b >= 1_000_000L -> String.format(Locale.US, "%.1fM", b / 1_000_000.0)
+    else -> String.format(Locale.US, "%dK", b / 1_000L)
 }
 
 // ---- biểu tượng pin tự vẽ -------------------------------------------------------------------
@@ -217,14 +231,14 @@ internal class StatsBarView(ctx: Context, private val settings: StatsSettings) :
         setTypeface(typeface, Typeface.BOLD)
     }
     private val netDown = TextView(ctx).apply {
-        text = "↓ --"; scaledTextSize(11.5f); setTextColor(C_CYAN)
-        setTypeface(typeface, Typeface.BOLD)
-        minWidth = (paint.measureText("↓ 88.8 MB/s") + 1f).toInt()
+        text = "↓--"; scaledTextSize(11f); setTextColor(C_CYAN)
+        setTypeface(typeface, Typeface.BOLD); maxLines = 1
+        minWidth = (paint.measureText("↓88.8M") + 1f).toInt()
     }
     private val netUp = TextView(ctx).apply {
-        text = "↑ --"; scaledTextSize(11.5f); setTextColor(C_MUTED)
-        setTypeface(typeface, Typeface.BOLD)
-        minWidth = (paint.measureText("↑ 88.8 MB/s") + 1f).toInt()
+        text = "↑--"; scaledTextSize(11f); setTextColor(C_MUTED)
+        setTypeface(typeface, Typeface.BOLD); maxLines = 1
+        minWidth = (paint.measureText("↑88.8M") + 1f).toInt()
     }
     private val grip = GripGlyph(ctx)
     private val hint = TextView(ctx).apply {
@@ -241,9 +255,24 @@ internal class StatsBarView(ctx: Context, private val settings: StatsSettings) :
         cells[StatKind.FPS] = row(fpsLabel to dp(5f), fpsValue to 0)
         cells[StatKind.BATTERY] = row(batGlyph to dp(6f), batText to 0)
         cells[StatKind.TIME] = row(timeText to 0)
-        cells[StatKind.NET] = row(netDown to dp(8f), netUp to 0)
+        cells[StatKind.NET] = row(netDown to dp(5f), netUp to 0)
         paintBg()
         refreshKinds()
+    }
+
+    /** Trần bề rộng (px) — thanh không bao giờ rộng hơn vùng cho phép. 0 = không giới hạn. */
+    var maxBarWidth = 0
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val cap = maxBarWidth
+        if (cap > 0) {
+            val mode = MeasureSpec.getMode(widthMeasureSpec)
+            val size = MeasureSpec.getSize(widthMeasureSpec)
+            val limit = if (mode == MeasureSpec.UNSPECIFIED) cap else minOf(size, cap)
+            super.onMeasure(MeasureSpec.makeMeasureSpec(limit, MeasureSpec.AT_MOST), heightMeasureSpec)
+        } else {
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+        }
     }
 
     private fun row(vararg items: Pair<View, Int>): View {
@@ -279,17 +308,20 @@ internal class StatsBarView(ctx: Context, private val settings: StatsSettings) :
         lastSig = sg
         removeAllViews()
         var n = 0
+        val total = StatKind.values().count { settings.isOn(it) }
+        val gapDp = if (total >= 3) 6f else 10f      // nhiều mục -> khít lại cho thanh không phình
+        setPadding(dp(if (total >= 3) 10f else 13f), dp(6f), dp(if (total >= 3) 10f else 13f), dp(6f))
         if (editing) {
             val lp = LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            lp.marginEnd = dp(9f)
+            lp.marginEnd = dp(if (total >= 3) 6f else 9f)
             addView(grip, lp)
         }
         for (k in StatKind.values()) {
             if (!settings.isOn(k)) continue
             if (n > 0) {
                 val lp = LayoutParams(dp(1f), dp(12f))
-                lp.marginStart = dp(10f)
-                lp.marginEnd = dp(10f)
+                lp.marginStart = dp(gapDp)
+                lp.marginEnd = dp(gapDp)
                 addView(divider(), lp)
             }
             val cell = cells[k] ?: continue
@@ -330,8 +362,8 @@ internal class StatsBarView(ctx: Context, private val settings: StatsSettings) :
         // Giờ
         timeText.text = s.time
         // Mạng
-        netDown.text = "↓ " + fmtRate(s.rxBps)
-        netUp.text = "↑ " + fmtRate(s.txBps)
+        netDown.text = "↓" + fmtRate(s.rxBps)
+        netUp.text = "↑" + fmtRate(s.txBps)
     }
 }
 
@@ -450,16 +482,15 @@ class StatsBarOverlay(
     private var lastNewest = 0L
     private var stall = 0
     private var lastFpsErrAt = 0L
+    @Volatile private var fpsWhy = ""
 
     private fun requestFps() {
         if (fpsBusy) return
-        val pkg = targetPkg()
-        if (pkg == null || !PKG_RE.matches(pkg)) { fpsValue = -1; return }
         fpsBusy = true
         try {
             io.execute {
                 try {
-                    fpsValue = measureFps(pkg)
+                    fpsValue = measureFps()
                 } catch (t: Throwable) {
                     fpsValue = -1
                     val n = SystemClock.elapsedRealtime()
@@ -482,38 +513,78 @@ class StatsBarOverlay(
      * cột 2 = lúc khung thực sự lên màn hình. Đếm số khung trong 1 giây cuối.
      * @return số FPS (>= 0) hoặc -1 nếu chưa đo được (chưa nối ADB, chưa tìm thấy layer...)
      */
-    private fun measureFps(pkg: String): Int {
+    private fun setWhy(m: String) {
+        if (m != fpsWhy) {
+            fpsWhy = m
+            DebugLog.i("Thanh thông số", "FPS: $m")
+        }
+    }
+
+    /** Gói app đang ở trước màn hình (cửa sổ nổi của ZynTap không giành focus nên không bị nhầm). */
+    private fun focusedPkg(mgr: ZynAdbConnectionManager): String? {
+        val out = runAdb(mgr, FOCUS_CMD, 3000L) ?: return null
+        val m = FOCUS_RE.find(out) ?: return null
+        val p = m.groupValues[1]
+        return if (PKG_RE.matches(p) && p != ctx.packageName) p else null
+    }
+
+    private fun findLayer(mgr: ZynAdbConnectionManager, pkg: String): String? {
+        val out = runAdb(mgr, LIST_CMD.replace("@PKG@", pkg), 3500L) ?: return null
+        val name = out.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
+        return if (name == null || name.contains('\'')) null else name
+    }
+
+    private fun measureFps(): Int {
         val mgr = ZynAdbConnectionManager.get(ctx.applicationContext)
-        if (!mgr.isConnected) return -1
+        if (!mgr.isConnected) { setWhy("chưa nối ADB Wi-Fi"); return -1 }
         val now = SystemClock.elapsedRealtime()
-        if (layerPkg != pkg) { layerName = null; layerPkg = pkg }
         if (layerName == null || now - layerAt > 30_000L) {
-            val out = runAdb(mgr, LIST_CMD.replace("@PKG@", pkg), 3500L) ?: return -1
-            val name = out.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
-            if (name == null || name.contains('\'')) {
+            // Ưu tiên app đã mở từ ZynTap; không thấy layer (hoặc chưa có app) thì dò theo app đang ở trước màn hình
+            val cands = ArrayList<String>()
+            targetPkg()?.takeIf { PKG_RE.matches(it) }?.let { cands.add(it) }
+            var found: String? = null
+            var foundPkg: String? = null
+            for (c in cands) { found = findLayer(mgr, c); if (found != null) { foundPkg = c; break } }
+            if (found == null) {
+                val fp = focusedPkg(mgr)
+                if (fp != null && fp !in cands) { found = findLayer(mgr, fp); if (found != null) foundPkg = fp }
+            }
+            if (found == null) {
                 layerName = null
                 layerAt = now - 25_000L // thử dò lại sau ~5 giây
+                setWhy("chưa tìm thấy layer của game (app: ${cands.firstOrNull() ?: "không rõ"})")
                 return -1
             }
-            layerName = name
+            layerName = found
+            layerPkg = foundPkg
             layerAt = now
+            lastNewest = 0L; stall = 0
+            setWhy("đo layer: $found")
         }
         val layer = layerName ?: return -1
-        val lat = runAdb(mgr, "dumpsys SurfaceFlinger --latency '$layer'", 2500L) ?: return -1
+        val lat = runAdb(mgr, "dumpsys SurfaceFlinger --latency '$layer'", 2500L)
+        if (lat == null) { setWhy("đọc latency quá thời gian"); return -1 }
 
-        val ts = ArrayList<Long>()
-        val lines = lat.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
-        for (ln in lines.drop(1)) {
+        // Mỗi dòng 3 mốc (ns): cột 1 = lúc lên màn hình. Một số máy (Android 11+ BLAST) để cột 1 = 0 -> lùi về cột 2 / cột 0.
+        val rows = ArrayList<List<Long>>()
+        for (ln in lat.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.drop(1)) {
             val parts = ln.split(WS_RE)
             if (parts.size < 3) continue
-            val a = parts[1].toLongOrNull() ?: continue
-            if (a > 0L && a < Long.MAX_VALUE / 2) ts.add(a)
+            val v = parts.take(3).map { it.toLongOrNull() ?: 0L }
+            rows.add(v)
+        }
+        fun valid(x: Long) = x > 0L && x < Long.MAX_VALUE / 2
+        var ts: List<Long> = emptyList()
+        for (col in intArrayOf(1, 2, 0)) {
+            val t = rows.map { it[col] }.filter { valid(it) }
+            if (t.size >= 2) { ts = t; break }
         }
         if (ts.size < 2) {
             layerName = null // layer có thể đã đổi (đổi cảnh, mở lại game) -> dò lại lần sau
+            setWhy("layer không có mốc thời gian khung hình")
             return -1
         }
-        ts.sort()
+        ts = ts.sorted()
         val newest = ts[ts.size - 1]
         if (newest == lastNewest) stall++ else stall = 0
         lastNewest = newest
@@ -601,6 +672,7 @@ class StatsBarOverlay(
         if (cur == null || p == null) {
             sweepOrphans()
             val v = StatsBarView(ctx, settings)
+            v.maxBarWidth = (screenBounds().width() - 2 * margin()).coerceAtLeast(0)
             v.editing = draggable
             v.refreshKinds()
             lastSnap?.let { v.update(it) }
@@ -747,17 +819,21 @@ class StatsBarOverlay(
             v.isAttachedToWindow -> "đang hiện"
             else -> "cửa sổ chưa gắn"
         }
-        return "bật: ${if (on.isEmpty()) "không" else on} · $w · fps=$fpsValue"
+        return "tổng=${settings.enabled} · bật: ${if (on.isEmpty()) "không" else on} · $w · fps=$fpsValue ($fpsWhy)"
     }
 
     companion object {
         private val PKG_RE = Regex("^[A-Za-z0-9_.]+$")
         private val WS_RE = Regex("\\s+")
+        private val FOCUS_RE = Regex("([A-Za-z0-9_.]+)/[A-Za-z0-9_.$]+")
+        private const val FOCUS_CMD =
+            "dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | head -n 2"
 
         /** In ra đúng 1 dòng: tên layer SurfaceFlinger của game (ưu tiên SurfaceView). */
         private const val LIST_CMD =
             "l=\$(dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '@PKG@' | grep -v -F 'Background'); " +
                 "s=\$(echo \"\$l\" | grep -F 'SurfaceView' | tail -1); " +
+                "if [ -z \"\$s\" ]; then s=\$(echo \"\$l\" | grep -F 'BLAST' | tail -1); fi; " +
                 "if [ -n \"\$s\" ]; then echo \"\$s\"; else echo \"\$l\" | tail -1; fi"
 
         private val live = java.util.Collections.synchronizedList(ArrayList<Pair<WindowManager, View>>())
@@ -797,29 +873,27 @@ class SettingsTab(
     private fun dp(n: Int) = (n * d).toInt()
 
     private var preview: StatsBarView? = null
-    private var selected = StatKind.FPS
     private var binding = false
-    private lateinit var toggleTitle: TextView
-    private lateinit var toggleDesc: TextView
     private lateinit var toggleSwitch: Switch
     private lateinit var summary: TextView
+    private lateinit var pickerHolder: LinearLayout
+    private lateinit var previewBox: FrameLayout
 
     private fun round(color: Int, stroke: Int = 0xFF24344E.toInt(), r: Int = 12) = GradientDrawable().apply {
         setColor(color); cornerRadius = dp(r).toFloat(); setStroke(dp(1), stroke)
     }
 
-    private fun refreshToggle() {
-        binding = true
-        toggleTitle.text = "Hiện " + selected.title
-        toggleDesc.text = selected.desc
-        toggleSwitch.isChecked = settings.isOn(selected)
-        binding = false
-    }
-
     private fun refreshSummary() {
         val on = StatKind.values().filter { settings.isOn(it) }
-        summary.text = if (on.isEmpty()) "Chưa bật mục nào." else "Đang bật: " + on.joinToString(" · ") { it.title }
-        summary.setTextColor(if (on.isEmpty()) C_MUTED else C_CYAN)
+        summary.text = when {
+            !settings.enabled -> "Thanh trạng thái đang tắt."
+            on.isEmpty() -> "Chưa chọn mục nào."
+            else -> "Đang hiện: " + on.joinToString(" · ") { it.title }
+        }
+        summary.setTextColor(if (settings.anyOn()) C_CYAN else C_MUTED)
+        // Công tắc tổng tắt -> xem trước mờ + danh sách mục mờ đi (vẫn chọn được sẵn)
+        previewBox.alpha = if (settings.enabled) 1f else 0.45f
+        pickerHolder.alpha = if (settings.enabled) 1f else 0.6f
     }
 
     fun build(): View {
@@ -833,40 +907,37 @@ class SettingsTab(
 
         // ---- ô xem trước (thanh thật, số liệu thật) ----
         val box = FrameLayout(ctx).apply { background = round(0xFF0A1220.toInt()) }
+        previewBox = box
         val pv = StatsBarView(ctx, settings).apply { showEmptyHint = true; refreshKinds() }
         preview = pv
         box.addView(pv, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER,
         ))
+        // Ô xem trước không được rộng hơn khung chứa
+        box.addOnLayoutChangeListener { _, l, _, r, _, ol, _, orr, _ ->
+            val w = r - l
+            if (w != orr - ol && w > 0) {
+                pv.maxBarWidth = w - dp(16)
+                pv.requestLayout()
+            }
+        }
         page.addView(box, LinearLayout.LayoutParams(-1, dp(84)))
         overlay.addPreview(pv)
 
-        // ---- dropdown chọn mục ----
-        page.addView(TextView(ctx).apply {
-            text = "Chọn mục"; setTextColor(C_MUTED); scaledTextSize(12f)
-            setPadding(dp(2), dp(14), 0, dp(5))
-        })
-        val kinds = StatKind.values().toList()
-        page.addView(
-            DropdownField(ctx, dropdown, kinds.map { it.title }, kinds.indexOf(selected)) { i ->
-                selected = kinds[i]
-                refreshToggle()
-            },
-            LinearLayout.LayoutParams(-1, dp(46)),
-        )
-
-        // ---- công tắc cho mục đang chọn ----
+        // ---- MỘT công tắc tổng: hiện thanh trạng thái ----
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(2), dp(4), dp(2), dp(4))
         }
         val texts = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        toggleTitle = TextView(ctx).apply {
+        texts.addView(TextView(ctx).apply {
+            text = "Hiện thanh trạng thái"
             setTextColor(C_FG); scaledTextSize(14.5f); setTypeface(typeface, Typeface.BOLD)
-        }
-        toggleDesc = TextView(ctx).apply { setTextColor(C_MUTED); scaledTextSize(11.5f) }
-        texts.addView(toggleTitle)
-        texts.addView(toggleDesc)
+        })
+        texts.addView(TextView(ctx).apply {
+            text = "Bật để hiện thanh nổi, rồi chọn các mục muốn hiển thị bên dưới."
+            setTextColor(C_MUTED); scaledTextSize(11.5f)
+        })
         row.addView(texts, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(8) })
         toggleSwitch = Switch(ctx).apply {
             thumbTintList = ColorStateList.valueOf(0xFFFFFFFF.toInt())
@@ -874,9 +945,10 @@ class SettingsTab(
                 arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
                 intArrayOf(C_CYAN, 0xFF2A3A5C.toInt()),
             )
+            isChecked = settings.enabled
             setOnCheckedChangeListener { _, on ->
                 if (!binding) {
-                    settings.setOn(selected, on)
+                    settings.enabled = on
                     pv.refreshKinds()
                     refreshSummary()
                     onChanged()
@@ -887,17 +959,37 @@ class SettingsTab(
         row.setOnClickListener { toggleSwitch.toggle() }
         page.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
 
+        // ---- dropdown CHỌN NHIỀU mục ----
+        pickerHolder = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        pickerHolder.addView(TextView(ctx).apply {
+            text = "Mục hiển thị"; setTextColor(C_MUTED); scaledTextSize(12f)
+            setPadding(dp(2), dp(12), 0, dp(5))
+        })
+        val kinds = StatKind.values().toList()
+        pickerHolder.addView(
+            MultiDropdownField(
+                ctx, dropdown, kinds.map { it.title },
+                BooleanArray(kinds.size) { settings.isOn(kinds[it]) },
+            ) { st ->
+                for (i in kinds.indices) settings.setOn(kinds[i], st[i])
+                pv.refreshKinds()
+                refreshSummary()
+                onChanged()
+            },
+            LinearLayout.LayoutParams(-1, dp(46)),
+        )
+        page.addView(pickerHolder, LinearLayout.LayoutParams(-1, -2))
+
         summary = TextView(ctx).apply { scaledTextSize(12f) }
-        page.addView(summary, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        page.addView(summary, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
         page.addView(TextView(ctx).apply {
             text = "Mở menu để kéo thanh tới chỗ bạn muốn. Khi menu thu lại, thanh chạm xuyên " +
                 "nên không cản thao tác trong game.\n" +
-                "FPS cần ADB Wi-Fi đang kết nối và game được mở từ ZynTap."
+                "FPS cần ADB Wi-Fi đang kết nối và game đang mở ở trước màn hình."
             setTextColor(C_MUTED); scaledTextSize(11f)
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
 
-        refreshToggle()
         refreshSummary()
         root.addView(ScrollView(ctx).apply {
             isFillViewport = true; isVerticalScrollBarEnabled = false

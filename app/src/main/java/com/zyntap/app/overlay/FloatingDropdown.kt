@@ -127,6 +127,148 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
             .setInterpolator(DecelerateInterpolator(1.6f)).start()
     }
 
+    /**
+     * Dropdown CHỌN NHIỀU: bảng không tự đóng khi chọn; mỗi hàng có ô tích. Hàng đầu "Tất cả" bật/tắt cả danh sách.
+     * [onChange] được gọi mỗi lần đổi với trạng thái mới của toàn bộ [checked]. Ấn ra ngoài bảng = đóng.
+     */
+    fun showMulti(anchor: View, items: List<String>, checked: BooleanArray, onChange: (BooleanArray) -> Unit) {
+        if (items.isEmpty()) return
+        dismissNow()
+        closing = false
+
+        val rows = items.size + 1   // + hàng "Tất cả"
+        val itemH = dp(ITEM_H_DP)
+        val pad = dp(4)
+        val full = rows * itemH + pad * 2
+        val gap = dp(6)
+        val margin = dp(8)
+
+        val layerW = if (width > 0) width else (parent as? View)?.width ?: 0
+        val layerH = if (height > 0) height else (parent as? View)?.height ?: 0
+        if (layerW <= 0 || layerH <= 0) {
+            post { showMulti(anchor, items, checked, onChange) }
+            return
+        }
+
+        val a = IntArray(2)
+        val l = IntArray(2)
+        anchor.getLocationOnScreen(a)
+        getLocationOnScreen(l)
+        val ax = a[0] - l[0]
+        val ay = a[1] - l[1]
+
+        val spaceBelow = layerH - (ay + anchor.height) - gap - margin
+        val spaceAbove = ay - gap - margin
+        val below = full <= spaceBelow || spaceBelow >= spaceAbove
+        val room = if (below) spaceBelow else spaceAbove
+        val popH = full.coerceAtMost(room.coerceAtLeast(itemH + pad * 2))
+        val popW = maxOf(anchor.width, dp(150)).coerceAtMost(layerW - margin * 2)
+        val left = ax.coerceIn(margin, (layerW - popW - margin).coerceAtLeast(margin))
+        val top = if (below) ay + anchor.height + gap else ay - gap - popH
+
+        val state = checked.copyOf()
+        val updaters = ArrayList<() -> Unit>()
+        fun refreshAll() { for (u in updaters) u() }
+
+        val list = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, pad, 0, pad)
+        }
+        // Hàng "Tất cả"
+        val all = buildCheckItem("Tất cả", bold = true) {
+            val target = !state.all { it }
+            for (i in state.indices) state[i] = target
+            refreshAll()
+            onChange(state.copyOf())
+        }
+        updaters.add { all.set(state.all { it }) }
+        list.addView(all.row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, itemH))
+        items.forEachIndexed { i, label ->
+            val it = buildCheckItem(label, bold = false) {
+                state[i] = !state[i]
+                refreshAll()
+                onChange(state.copyOf())
+            }
+            updaters.add { it.set(state[i]) }
+            list.addView(it.row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, itemH))
+        }
+        refreshAll()
+
+        val scroll = ScrollView(context).apply {
+            isVerticalScrollBarEnabled = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+            isFillViewport = false
+            addView(list, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            background = GradientDrawable().apply {
+                setColor(0xFF121C30.toInt())
+                setStroke(dp(1), 0xFF2A3A5C.toInt())
+                cornerRadius = dpf(14f)
+            }
+            clipToOutline = true
+            elevation = dpf(8f)
+        }
+        addView(scroll, LayoutParams(popW, popH, Gravity.TOP or Gravity.START).apply {
+            leftMargin = left
+            topMargin = top
+        })
+        popup = scroll
+        visibility = View.VISIBLE
+        isClickable = true
+
+        scroll.pivotX = popW / 2f
+        scroll.pivotY = if (below) 0f else popH.toFloat()
+        scroll.alpha = 0f
+        scroll.scaleX = 0.9f
+        scroll.scaleY = 0.55f
+        scroll.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(190L)
+            .setInterpolator(DecelerateInterpolator(1.6f)).start()
+    }
+
+    private class CheckItem(val row: View, val set: (Boolean) -> Unit)
+
+    /** Một hàng có ô tích (vuông bo góc, tích xanh khi bật). Ấn = đảo trạng thái, bảng giữ nguyên. */
+    private fun buildCheckItem(label: String, bold: Boolean, onClick: () -> Unit): CheckItem {
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(12), 0)
+            isClickable = true
+            setOnClickListener { onClick() }
+        }
+        val tv = TextView(context).apply {
+            text = label
+            scaledTextSize(14.5f)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }
+        row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val box = FrameLayout(context)
+        val tick = ImageView(context).apply {
+            setImageResource(R.drawable.ic_check)
+            setColorFilter(0xFF06101C.toInt())
+        }
+        box.addView(tick, FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
+        row.addView(box, LinearLayout.LayoutParams(dp(22), dp(22)))
+        val set = { on: Boolean ->
+            row.background = RippleDrawable(
+                ColorStateList.valueOf(0x33FFFFFF),
+                GradientDrawable().apply {
+                    setColor(if (on) 0x3319D3FF else 0x00000000)
+                    cornerRadius = dpf(10f)
+                },
+                GradientDrawable().apply { setColor(0xFFFFFFFF.toInt()); cornerRadius = dpf(10f) },
+            )
+            box.background = GradientDrawable().apply {
+                cornerRadius = dpf(6f)
+                if (on) setColor(0xFF19D3FF.toInt()) else { setColor(0x00000000); setStroke(dp(1), 0xFF4A5C80.toInt()) }
+            }
+            tick.visibility = if (on) View.VISIBLE else View.INVISIBLE
+            tv.setTextColor(if (on) 0xFF19D3FF.toInt() else 0xFFE8EEFA.toInt())
+        }
+        return CheckItem(row, set)
+    }
+
     private fun pick(i: Int, onPick: (Int) -> Unit) {
         if (closing) return
         onPick(i)
@@ -248,6 +390,85 @@ class DropdownField(
             onSelect(i)
         }
         // Mũi tên quay về khi bảng đóng
+        postDelayed(object : Runnable {
+            override fun run() {
+                if (!isAttachedToWindow) return
+                if (layer.isOpen) postDelayed(this, 120L)
+                else arrow.animate().rotation(0f).setDuration(160L).start()
+            }
+        }, 200L)
+    }
+}
+
+/**
+ * Ô chọn NHIỀU: hiện tóm tắt các mục đã chọn + mũi tên. Ấn vào mở bảng có ô tích của [layer]; chọn xong ấn ra ngoài để đóng.
+ */
+class MultiDropdownField(
+    context: Context,
+    private val layer: DropdownLayer,
+    private val items: List<String>,
+    initial: BooleanArray,
+    private val onChange: (BooleanArray) -> Unit,
+) : LinearLayout(context) {
+
+    private val d = UiScale.density(resources)
+    private fun dp(v: Int) = (v * d).toInt()
+
+    private var state: BooleanArray = initial.copyOf()
+
+    private val valueText = TextView(context).apply {
+        scaledTextSize(14.5f)
+        maxLines = 1
+        ellipsize = android.text.TextUtils.TruncateAt.END
+    }
+    private val arrow = ImageView(context).apply {
+        setImageResource(R.drawable.ic_chevron_down)
+        setColorFilter(0xFF8D9DBA.toInt())
+    }
+
+    init {
+        orientation = HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(14), 0, dp(12), 0)
+        background = RippleDrawable(
+            ColorStateList.valueOf(0x33FFFFFF),
+            GradientDrawable().apply {
+                setColor(0xFF142036.toInt())
+                setStroke(dp(1), 0xFF1E2B44.toInt())
+                cornerRadius = dp(12).toFloat()
+            },
+            GradientDrawable().apply { setColor(0xFFFFFFFF.toInt()); cornerRadius = dp(12).toFloat() },
+        )
+        isClickable = true
+        addView(valueText, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        addView(arrow, LayoutParams(dp(18), dp(18)))
+        renderValue()
+        setOnClickListener { open() }
+    }
+
+    /** Đồng bộ lại từ bên ngoài (nếu trạng thái đổi ở chỗ khác). */
+    fun setState(s: BooleanArray) {
+        state = s.copyOf()
+        renderValue()
+    }
+
+    private fun renderValue() {
+        val picked = items.filterIndexed { i, _ -> state.getOrElse(i) { false } }
+        when {
+            picked.isEmpty() -> { valueText.text = "Chưa chọn mục nào"; valueText.setTextColor(0xFF8D9DBA.toInt()) }
+            picked.size == items.size -> { valueText.text = "Tất cả (${items.size})"; valueText.setTextColor(0xFFE8EEFA.toInt()) }
+            else -> { valueText.text = picked.joinToString(", "); valueText.setTextColor(0xFFE8EEFA.toInt()) }
+        }
+    }
+
+    private fun open() {
+        arrow.animate().cancel()
+        arrow.animate().rotation(180f).setDuration(180L).start()
+        layer.showMulti(this, items, state) { s ->
+            state = s
+            renderValue()
+            onChange(s)
+        }
         postDelayed(object : Runnable {
             override fun run() {
                 if (!isAttachedToWindow) return
