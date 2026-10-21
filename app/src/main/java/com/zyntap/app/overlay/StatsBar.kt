@@ -758,7 +758,7 @@ class StatsBarOverlay(
         if (closed || !OverlayPermission.granted(ctx)) return
         if (!settings.anyOn()) { remove(); return }
         val old = view
-        if (old != null && !old.isAttachedToWindow && SystemClock.uptimeMillis() - addedAt > 1500L) {
+        if (old != null && !old.isAttachedToWindow && SystemClock.uptimeMillis() - addedAt > 1500L && !wm.isAwaitingRecovery(old)) {
             runCatching { wm.removeViewImmediate(old) }
             live.removeAll { it.second === old }
             view = null; params = null

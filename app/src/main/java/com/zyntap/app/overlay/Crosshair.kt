@@ -274,7 +274,7 @@ class CrosshairOverlay(
         val s = settings.spec(d)
         if (!s.dotOn && !s.ringOn) { remove(); return }
         val v = view
-        if (v != null && !v.isAttachedToWindow && SystemClock.uptimeMillis() - addedAt > 1500L) {
+        if (v != null && !v.isAttachedToWindow && SystemClock.uptimeMillis() - addedAt > 1500L && !wm.isAwaitingRecovery(v)) {
             runCatching { wm.removeViewImmediate(v) }
             view = null; params = null
         }

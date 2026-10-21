@@ -123,10 +123,11 @@ class OverlayService : Service() {
     // ---- tự đóng khi thoát app đã mở ----
     @Volatile private var targetPkg: String? = null     // app người dùng đã chọn/mở từ ZynTap
     // Main publishes a new session; mutable detection state belongs ONLY to targetThread.
-    // A poll already in flight cannot overwrite the next launch's seen/misses/tracker state.
+    // A poll already in flight cannot overwrite the next launch's visibility/confirmation/tracker state.
     private class TargetSession(val pkg: String, val generation: Long) {
         var seen = false
-        var misses = 0
+        var leaveCandidate: String? = null
+        var leaveSince = 0L
         var tracker: UsageAccess.Tracker? = null
         var warnedNoUsage = false
     }
@@ -296,7 +297,7 @@ class OverlayService : Service() {
         targetHandler.postDelayed(targetWatcher, TARGET_POLL_MS)
     }
 
-    /** Vòng kiểm tra nhanh riêng cho việc thoát app, để về màn hình chính là UI nổi tắt gần như ngay. */
+    /** Theo dõi rời app riêng; chỉ đóng sau một khoảng xác nhận liên tục. */
     private val targetWatcher = object : Runnable {
         override fun run() {
             if (stopping) return
@@ -307,33 +308,32 @@ class OverlayService : Service() {
 
     /** Kiểm tra định kỳ: nút/menu bị hệ thống gỡ mất, hoặc nút kẹt trạng thái ẩn -> dựng lại. */
     private fun checkHealth() {
-        if (stopping || closing) return
-        // Tự nối lại ADB khi mất kết nối (sau cập nhật app, bật lại gỡ lỗi Wi-Fi, đổi mạng...)
-        AdbSession.ensureInBackground(this)
-        crosshair.ensure()
-        stats.ensure()
-        val h = handleView
-        if (h == null) {
-            ensureHandle()
-            return
+        if (stopping || closing || !wanted(this)) return
+        // One failed component must not prevent the remaining windows from recovering.
+        safely("khôi phục cửa sổ") { wm.recoverDetached() }
+        safely("nối lại ADB") { AdbSession.ensureInBackground(this) }
+        safely("tâm ảo") { crosshair.ensure() }
+        safely("thanh thông số") { stats.ensure() }
+        safely("nút main") { circles.ensureAll() }
+        safely("tay nắm") {
+            val h = handleView
+            if (h == null) {
+                ensureHandle()
+            } else {
+                val now = SystemClock.uptimeMillis()
+                if (now - handleAddedAt > ATTACH_GRACE_MS && !h.isAttachedToWindow && !wm.owns(h)) {
+                    runCatching { wm.removeViewImmediate(h) }
+                    handleView = null
+                    handleParams = null
+                    ensureHandle()
+                } else if (h.isAttachedToWindow && (panelView == null || panelHidden) && !panelAnimating && !handleDragging) {
+                    if (h.alpha != 1f) h.alpha = 1f
+                    if (h.visibility != View.VISIBLE) h.visibility = View.VISIBLE
+                }
+            }
         }
-        val now = SystemClock.uptimeMillis()
-        if (now - handleAddedAt > ATTACH_GRACE_MS && !h.isAttachedToWindow) {
-            runCatching { wm.removeViewImmediate(h) }
-            handleView = null
-            handleParams = null
-            ensureHandle()
-            return
-        }
-        val panel = panelView
-        if (panel != null && now - panelAddedAt > ATTACH_GRACE_MS && !panel.isAttachedToWindow) {
-            removePanel()
-        }
-        if ((panelView == null || panelHidden) && !panelAnimating && !handleDragging) {
-            if (h.alpha != 1f) h.alpha = 1f
-            if (h.visibility != View.VISIBLE) h.visibility = View.VISIBLE
-        }
-        circles.ensureAll()
+        // A detached menu is NOT a user close. The window owner reattaches the original
+        // panel/popup/picker, preserving editing, tab, alpha and animation state.
     }
 
     // ---- tự đóng menu khi thoát khỏi app đã mở ----------------------------
@@ -341,7 +341,7 @@ class OverlayService : Service() {
     /**
      * Mỗi nhịp watchdog đọc các sự kiện mở/thoát activity MỚI (UsageStatsManager, chạy trong máy,
      * không qua ADB, rất nhẹ) để biết app đã mở có còn ở trước màn hình không. Thấy không còn vài
-     * lần liên tiếp (tránh nhầm lúc chuyển cửa sổ thoáng qua) -> gỡ UI ngay, không đợi animation.
+     * giây liên tục, có STOP thật và app thay thế rõ ràng -> gỡ UI, không đợi animation.
      * Chưa cấp quyền "Truy cập dữ liệu sử dụng" thì bỏ qua, không đóng nhầm.
      */
     private fun checkTargetApp() {
@@ -350,6 +350,8 @@ class OverlayService : Service() {
         val pkg = session.pkg
         if (stopping || closing || generation != targetGeneration || targetCloseQueued.get() == generation || !wanted(this)) return
         if (!UsageAccess.granted(this)) {
+            session.leaveCandidate = null
+            session.leaveSince = 0L
             if (!session.warnedNoUsage) {
                 session.warnedNoUsage = true
                 DebugLog.w("Tự đóng", "Chưa cấp quyền \"Truy cập dữ liệu sử dụng\" nên menu + tâm ảo KHÔNG tự tắt khi bạn thoát app ($pkg). Cấp quyền trong Cài đặt rồi mở lại ZynTap.")
@@ -359,6 +361,8 @@ class OverlayService : Service() {
         session.warnedNoUsage = false
         val tracker = session.tracker ?: UsageAccess.Tracker(applicationContext).also { session.tracker = it }
         runCatching { tracker.poll() }.onFailure {
+            session.leaveCandidate = null
+            session.leaveSince = 0L
             DebugLog.w("Tự đóng", "Không đọc được app đang ở trước màn hình", it)
             return
         }
@@ -366,33 +370,57 @@ class OverlayService : Service() {
         val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
         val km = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
         if (!pm.isInteractive || km.isKeyguardLocked) {
-            session.misses = 0
+            session.leaveCandidate = null
+            session.leaveSince = 0L
             return
         }
         if (stopping || generation != targetGeneration || pkg != targetPkg) return
-        if (tracker.isTargetResumed(pkg)) {
-            session.seen = true
-            session.misses = 0
-        } else if (session.seen && tracker.hasLeft(pkg)) {
-            if (++session.misses >= TARGET_MISS_LIMIT) {
-                if (generation != targetGeneration || pkg != targetPkg || stopping) return
-                if (targetCloseQueued.compareAndSet(-1L, generation)) {
+        session.seen = session.seen || tracker.hasTargetHistory(pkg)
+        val candidate = if (session.seen) tracker.leaveCandidate(pkg) else null
+        if (candidate == null) {
+            session.leaveCandidate = null
+            session.leaveSince = 0L
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (session.leaveCandidate != candidate) {
+            session.leaveCandidate = candidate
+            session.leaveSince = now
+            return
+        }
+        if (now - session.leaveSince < TARGET_EXIT_GRACE_MS) return
+        if (generation != targetGeneration || pkg != targetPkg || stopping) return
+        if (targetCloseQueued.compareAndSet(-1L, generation)) {
+            handler.post {
+                // Revalidate AFTER this callback reaches main: a game/map load may have
+                // stalled the UI queue while the user already returned to the game.
+                if (stopping) return@post
+                targetHandler.post {
+                    var confirmed = false
+                    runCatching {
+                        tracker.poll()
+                        confirmed = UsageAccess.granted(this@OverlayService) &&
+                            pm.isInteractive && !km.isKeyguardLocked &&
+                            tracker.leaveCandidate(pkg) == candidate
+                    }.onFailure { DebugLog.w("Tự đóng", "Bỏ kết quả thoát cũ vì không xác minh được", it) }
                     handler.post {
-                        // Results from an older launch must never stop a newly selected app.
-                        if (!stopping && generation == targetGeneration && pkg == targetPkg) {
-                            DebugLog.i("Tự đóng", "Đã thoát khỏi $pkg -> gỡ toàn bộ UI ngay")
+                        if (!stopping && !closing && generation == targetGeneration &&
+                            pkg == targetPkg && confirmed && wanted(this@OverlayService)) {
+                            DebugLog.i("Tự đóng", "Đã xác nhận rời $pkg sang $candidate -> gỡ UI")
                             autoClose()
                         } else if (!stopping && targetCloseQueued.compareAndSet(generation, -1L)) {
-                            // An old worker can finish just after a new launch reset the queue.
-                            targetHandler.removeCallbacks(targetWatcher)
-                            targetHandler.postDelayed(targetWatcher, TARGET_POLL_MS)
+                            targetHandler.post {
+                                if (targetSession === session) {
+                                    session.leaveCandidate = null
+                                    session.leaveSince = 0L
+                                    targetHandler.removeCallbacks(targetWatcher)
+                                    targetHandler.postDelayed(targetWatcher, TARGET_POLL_MS)
+                                }
+                            }
                         }
                     }
                 }
             }
-        } else {
-            // popup / hộp thoại / popup app khác che tạm: chưa phải thoát, không đếm
-            session.misses = 0
         }
     }
 
@@ -1923,7 +1951,7 @@ class OverlayService : Service() {
         private const val KEY_WANTED = "wanted"
         private const val KEY_TARGET = "target_pkg"
         const val EXTRA_TARGET_PKG = "target_pkg"
-        private const val TARGET_MISS_LIMIT = 2 // 2 nhịp liên tiếp (~0,8 giây)
+        private const val TARGET_EXIT_GRACE_MS = 3000L // continuous confirmed exit, not poll-count/FPS // 2 nhịp liên tiếp (~0,8 giây)
         private const val TARGET_POLL_MS = 400L
         private const val KEY_Y_RATIO = "handle_y_ratio"
         private const val KEY_SOLID = "solid_mode"

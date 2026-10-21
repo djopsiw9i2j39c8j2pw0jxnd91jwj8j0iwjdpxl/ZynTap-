@@ -35,70 +35,72 @@ object UsageAccess {
         runCatching { context.startActivity(settingsIntent(context)) }
     }
 
-    /**
-     * Bộ theo dõi app ở trước màn hình: mỗi lần gọi chỉ đọc các sự kiện MỚI từ lần trước (rất nhẹ).
-     *
-     * "Đã thoát app" chỉ được kết luận khi app đích đã bị STOP (không còn thấy được; PAUSE thôi thì
-     * chưa đủ vì popup quyền quay video, hộp thoại Wi-Fi, popup app khác... chỉ làm app PAUSE) VÀ có
-     * một app thật khác (launcher, app khác) đang ở trước. Các gói hệ thống chỉ chen ngang
-     * (SystemUI, panel Wi-Fi của Cài đặt, bàn phím...) không được tính là "app khác".
-     * Tắt màn hình làm app STOP nhưng không có app khác nào lên trước nên cũng không bị tính là thoát.
-     */
+    /** Incremental usage tracker. Activity visibility is independent of input focus. */
     class Tracker(private val context: Context) {
         private val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
         private var since = 0L
-        private val resumed = HashSet<String>()   // các gói đang có activity RESUMED
-        private val stopped = HashSet<String>()   // các gói mà sự kiện activity gần nhất là STOPPED
+        private var state = TargetAppState(::isTransient)
+        private val consumed = HashSet<String>()
+        private val recent = java.util.ArrayDeque<Pair<Long, String>>()
 
         fun poll() {
             val now = System.currentTimeMillis()
-            // Lần đầu đọc lùi 1 giờ để biết app đang ở trước từ trước đó; sau đó chỉ đọc phần mới
-            val from = if (since == 0L) now - 3_600_000L else since - 1_000L
-            val events = usm.queryEvents(from, now) ?: return
+            if (since > now) {
+                // Wall-clock correction: discard future cursor/evidence rather than close on it.
+                since = 0L
+                state = TargetAppState(::isTransient)
+                consumed.clear()
+                recent.clear()
+            }
+            val from = if (since == 0L) now - 3_600_000L else since - 10_000L
+            val events = usm.queryEvents(from, now) ?: error("UsageEvents unavailable")
             val e = UsageEvents.Event()
             while (events.hasNextEvent()) {
                 events.getNextEvent(e)
                 val pkg = e.packageName ?: continue
+                val cls = e.className.orEmpty()
+                // Public UsageEvents exposes className, not activity instance IDs.
+                // Never use hidden APIs/reflection: they fail on several Android versions.
+                val id = "$pkg/$cls"
+                val fingerprint = "${e.timeStamp}:${e.eventType}:$id"
+                if (!consumed.add(fingerprint)) continue
+                recent.addLast(e.timeStamp to fingerprint)
                 when (e.eventType) {
-                    UsageEvents.Event.ACTIVITY_RESUMED -> { resumed.add(pkg); stopped.remove(pkg) }
-                    UsageEvents.Event.ACTIVITY_PAUSED -> resumed.remove(pkg)
-                    UsageEvents.Event.ACTIVITY_STOPPED -> { resumed.remove(pkg); stopped.add(pkg) }
+                    UsageEvents.Event.ACTIVITY_RESUMED -> state.resume(pkg, cls, id, e.timeStamp)
+                    UsageEvents.Event.ACTIVITY_PAUSED -> state.pause(id, e.timeStamp)
+                    UsageEvents.Event.ACTIVITY_STOPPED -> state.stop(id, e.timeStamp)
                 }
             }
             since = now
+            // Only keep fingerprints for the overlap window. No unbounded event history.
+            while (recent.isNotEmpty() && (recent.peekFirst()?.first ?: Long.MAX_VALUE) < now - 20_000L) {
+                consumed.remove(recent.removeFirst().second)
+            }
         }
 
-        /** App đích đang ở trước (hoặc chỉ bị popup/hộp thoại che nên chưa tính là đã thoát). */
-        fun isTargetResumed(pkg: String) = pkg in resumed
+        fun isTargetResumed(pkg: String): Boolean = state.isResumed(pkg)
+        fun hasTargetHistory(pkg: String): Boolean = state.hasHistory(pkg)
+        fun leaveCandidate(pkg: String): String? = state.leaveCandidate(pkg)
+        fun hasLeft(pkg: String): Boolean = leaveCandidate(pkg) != null
 
-        /** Đã thật sự rời khỏi [pkg]: nó đã STOP và có app thật khác đang ở trước. */
-        fun hasLeft(pkg: String): Boolean {
-            if (pkg in resumed) return false
-            val others = resumed.filter { it != pkg && it != context.packageName && !isTransient(it) }
-            if (others.isEmpty()) return false
-            // Về màn hình chính: launcher lên trước là đủ kết luận ngay, không phải chờ sự kiện STOP
-            // (sự kiện này đến trễ cả giây). App thường khác thì vẫn cần app đích đã STOP.
-            return pkg in stopped || others.any { it in homePackages }
-        }
-
-        private val homePackages: Set<String> by lazy {
-            runCatching {
-                val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
-                context.packageManager.queryIntentActivities(i, 0).map { it.activityInfo.packageName }.toSet()
-            }.getOrDefault(emptySet())
-        }
-
-        private fun isTransient(pkg: String): Boolean =
-            pkg == "android" ||
-                pkg == "com.android.systemui" ||
+        private fun isTransient(pkg: String, cls: String): Boolean {
+            val activity = cls.lowercase(java.util.Locale.ROOT)
+            // A Wi-Fi/Internet panel is usually hosted by com.android.settings, NOT a
+            // package ending in .panel. Do not classify the entire Settings app as a popup.
+            val settingsHost = pkg == "com.android.settings" ||
+                pkg == "com.samsung.android.settings" || pkg == "com.miui.securitycenter"
+            val settingsPanel = settingsHost && listOf(
+                "panel", "dialog", "wifi", "internet", "tether", "permission"
+            ).any { it in activity }
+            return settingsPanel || pkg == context.packageName || pkg == "android" ||
+                pkg == "com.android.systemui" || pkg.endsWith(".systemui") ||
                 pkg == "com.android.settings.intelligence" ||
-                pkg.startsWith("com.android.settings") && pkg.contains("panel") ||
                 pkg.contains("inputmethod") || pkg.contains("keyboard") ||
-                pkg == "com.android.permissioncontroller" ||
-                pkg == "com.google.android.permissioncontroller" ||
+                pkg.endsWith("permissioncontroller") ||
+                pkg.endsWith("packageinstaller") ||
                 pkg == "com.android.captiveportallogin" ||
                 pkg == "com.google.android.networkstack.tethering" ||
-                pkg == "com.android.networkstack" ||
-                pkg == "com.google.android.gms"
+                pkg == "com.android.networkstack" || pkg == "com.google.android.gms"
+        }
     }
 }

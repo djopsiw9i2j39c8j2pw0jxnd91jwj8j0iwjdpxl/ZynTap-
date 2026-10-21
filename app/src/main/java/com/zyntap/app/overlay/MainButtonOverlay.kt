@@ -451,7 +451,7 @@ class MainButtonOverlay(
         val now = SystemClock.uptimeMillis()
         entries.entries.toList().forEach { (id, e) ->
             if (repo.find(id) == null) removeView(id)
-            else if (now - e.addedAt > ATTACH_GRACE_MS && !e.view.isAttachedToWindow) removeView(id)
+            else if (now - e.addedAt > ATTACH_GRACE_MS && !e.view.isAttachedToWindow && !wm.isAwaitingRecovery(e.view)) removeView(id)
         }
         repo.buttons.forEach { if (!entries.containsKey(it.id)) addView(it) }
         refreshWatcher()
