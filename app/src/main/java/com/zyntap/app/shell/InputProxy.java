@@ -223,6 +223,9 @@ public final class InputProxy {
     private static long downTime = 0;
     private static long lastRealUpAt = 0;       // uptime lúc ngón thật gần nhất vừa nhả (chỉ đụng dưới LOCK)
     private static int deviceId = 0;
+    private static String bootToken = "unknown";
+    private static TouchJournal journal;
+    private static boolean journalHealthy = true;
 
     // Ordinary Android injection is normalized to VIRTUAL_KEYBOARD_ID (-1), including
     // Android 16. Changing the Java deviceId does NOT reset InputVerifier state.
@@ -285,6 +288,7 @@ public final class InputProxy {
                 String k = a.substring(0, eq), v = a.substring(eq + 1);
                 switch (k) {
                     case "dev": devPath = v; break;
+                    case "boot": bootToken = v; break;
                     case "name": devName = java.net.URLDecoder.decode(v, "UTF-8"); break;
                     case "maxx": maxX = Math.max(1, Integer.parseInt(v)); break;
                     case "maxy": maxY = Math.max(1, Integer.parseInt(v)); break;
@@ -317,6 +321,14 @@ public final class InputProxy {
         try { inj = new Injector(); } catch (Throwable t) { log("inject: " + t); }
         if (inj != null) {
             injector = inj;
+            // A process restart does not reset system_server's injected stream (-1).
+            // Recover only exact pointer sets recorded by OUR previous writer, never guess IDs.
+            if (bootToken.equals("unknown") || bootToken.equals("-1")) {
+                bootToken = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get("/proc/sys/kernel/random/boot_id")), java.nio.charset.StandardCharsets.UTF_8).trim();
+            }
+            journal = new TouchJournal(new java.io.File("/data/local/tmp/com.zyntap.input-v1"), bootToken);
+            recoverJournal(); // before grab, before starting any producer/writer
+            if (!journalHealthy) throw new IOException("journal damaged; no grab, retry on next session");
             grabbed = grab(devIn.getFD());
             injecting = grabbed;
         }
@@ -817,27 +829,71 @@ public final class InputProxy {
                 count, pp, pc, 0, 0, 1f, 1f, injDev, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
     }
 
-    /** zyn-inject ONLY. Never cancel from `shown`: its UP/DOWN may have been rejected. */
-    private static boolean cancelAccepted() {
-        if (acceptedTouch == null) return false;
-        int n = acceptedTouch.getPointerCount();
+    private static TouchJournal.State snapshot(MotionEvent ev, boolean after) {
+        if (ev == null) return null;
+        int action = ev.getActionMasked();
+        if (after && (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL)) return null;
+        int skip = after && action == MotionEvent.ACTION_POINTER_UP ? ev.getActionIndex() : -1;
+        int count = ev.getPointerCount() - (skip >= 0 ? 1 : 0);
+        int[] ids = new int[count]; float[] x = new float[count], y = new float[count];
+        for (int i = 0, j = 0; i < ev.getPointerCount(); i++) {
+            if (i == skip) continue;
+            ids[j] = ev.getPointerId(i); x[j] = ev.getX(i); y[j] = ev.getY(i); j++;
+        }
+        return new TouchJournal.State(ev.getDownTime(), ids, x, y);
+    }
+
+    private static boolean cancelSnapshot(TouchJournal.State state) {
+        if (state == null) return false;
+        int n = state.ids.length;
         MotionEvent.PointerProperties[] pp = new MotionEvent.PointerProperties[n];
         MotionEvent.PointerCoords[] pc = new MotionEvent.PointerCoords[n];
         for (int i = 0; i < n; i++) {
-            pp[i] = new MotionEvent.PointerProperties(); acceptedTouch.getPointerProperties(i, pp[i]);
-            pc[i] = new MotionEvent.PointerCoords(); acceptedTouch.getPointerCoords(i, pc[i]);
+            pp[i] = new MotionEvent.PointerProperties(); pp[i].id = state.ids[i]; pp[i].toolType = MotionEvent.TOOL_TYPE_FINGER;
+            pc[i] = new MotionEvent.PointerCoords(); pc[i].x = state.x[i]; pc[i].y = state.y[i];
         }
-        MotionEvent cancel = MotionEvent.obtain(acceptedTouch.getDownTime(), SystemClock.uptimeMillis(),
+        long now = SystemClock.uptimeMillis();
+        MotionEvent cancel = MotionEvent.obtain(Math.min(state.downTime, now), now,
                 MotionEvent.ACTION_CANCEL, n, pp, pc, 0, 0, 1f, 1f, injDev, 0,
                 InputDevice.SOURCE_TOUCHSCREEN, FLAG_CANCELED);
         try {
             injector.inject(cancel);
             rememberAccepted(cancel);
+            // Don't let an unlink failure turn an accepted CANCEL into a failed injection.
+            if (journal != null) try { journal.clear(); } catch (IOException e) { log("journal clear: " + e); }
             return true;
         } catch (Throwable error) {
-            log("cleanup CANCEL rejected: " + error + " pointers=" + n);
+            log("cleanup CANCEL rejected: " + error + " pointers=" + java.util.Arrays.toString(state.ids));
             return false;
         } finally { cancel.recycle(); }
+    }
+
+    /** At most two known sets: last transition may have reached Binder before process death. */
+    private static boolean recoverJournal() {
+        if (journal == null) return false;
+        try {
+            TouchJournal.State[] candidates = journal.readCandidates();
+            for (TouchJournal.State state : candidates) {
+                if (cancelSnapshot(state)) {
+                    log("RECOVERED: đã CANCEL pointer lưu từ phiên trước; không cần đổi deviceId");
+                    return true;
+                }
+            }
+            if (candidates.length > 0) log("Journal không còn khớp (có thể UP đã hoàn tất); chưa kết luận bộ phát bị kẹt");
+        } catch (IOException error) {
+            // A corrupt record must never be used to invent a touch event.
+            log("journal read fail: " + error);
+            journalHealthy = false;
+            try { journal.clear(); } catch (IOException ignored) { }
+            // No guessed CANCEL. A pre-existing unrecorded stream may still need a reboot.
+        }
+        return false;
+    }
+
+    /** Single writer only; never cancel from speculative producer state. */
+    private static boolean cancelAccepted() {
+        if (acceptedTouch != null && cancelSnapshot(snapshot(acceptedTouch, false))) return true;
+        return recoverJournal();
     }
 
     /** Gọi dưới LOCK. [actionIndex] = chỉ số trong [shown] của ngón có DOWN/UP (bỏ qua với MOVE/CANCEL). */
@@ -958,6 +1014,12 @@ public final class InputProxy {
             long t0 = SystemClock.uptimeMillis();
             long age = t0 - p.ev.getEventTime(); // sự kiện nằm chờ trong hàng đợi bao lâu
             try {
+                int action = p.ev.getActionMasked();
+                if (!journalHealthy) throw new IOException("touch journal unavailable; refuse untracked input");
+                if (journal != null && action != MotionEvent.ACTION_MOVE) {
+                    try { journal.prepare(snapshot(acceptedTouch, false), snapshot(p.ev, true)); }
+                    catch (IOException e) { journalHealthy = false; throw e; }
+                }
                 injector.inject(p.ev);
                 rememberAccepted(p.ev);
                 if (!p.soft && !activeReported) { activeReported = true; out("ACTIVE"); }
@@ -1002,7 +1064,7 @@ public final class InputProxy {
             long now = SystemClock.uptimeMillis();
             if (now - recoveryWindowAt > 10_000) { recoveryWindowAt = now; recoveriesInWindow = 0; }
             recoveriesInWindow++;
-            if (clean && injectFails < MAX_INJECT_FAILS && recoveriesInWindow < MAX_INJECT_FAILS && !stopping) {
+            if (clean && journalHealthy && injectFails < MAX_INJECT_FAILS && recoveriesInWindow < MAX_INJECT_FAILS && !stopping) {
                 recovering = false;
                 log("inject lỗi -> đã CANCEL tập pointer được nhận; bỏ click cũ, phục hồi ngón thật");
                 sync();
@@ -1278,7 +1340,7 @@ public final class InputProxy {
         }
         closed = true;
         try { if (devIn != null) devIn.close(); } catch (Throwable ignored) { } // đóng fd = nhả grab
-        try { OUT.println("LOG bye"); } catch (Throwable ignored) { }
+        out("LOG bye"); // never block shutdown on a disconnected stdout
         Runtime.getRuntime().halt(0);
     }
 
