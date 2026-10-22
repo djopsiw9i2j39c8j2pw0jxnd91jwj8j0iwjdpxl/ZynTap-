@@ -495,20 +495,11 @@ class OverlayService : Service() {
     /** Thông tin tai thỏ / giọt nước / đục lỗ (null nếu máy không có). */
     private fun displayCutoutCompat(): DisplayCutout? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
-        // Ưu tiên insets thật của cửa sổ nút (hệ thống báo mỗi khi xoay / đổi cutout)
-        handleCutout?.let { if (it.boundingRects.isNotEmpty()) return it }
-        handleView?.rootWindowInsets?.displayCutout?.let { return it }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             runCatching { wm.currentWindowMetrics.windowInsets.displayCutout?.let { return it } }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            runCatching { display?.cutout?.let { return it } }
-        }
-        return null
+        return handleView?.rootWindowInsets?.displayCutout
     }
-
-    /** Cutout mới nhất do hệ thống báo cho cửa sổ nút mở menu. */
-    @Volatile private var handleCutout: DisplayCutout? = null
 
     private val safeLeft: Int
         get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) displayCutoutCompat()?.safeInsetLeft ?: 0 else 0
@@ -599,11 +590,10 @@ class OverlayService : Service() {
                     (r.top - pad - handleH).takeIf { it >= 0 },
                     (r.bottom + pad).takeIf { it <= maxY },
                 )
-                // Không còn chỗ trên/dưới cutout thì giữ nguyên, tuyệt đối không đẩy ra ngoài màn hình
                 if (candidates.isNotEmpty()) y = candidates.minByOrNull { abs(it - y) }!!
             }
         }
-        return y.coerceIn(0, maxY)
+        return y
     }
 
     private fun relayoutHandle() {
@@ -745,18 +735,6 @@ class OverlayService : Service() {
                     true
                 }
                 else -> false
-            }
-        }
-
-        // Hệ thống báo cutout (sau khi gắn / xoay màn hình) -> đặt lại vị trí để không đè lên camera
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            handle.setOnApplyWindowInsetsListener { v, insets ->
-                val c = insets.displayCutout
-                if (c?.boundingRects != handleCutout?.boundingRects) {
-                    handleCutout = c
-                    v.post { if (!stopping && !closing) relayoutHandle() }
-                }
-                insets
             }
         }
 
