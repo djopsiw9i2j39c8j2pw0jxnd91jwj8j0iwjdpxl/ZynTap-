@@ -14,6 +14,7 @@ import com.zyntap.app.data.AppEntry
 import com.zyntap.app.data.AppRepository
 import com.zyntap.app.data.PairState
 import com.zyntap.app.data.PendingAdbPairing
+import com.zyntap.app.data.ConnectionWatcher
 import com.zyntap.app.data.WifiAdbMonitor
 import com.zyntap.app.data.WifiAdbPairing
 import com.zyntap.app.data.WifiState
@@ -84,8 +85,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val isActive: Boolean get() = isPaired && wifiAdbOn
 
     private val wifiListener: (Boolean) -> Unit = { connected ->
+        val a = getApplication<Application>()
         wifiConnected = connected
-        mobileData = WifiState.hasMobile(getApplication<Application>())
+        mobileData = WifiState.hasMobile(a)
+        wifiAdbOn = WifiAdbMonitor.isWifiAdbEnabled(a)
     }
 
     init {
@@ -104,6 +107,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // Theo dõi Wi-Fi thật (đồng thời ghi log mỗi lần nối / mất)
         WifiState.addListener(wifiListener)
         WifiState.start(app)
+        ConnectionWatcher.start(app)
         // Nếu gỡ lỗi Wi-Fi đang bật sẵn thì dò cổng kết nối ngay
         if (WifiAdbMonitor.isWifiAdbEnabled(app)) {
             viewModelScope.launch {
