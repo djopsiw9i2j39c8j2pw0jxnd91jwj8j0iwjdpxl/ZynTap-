@@ -45,7 +45,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.zyntap.app.R
 import com.zyntap.app.data.AdbLinkStore
-import com.zyntap.app.data.AdbSession
 import com.zyntap.app.data.DebugLog
 import com.zyntap.app.data.WifiAdbMonitor
 import com.zyntap.app.data.WifiState
@@ -220,7 +219,6 @@ class OverlayService : Service() {
                 crosshair.ensure()
                 stats.ensure()
                 startWatchdog()
-                AdbSession.ensureInBackground(this)
             }
         }
         return START_STICKY
@@ -278,19 +276,8 @@ class OverlayService : Service() {
         }
     }
 
-    /** Reconnect checks run on the existing worker, not on the UI thread. */
-    private val reconnectTick = object : Runnable {
-        override fun run() {
-            if (stopping || closing) return
-            runCatching { AdbSession.ensureInBackground(this@OverlayService) }
-            if (!stopping && !closing) targetHandler.postDelayed(this, RECONNECT_MS)
-        }
-    }
-
     private fun startWatchdog() {
         if (stopping || closing) return
-        targetHandler.removeCallbacks(reconnectTick)
-        targetHandler.postDelayed(reconnectTick, RECONNECT_MS)
         handler.removeCallbacks(watchdog)
         handler.postDelayed(watchdog, WATCHDOG_MS)
         targetHandler.removeCallbacks(targetWatcher)
@@ -508,11 +495,20 @@ class OverlayService : Service() {
     /** Thông tin tai thỏ / giọt nước / đục lỗ (null nếu máy không có). */
     private fun displayCutoutCompat(): DisplayCutout? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
+        // Ưu tiên insets thật của cửa sổ nút (hệ thống báo mỗi khi xoay / đổi cutout)
+        handleCutout?.let { if (it.boundingRects.isNotEmpty()) return it }
+        handleView?.rootWindowInsets?.displayCutout?.let { return it }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             runCatching { wm.currentWindowMetrics.windowInsets.displayCutout?.let { return it } }
         }
-        return handleView?.rootWindowInsets?.displayCutout
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            runCatching { display?.cutout?.let { return it } }
+        }
+        return null
     }
+
+    /** Cutout mới nhất do hệ thống báo cho cửa sổ nút mở menu. */
+    @Volatile private var handleCutout: DisplayCutout? = null
 
     private val safeLeft: Int
         get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) displayCutoutCompat()?.safeInsetLeft ?: 0 else 0
@@ -603,10 +599,11 @@ class OverlayService : Service() {
                     (r.top - pad - handleH).takeIf { it >= 0 },
                     (r.bottom + pad).takeIf { it <= maxY },
                 )
+                // Không còn chỗ trên/dưới cutout thì giữ nguyên, tuyệt đối không đẩy ra ngoài màn hình
                 if (candidates.isNotEmpty()) y = candidates.minByOrNull { abs(it - y) }!!
             }
         }
-        return y
+        return y.coerceIn(0, maxY)
     }
 
     private fun relayoutHandle() {
@@ -748,6 +745,18 @@ class OverlayService : Service() {
                     true
                 }
                 else -> false
+            }
+        }
+
+        // Hệ thống báo cutout (sau khi gắn / xoay màn hình) -> đặt lại vị trí để không đè lên camera
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            handle.setOnApplyWindowInsetsListener { v, insets ->
+                val c = insets.displayCutout
+                if (c?.boundingRects != handleCutout?.boundingRects) {
+                    handleCutout = c
+                    v.post { if (!stopping && !closing) relayoutHandle() }
+                }
+                insets
             }
         }
 
@@ -1578,7 +1587,6 @@ class OverlayService : Service() {
         closing = true
         setWanted(this, false) // chủ động đóng -> không tự khôi phục
         handler.removeCallbacks(watchdog)
-        targetHandler.removeCallbacks(reconnectTick)
         solidAnim?.cancel()
         editDimAnim?.cancel()
         promptLayer?.close()
@@ -1970,7 +1978,6 @@ class OverlayService : Service() {
         private const val STATUS_MS = 1500L
         private const val BREATH_MS = 1600L
         private const val BREATH_FAST_MS = 800L
-        private const val RECONNECT_MS = 1000L // nhịp gọi nối lại ADB (trước đây gộp trong watchdog 2000ms)
         private const val WATCHDOG_MS = 2000L
         private const val ATTACH_GRACE_MS = 1500L
 

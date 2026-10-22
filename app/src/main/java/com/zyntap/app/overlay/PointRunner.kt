@@ -2,7 +2,6 @@ package com.zyntap.app.overlay
 
 import android.content.Context
 import android.graphics.Rect
-import com.zyntap.app.data.AdbSession
 import com.zyntap.app.data.DebugLog
 import com.zyntap.app.data.ZynAdbConnectionManager
 import kotlinx.coroutines.*
@@ -101,19 +100,9 @@ class PointRunner(
             try {
                 val manager = withContext(Dispatchers.IO) { ZynAdbConnectionManager.get(context) }
                 if (!withContext(Dispatchers.IO) { manager.isConnected }) {
-                    // Chưa có kết nối sống -> tự nối (không bắt người dùng mở app nối tay)
-                    message("Đang kết nối ADB...", DebugLog.Level.INFO)
-                    when (val link = AdbSession.connect(context)) {
-                        is AdbSession.Link.Connected -> Unit
-                        is AdbSession.Link.PairingLost -> {
-                            message("Máy đã quên khoá ghép nối. Mở app ghép nối lại bằng mã 6 số.", DebugLog.Level.ERROR)
-                            return@launch
-                        }
-                        is AdbSession.Link.Failed -> {
-                            message(link.message, DebugLog.Level.ERROR)
-                            return@launch
-                        }
-                    }
+                    // Không tự nối lại khi bấm nút main: báo để người dùng nối từ app
+                    message("ADB chưa kết nối. Mở app ZynTap để kết nối lại.", DebugLog.Level.ERROR)
+                    return@launch
                 }
                 ensureActive()
                 if (bounds() != screen) error("Màn hình đã đổi kích thước. Chọn lại tọa độ.")

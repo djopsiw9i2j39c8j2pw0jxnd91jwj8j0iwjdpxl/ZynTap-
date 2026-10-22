@@ -527,9 +527,8 @@ class TouchWatcher(
             try {
                 val manager = ZynAdbConnectionManager.get(app)
                 if (!manager.isConnected) {
-                    // Nối lại ở nền (đã tự giãn nhịp), rồi thử lại sau
+                    // Không tự nối lại: chỉ chờ ADB được nối (từ app) rồi kiểm tra lại
                     setStage("Chờ ADB nối để chạy helper bơm")
-                    AdbSession.ensureInBackground(app)
                     delay(RETRY_MS)
                     continue
                 }
