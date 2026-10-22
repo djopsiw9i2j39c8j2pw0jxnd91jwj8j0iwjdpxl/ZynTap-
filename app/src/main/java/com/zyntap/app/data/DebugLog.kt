@@ -31,7 +31,7 @@ object DebugLog {
         val count: Int = 1,
     )
 
-    private const val MAX = 400
+    private const val MAX = 1000
     private const val FILE_NAME = "zyntap_debug.log"
     private const val FILE_MAX_BYTES = 200_000L
     private const val NL = '\u0001' // thay cho xuống dòng khi ghi file (mỗi entry đúng 1 dòng)
