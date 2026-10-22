@@ -312,7 +312,7 @@ class OverlayService : Service() {
                     handleView = null
                     handleParams = null
                     ensureHandle()
-                } else if (!handleDragging && handleParams?.let { it.y != placeHandleY(savedHandleY()) } == true) {
+                } else if (!handleDragging && handleParams?.let { abs(it.y - placeHandleY(savedHandleY())) > dp(2) } == true) {
                     relayoutHandle() // vị trí đang đè lên vùng bị che -> né lại
                 } else if (h.isAttachedToWindow && (panelView == null || panelHidden) && !panelAnimating && !handleDragging) {
                     if (h.alpha != 1f) h.alpha = 1f
@@ -510,7 +510,14 @@ class OverlayService : Service() {
             }
             runCatching { add(wm.currentWindowMetrics.windowInsets.displayCutout) }
         }
-        runCatching { add(handleView?.rootWindowInsets?.displayCutout) }
+        if (out.isEmpty()) {
+            // Máy cũ (API 28-29): chỉ có insets của chính cửa sổ nút -> toạ độ tính theo cửa sổ,
+            // phải cộng vị trí cửa sổ để về toạ độ màn hình (nếu không sẽ "chạy theo" nút gây giật).
+            val c = runCatching { handleView?.rootWindowInsets?.displayCutout }.getOrNull()
+            val ox = handleParams?.x ?: 0
+            val oy = handleParams?.y ?: 0
+            c?.boundingRects?.forEach { if (!it.isEmpty) out.add(Rect(it).apply { offset(ox, oy) }) }
+        }
         return out
     }
 
