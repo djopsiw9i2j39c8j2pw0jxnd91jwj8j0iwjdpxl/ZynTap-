@@ -25,7 +25,7 @@ import java.util.ArrayList;
  * <ol>
  *   <li>Mở tấm cảm ứng thật (đường dẫn do app tự dò), {@code EVIOCGRAB} để hệ thống KHÔNG nhận trực tiếp
  *       sự kiện của ngón thật nữa.</li>
- *   <li>Tự đọc sự kiện ngón thật rồi phát lại vào hệ thống dưới dạng {@link MotionEvent} (cùng deviceId,
+ *   <li>Tự đọc sự kiện ngón thật rồi phát lại vào hệ thống dưới dạng {@link MotionEvent} (luồng injected -1,
  *       source cảm ứng của máy).</li>
  *   <li>Click của app (lệnh {@code TAP}) là một NGÓN ẢO nằm chung trong CHÍNH luồng đó: ngón thật và ngón ảo
  *       được xử lý cùng một chỗ ({@link #sync}), gộp vào cùng một {@link MotionEvent}. Không còn ép ngón nào lên đầu:
@@ -84,6 +84,7 @@ public final class InputProxy {
     private static final int MAX_GROUP = 10;
     /** Hàng đợi bơm dài hơn mức này thì tạm dừng click mới (chống dồn sự kiện vô hạn khi chạy tốc độ tối đa). */
     private static final int MAX_INJ_BACKLOG = 24;
+    private static final int MAX_INJ_QUEUE = 256; // hard safety cap, including physical transitions
 
     // ---- cấu hình (từ tham số dòng lệnh) ----------------------------------------------------
     private static String devPath = "";
@@ -102,9 +103,6 @@ public final class InputProxy {
     private static final java.util.concurrent.BlockingQueue<String> OUTQ = new java.util.concurrent.ArrayBlockingQueue<>(512);
     private static volatile boolean outThreadOn = false;
     private static volatile boolean urgentRelease = false;
-    /** Hệ thống vừa từ chối/lỡ một sự kiện DOWN/UP -> luồng chạm bên hệ thống đã lệch khỏi [shown]. Chỉ đụng dưới LOCK. */
-    private static boolean desync = false;
-    private static long lastRebuildAt = 0;
     /** Đang bỏ các sự kiện sau SYN_DROPPED cho tới SYN_REPORT kế tiếp. Chỉ đụng dưới LOCK. */
     private static boolean dropping = false;
     /**
@@ -194,12 +192,13 @@ public final class InputProxy {
     /** Một click của app (ngón ảo). */
     private static final class Tap {
         final P p;
+        final int owner;
         final int hold;
         final int gap;
         long releaseAt = 0;       // uptime lúc phải nhả
         boolean down = false;     // đã được phép chạm xuống
         boolean finished = false; // đã tới giờ nhả (hoặc không còn chỗ để chạm)
-        Tap(P p, int hold, int gap) { this.p = p; this.hold = hold; this.gap = gap; }
+        Tap(P p, int hold, int gap, int owner) { this.p = p; this.hold = hold; this.gap = gap; this.owner = owner; }
     }
 
     /**
@@ -225,23 +224,15 @@ public final class InputProxy {
     private static long lastRealUpAt = 0;       // uptime lúc ngón thật gần nhất vừa nhả (chỉ đụng dưới LOCK)
     private static int deviceId = 0;
 
-    /**
-     * Mã thiết bị dùng cho sự kiện BƠM vào hệ thống (khác [deviceId] của tấm cảm ứng thật).
-     * Android 14+ kiểm tra tính nhất quán luồng chạm của mọi sự kiện bơm không kèm targetUid (InputVerifier, khoá theo deviceId):
-     * DOWN khi deviceId đó đang "chạm dở" -> bị từ chối (FAILED), CANCEL thiếu FLAG_CANCELED -> bị từ chối.
-     * Dùng thẳng deviceId thật thì chỉ cần MỘT lần luồng bị lệch (CANCEL/UP bị từ chối, helper chết giữa chừng...) là trạng thái
-     * "đang chạm" kẹt lại trong system_server và MỌI DOWN sau đó đều bị từ chối cho tới khi khởi động lại máy.
-     * Nên dùng mã ảo riêng, đổi mới mỗi lần helper chạy và mỗi lần phải dựng lại luồng -> luôn bắt đầu từ trạng thái sạch.
-     */
-    private static int injDev = 0;
-    private static int injGen = 0;
-    private static final int INJ_DEV_BASE = 0x5A000000;
-    private static final int FLAG_CANCELED = 0x20; // MotionEvent.FLAG_CANCELED (@hide) — bắt buộc với ACTION_CANCEL
-
-    private static int nextInjDev() {
-        int pid = android.os.Process.myPid() & 0xFFFF;
-        return INJ_DEV_BASE + (pid << 6) + ((injGen++) & 0x3F);
-    }
+    // Ordinary Android injection is normalized to VIRTUAL_KEYBOARD_ID (-1), including
+    // Android 16. Changing the Java deviceId does NOT reset InputVerifier state.
+    private static final int injDev = -1;
+    private static final int FLAG_CANCELED = 0x20;
+    private static volatile boolean recovering = false;
+    // Owned ONLY by zyn-inject. This is the last ACCEPTED active pointer set,
+    // never the producer's speculative `shown` list. Null means no accepted gesture.
+    private static MotionEvent acceptedTouch;
+    private static boolean activeReported = false;
 
     /** Một bước của kịch bản: cụm click (1 hoặc nhiều điểm CÙNG LÚC) hoặc chờ. */
     private static final class Op {
@@ -320,7 +311,6 @@ public final class InputProxy {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> { urgentRelease = true; shutdown(); }, "zyn-hook"));
         devIn = new FileInputStream(devPath);
         deviceId = findDeviceId(devName);
-        injDev = nextInjDev();
 
         // Chuẩn bị bộ phát; nếu không có thì không grab (grab mà không phát lại được = mất cảm ứng).
         Injector inj = null;
@@ -331,7 +321,7 @@ public final class InputProxy {
             injecting = grabbed;
         }
         OUT.println("READY grab=" + (grabbed ? 1 : 0) + " inj=" + (injecting ? 1 : 0) + " dev=" + deviceId);
-        log("bơm bằng mã thiết bị ảo " + injDev + " (thật: " + deviceId + ")");
+        log("inject stream dev=" + injDev + " (touch hardware=" + deviceId + ")");
 
         startOutThread();
         if (injecting) startInjectThread();
@@ -363,7 +353,7 @@ public final class InputProxy {
                         rot = Integer.parseInt(t[1]) & 3;
                         scrW = Math.max(1, Integer.parseInt(t[2]));
                         scrH = Math.max(1, Integer.parseInt(t[3]));
-                        runs.clear(); // toạ độ kịch bản thuộc chiều cũ: dừng hết
+                        stopAllTaps(); // release held virtual pointers before rotating
                         sync(); // ngón đang đè phải đổi sang toạ độ của chiều mới ngay, không chờ sự kiện cảm ứng kế
                     }
                     break;
@@ -396,7 +386,7 @@ public final class InputProxy {
                     stopRun(Integer.parseInt(t[1]));
                     break;
                 case "STOPALL":
-                    synchronized (LOCK) { runs.clear(); }
+                    synchronized (LOCK) { stopAllTaps(); }
                     break;
                 case "QUIT":
                     stopping = true;
@@ -776,7 +766,7 @@ public final class InputProxy {
                 out("F " + s + " 0 " + lastRepX[s] + " " + lastRepY[s]);
             }
         }
-        if (!injecting) return; // chế độ thụ động: hệ thống vẫn tự nhận ngón thật
+        if (!injecting || recovering || closed) return; // chế độ thụ động: hệ thống vẫn tự nhận ngón thật
 
         // 1) ngón biến mất -> UP (thứ tự các ngón còn lại giữ nguyên)
         for (int i = 0; i < shown.size(); ) {
@@ -807,31 +797,47 @@ public final class InputProxy {
             }
         }
 
-        // 4) Hệ thống vừa từ chối một DOWN/UP: luồng bên đó đã lệch so với [shown] (ngón thật bị đơ tới khi nhấc tay).
-        if (desync) rebuildStream();
     }
 
-    /**
-     * Gọi dưới LOCK. Huỷ luồng chạm đang dở bên hệ thống rồi chạm lại đúng các ngón đang hiện (cùng chỗ, cùng mã
-     * pointer), để ngón thật và click tiếp tục như bình thường thay vì bị hệ thống bỏ qua cho tới khi nhấc tay.
-     */
-    private static void rebuildStream() {
-        long now = SystemClock.uptimeMillis();
-        if (now - lastRebuildAt < 30) return;   // chống lặp liên tục; lần sync sau thử lại
-        desync = false;
-        lastRebuildAt = now;
-        if (!injecting || shown.isEmpty()) return;
-        ArrayList<Finger> keep = new ArrayList<>(shown);
-        log("inject lỗi -> dựng lại luồng chạm (" + keep.size() + " ngón) để ngón thật không bị đơ");
-        dropPendingInject();                        // sự kiện còn xếp hàng thuộc luồng cũ: sẽ bị từ chối hết, bỏ đi
-        emit(MotionEvent.ACTION_CANCEL, -1, true); // luồng cũ: huỷ cho gọn, hệ thống có từ chối cũng kệ
-        shown.clear();
-        injDev = nextInjDev();                     // luồng mới trên mã thiết bị mới = trạng thái kiểm tra sạch
-        downTime = SystemClock.uptimeMillis();
-        for (Finger f : keep) {
-            shown.add(f);
-            emit(shown.size() == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN, shown.size() - 1);
+    /** zyn-inject ONLY: clone exactly the active set after an accepted event. */
+    private static void rememberAccepted(MotionEvent ev) {
+        int action = ev.getActionMasked();
+        if (acceptedTouch != null) { acceptedTouch.recycle(); acceptedTouch = null; }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) return;
+        int skip = action == MotionEvent.ACTION_POINTER_UP ? ev.getActionIndex() : -1;
+        int count = ev.getPointerCount() - (skip >= 0 ? 1 : 0);
+        MotionEvent.PointerProperties[] pp = new MotionEvent.PointerProperties[count];
+        MotionEvent.PointerCoords[] pc = new MotionEvent.PointerCoords[count];
+        for (int i = 0, j = 0; i < ev.getPointerCount(); i++) {
+            if (i == skip) continue;
+            pp[j] = new MotionEvent.PointerProperties(); ev.getPointerProperties(i, pp[j]);
+            pc[j] = new MotionEvent.PointerCoords(); ev.getPointerCoords(i, pc[j]); j++;
         }
+        acceptedTouch = MotionEvent.obtain(ev.getDownTime(), ev.getEventTime(), MotionEvent.ACTION_MOVE,
+                count, pp, pc, 0, 0, 1f, 1f, injDev, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+    }
+
+    /** zyn-inject ONLY. Never cancel from `shown`: its UP/DOWN may have been rejected. */
+    private static boolean cancelAccepted() {
+        if (acceptedTouch == null) return false;
+        int n = acceptedTouch.getPointerCount();
+        MotionEvent.PointerProperties[] pp = new MotionEvent.PointerProperties[n];
+        MotionEvent.PointerCoords[] pc = new MotionEvent.PointerCoords[n];
+        for (int i = 0; i < n; i++) {
+            pp[i] = new MotionEvent.PointerProperties(); acceptedTouch.getPointerProperties(i, pp[i]);
+            pc[i] = new MotionEvent.PointerCoords(); acceptedTouch.getPointerCoords(i, pc[i]);
+        }
+        MotionEvent cancel = MotionEvent.obtain(acceptedTouch.getDownTime(), SystemClock.uptimeMillis(),
+                MotionEvent.ACTION_CANCEL, n, pp, pc, 0, 0, 1f, 1f, injDev, 0,
+                InputDevice.SOURCE_TOUCHSCREEN, FLAG_CANCELED);
+        try {
+            injector.inject(cancel);
+            rememberAccepted(cancel);
+            return true;
+        } catch (Throwable error) {
+            log("cleanup CANCEL rejected: " + error + " pointers=" + n);
+            return false;
+        } finally { cancel.recycle(); }
     }
 
     /** Gọi dưới LOCK. [actionIndex] = chỉ số trong [shown] của ngón có DOWN/UP (bỏ qua với MOVE/CANCEL). */
@@ -884,8 +890,11 @@ public final class InputProxy {
     private static final Object INJ_LOCK = new Object();
     private static final ArrayDeque<Pending> INJQ = new ArrayDeque<>();
     private static boolean injBusy = false;     // chỉ đụng dưới INJ_LOCK
+    private static boolean injectFinished = false;
     private static boolean injStop = false;     // chỉ đụng dưới INJ_LOCK
-    private static int injectFails = 0;         // chỉ đụng ở luồng phát
+    private static int injectFails = 0;
+    private static long recoveryWindowAt = 0;
+    private static int recoveriesInWindow = 0;         // chỉ đụng ở luồng phát
     private static long lastLagLogAt = 0;       // chỉ đụng ở luồng phát
 
     // ---- thống kê chẩn đoán: cứ ~3s ghi 1 dòng khi có ngón thật đang đè (lúc vuốt cam) ----------------------------
@@ -899,6 +908,16 @@ public final class InputProxy {
 
     private static void enqueueInject(MotionEvent ev, boolean move, boolean soft) {
         synchronized (INJ_LOCK) {
+            if (injStop || !injecting || recovering) { ev.recycle(); return; }
+            if (INJQ.size() >= MAX_INJ_QUEUE) {
+                ev.recycle();
+                for (Pending pending : INJQ) pending.ev.recycle();
+                INJQ.clear();
+                injecting = false; recovering = true; urgentRelease = true;
+                log("inject hỏng liên tiếp -> nhả cảm ứng ngay; hàng đợi vượt giới hạn " + MAX_INJ_QUEUE);
+                new Thread(InputProxy::shutdown, "zyn-overflow").start();
+                return;
+            }
             if (move) {
                 Pending tail = INJQ.peekLast();
                 if (tail != null && tail.move) { INJQ.pollLast(); tail.ev.recycle(); }
@@ -925,9 +944,12 @@ public final class InputProxy {
         while (true) {
             Pending p;
             synchronized (INJ_LOCK) {
-                while (INJQ.isEmpty()) {
-                    if (injStop) return;
+                while (INJQ.isEmpty() && !injStop) {
                     try { INJ_LOCK.wait(); } catch (InterruptedException e) { return; }
+                }
+                if (injStop) {
+                    // Cleanup runs on the SAME writer after the last in-flight binder call.
+                    break;
                 }
                 p = INJQ.pollFirst();
                 injBusy = true;
@@ -937,6 +959,8 @@ public final class InputProxy {
             long age = t0 - p.ev.getEventTime(); // sự kiện nằm chờ trong hàng đợi bao lâu
             try {
                 injector.inject(p.ev);
+                rememberAccepted(p.ev);
+                if (!p.soft && !activeReported) { activeReported = true; out("ACTIVE"); }
                 ok = true;
             } catch (Throwable t) {
                 Throwable root = t;
@@ -953,35 +977,41 @@ public final class InputProxy {
                 int qn; synchronized (INJ_LOCK) { qn = INJQ.size(); }
                 log("phát chạm chậm: chờ " + age + "ms, gọi hệ thống " + took + "ms, hàng đợi " + qn);
             }
-            if (ok) injectFails = 0; else if (!p.soft) onInjectFailure(p.move);
+            if (ok && !p.soft) injectFails = 0; else if (!ok && !p.soft) onInjectFailure(p.move);
             synchronized (INJ_LOCK) {
                 injBusy = false;
                 INJ_LOCK.notifyAll();
             }
         }
+        // Shutdown must cancel even when injecting was disabled by failure.
+        cancelAccepted();
+        synchronized (INJ_LOCK) { injBusy = false; injectFinished = true; INJ_LOCK.notifyAll(); }
     }
 
     private static void onInjectFailure(boolean wasMove) {
+        // Fence producers, discard stale work, then cancel ACKNOWLEDGED state outside
+        // LOCK. There is only one writer; no new DOWN can overtake this CANCEL.
         synchronized (LOCK) {
-            if (!wasMove) desync = true;
-            if (++injectFails >= MAX_INJECT_FAILS && injecting) {
-                // Bộ phát hỏng mà grab vẫn còn = cảm ứng chết cả máy. Nhả grab ngay (đóng fd), huỷ ngón kẹt.
+            recovering = true;
+            runs.clear(); curTaps.clear(); shown.clear(); pidMask = 0;
+            dropPendingInject();
+        }
+        boolean clean = cancelAccepted();
+        synchronized (LOCK) {
+            injectFails++;
+            long now = SystemClock.uptimeMillis();
+            if (now - recoveryWindowAt > 10_000) { recoveryWindowAt = now; recoveriesInWindow = 0; }
+            recoveriesInWindow++;
+            if (clean && injectFails < MAX_INJECT_FAILS && recoveriesInWindow < MAX_INJECT_FAILS && !stopping) {
+                recovering = false;
+                log("inject lỗi -> đã CANCEL tập pointer được nhận; bỏ click cũ, phục hồi ngón thật");
+                sync();
+                LOCK.notifyAll();
+            } else {
                 injecting = false;
                 urgentRelease = true;
-                log("inject hỏng liên tiếp -> nhả cảm ứng ngay");
+                log("inject hỏng liên tiếp -> nhả cảm ứng ngay; cleanup=" + clean);
                 new Thread(InputProxy::shutdown, "zyn-bail").start();
-            } else if (desync) {
-                rebuildStream();
-            }
-        }
-    }
-
-    /** Chờ hàng đợi phát cạn (tối đa [ms]) — gọi KHÔNG giữ LOCK. */
-    private static void drainInject(long ms) {
-        long end = SystemClock.uptimeMillis() + ms;
-        synchronized (INJ_LOCK) {
-            while ((!INJQ.isEmpty() || injBusy) && SystemClock.uptimeMillis() < end) {
-                try { INJ_LOCK.wait(20); } catch (InterruptedException e) { break; }
             }
         }
     }
@@ -1049,7 +1079,20 @@ public final class InputProxy {
             for (int i = 0; i < runs.size(); i++) {
                 if (runs.get(i).id == id) { runs.remove(i); break; }
             }
+            for (Tap tap : curTaps) if (tap.owner == id) tap.finished = true;
+            sync();
+            for (int i = curTaps.size() - 1; i >= 0; i--) if (curTaps.get(i).finished) curTaps.remove(i);
+            LOCK.notifyAll();
         }
+    }
+
+    /** Called under LOCK. STOPALL/ROT must release already-held taps, not just future runs. */
+    private static void stopAllTaps() {
+        runs.clear();
+        for (Tap tap : curTaps) tap.finished = true;
+        sync();
+        curTaps.clear();
+        LOCK.notifyAll();
     }
 
     private static int injBacklog() {
@@ -1112,7 +1155,7 @@ public final class InputProxy {
     /** Gọi dưới LOCK. Cả cụm chạm xuống liên tiếp không chờ nhau (mỗi ngón một POINTER_DOWN ngay trong một lượt). */
     private static void launchGroup(Run r, Op op) {
         for (int i = 0; i < op.xy.length; i += 2) {
-            Tap t = new Tap(tapPointer(op.xy[i], op.xy[i + 1]), r.hold, r.gap);
+            Tap t = new Tap(tapPointer(op.xy[i], op.xy[i + 1]), r.hold, r.gap, r.id);
             t.down = true;
             curTaps.add(t);
         }
@@ -1184,9 +1227,10 @@ public final class InputProxy {
 
     // ---- thoát an toàn --------------------------------------------------------------------------
     private static boolean down = false;
+    private static final Object SHUTDOWN_LOCK = new Object();
 
     private static void shutdown() {
-        synchronized (OUT) {
+        synchronized (SHUTDOWN_LOCK) {
             if (down) return;
             down = true;
         }
@@ -1200,6 +1244,7 @@ public final class InputProxy {
         killer.setDaemon(true);
         killer.start();
         try {
+            synchronized (LOCK) { stopAllTaps(); }
             // Nhả grab khi đã không còn ngón thật chạm (tối đa ~1.5s) để hệ thống không bị kẹt ngón "ma".
             long end = SystemClock.uptimeMillis() + 1500;
             while (!urgentRelease && SystemClock.uptimeMillis() < end) {
@@ -1209,18 +1254,26 @@ public final class InputProxy {
                 SystemClock.sleep(30);
             }
             synchronized (LOCK) {
-                runs.clear();
-                curTaps.clear();
-                if (injecting && !shown.isEmpty()) {
-                    emit(MotionEvent.ACTION_CANCEL, -1, true);
-                    shown.clear();
-                    pidMask = 0;
-                }
+                // Fence the reader before clearing the producer state. Never enqueue a
+                // speculative CANCEL; the writer knows the last accepted pointer set.
+                recovering = true;
+                injecting = false;
+                runs.clear(); curTaps.clear(); shown.clear(); pidMask = 0;
+                dropPendingInject();
+                synchronized (INJ_LOCK) { injStop = true; INJ_LOCK.notifyAll(); }
                 LOCK.notifyAll();
             }
-            // Phải phát nốt CANCEL/UP còn nằm trong hàng đợi trước khi chết, nếu không hệ thống kẹt ngón ma.
-            drainInject(500);
-            synchronized (INJ_LOCK) { injStop = true; INJ_LOCK.notifyAll(); }
+            // Release the kernel grab promptly on failure even if binder cleanup stalls.
+            if (urgentRelease) {
+                closed = true;
+                try { if (devIn != null) devIn.close(); } catch (Throwable ignored) { }
+            }
+            long cleanupEnd = SystemClock.uptimeMillis() + 700;
+            synchronized (INJ_LOCK) {
+                while (outThreadOn && !injectFinished && SystemClock.uptimeMillis() < cleanupEnd) {
+                    try { INJ_LOCK.wait(20); } catch (InterruptedException e) { break; }
+                }
+            }
         } catch (Throwable ignored) {
         }
         closed = true;
@@ -1286,7 +1339,6 @@ public final class InputProxy {
         private final Method method;
         private final boolean withUid;
         private Method setDisplay;
-        private volatile boolean altDisplay = false;
 
         private Object call(InputEvent ev) throws Exception {
             return withUid ? method.invoke(target, ev, 0, -1) : method.invoke(target, ev, 0);
@@ -1339,21 +1391,13 @@ public final class InputProxy {
         @Override
         public void inject(InputEvent ev) throws Exception {
             if (setDisplay != null) {
-                try { setDisplay.invoke(ev, altDisplay ? -1 : 0); } catch (Throwable ignored) { }
+                try { setDisplay.invoke(ev, 0); } catch (Throwable ignored) { }
             }
             // mode 0 = ASYNC, uid -1 = INVALID_UID
             Object r = call(ev);
             if (r instanceof Boolean && !((Boolean) r)) {
-                // Bị từ chối với display 0: thử lại để hệ thống tự chọn màn hình mặc định (display chưa gán).
-                if (setDisplay != null && !altDisplay) {
-                    try { setDisplay.invoke(ev, -1); } catch (Throwable ignored) { }
-                    Object r2 = call(ev);
-                    if (r2 instanceof Boolean && ((Boolean) r2)) {
-                        altDisplay = true;
-                        log("inject: display 0 bị từ chối, dùng display mặc định thì được -> giữ cách này");
-                        return;
-                    }
-                }
+                // INVALID display (-1) resolves to the same default display for pointer
+                // events. Re-submitting the same transition cannot reset the verifier.
                 throw new IllegalStateException("hệ thống từ chối sự kiện");
             }
         }
