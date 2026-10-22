@@ -24,6 +24,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicBoolean
 import java.io.IOException
 import java.io.OutputStream
 import java.net.URLDecoder
@@ -347,6 +350,8 @@ class TouchWatcher(
     @Volatile private var lastEndInjectBail = false
     /** Số lần liên tiếp helper tự thoát vì bị từ chối bơm (để giãn nhịp chạy lại). */
     private var injectBailStreak = 0
+    @Volatile private var nextProxyAttemptAt = 0L
+    @Volatile private var lastSessionHealthy = false
     @Volatile private var lastReinjectAt = 0L
     @Volatile private var reinjectGap = REINJECT_MIN_MS // giãn dần nếu bơm lại mà vẫn lỗi, về mức đầu khi bơm được
 
@@ -368,7 +373,10 @@ class TouchWatcher(
      */
     fun requestReinject(reason: String) {
         val now = SystemClock.elapsedRealtime()
-        if (now - lastReinjectAt < reinjectGap) return
+        // A dropped click is NOT a reason to kill a helper that is still starting.
+        val existing = link
+        if (existing != null && !existing.ready) return
+        if (now < nextProxyAttemptAt || now - lastReinjectAt < reinjectGap) return
         lastReinjectAt = now
         DebugLog.w("Bơm", "Ép bơm lại helper: $reason (lần kế tiếp cách tối thiểu ${reinjectGap * 2 / 1000}s nếu vẫn lỗi)")
         reinjectGap = (reinjectGap * 2).coerceAtMost(REINJECT_MAX_MS)
@@ -383,6 +391,7 @@ class TouchWatcher(
             return
         }
         val s = stream
+        link?.plannedClose = true
         if (s != null) scope.launch { runCatching { s.close() } }
     }
 
@@ -393,10 +402,9 @@ class TouchWatcher(
         link = null
         scope.launch {
             if (s != null) runCatching { s.close() }
-            AdbSession.drop(app) // ngắt kết nối ADB nghi đã chết để lần sau nối mới
         }
         setStage("Khởi động lại vòng theo dõi cảm ứng")
-        job = scope.launch { loop() }
+        job = scope.launch { LOOP_OWNER.withLock { loop() } }
     }
 
     val running get() = job?.isActive == true
@@ -439,6 +447,7 @@ class TouchWatcher(
         @Volatile var injecting = false
         /** Helper đã báo READY (dù có bơm được hay không). */
         @Volatile var ready = false
+        @Volatile var plannedClose = false
 
         fun send(line: String) {
             synchronized(out) {
@@ -461,6 +470,7 @@ class TouchWatcher(
             withContext(Dispatchers.IO) { l.send("RUN $id ${if (repeat) 1 else 0} $holdMs $gapMs $ops") }
         } catch (e: IOException) {
             DebugLog.w("Bơm", "Gửi kịch bản cho helper lỗi, bỏ lần chạy này", e)
+            l.injecting = false
             requestReinject("gửi kịch bản cho helper lỗi (ADB đứt?)")
             return false
         }
@@ -486,10 +496,11 @@ class TouchWatcher(
         current = this
         proxyFails = 0
         setStage("Khởi động vòng theo dõi cảm ứng")
-        job = scope.launch { loop() }
+        job = scope.launch { LOOP_OWNER.withLock { loop() } }
     }
 
     fun stop() {
+        if (job == null && stream == null) return
         setStage("đã dừng", log = false)
         if (current === this) current = null
         job?.cancel()
@@ -498,15 +509,13 @@ class TouchWatcher(
         val l = link
         stream = null
         link = null
-        if (s != null) scope.launch {
-            // Bảo helper thoát gọn (nhả grab, huỷ ngón giả) rồi mới đóng luồng. Không chỉ dựa vào EOF:
-            // nếu helper còn sống sót sang lần mở app sau thì nó giữ grab cảm ứng làm lần sau lỗi.
-            if (l != null) {
-                runCatching { l.send("QUIT") }
-                delay(200)
-            }
-            runCatching { s.close() }
+        if (l != null) {
+            l.plannedClose = true
+            // Closing has an independent deadline: send() may block behind a stuck heartbeat.
+            scope.launch { runCatching { l.send("QUIT") } }
         }
+        if (s != null) scope.launch { delay(700); runCatching { s.close() } }
+
     }
 
     private suspend fun loop() {
@@ -550,14 +559,16 @@ class TouchWatcher(
                     delay(RETRY_MS * 3); continue
                 }
                 if (proxyFails < MAX_PROXY_FAILS) {
-                    killStaleHelpers(manager)
+                    if (!killStaleHelpers(manager)) {
+                        setStage("Không xác nhận helper cũ đã thoát; không grab chồng", log = false)
+                        delay(RETRY_MS)
+                        continue
+                    }
                     setStage("Đang chạy helper bơm trên ${dev.path} (chờ READY)")
-                    val startedAt = SystemClock.elapsedRealtime()
                     val ok = runProxy(manager, dev)
-                    val lived = SystemClock.elapsedRealtime() - startedAt
                     proxyFails = if (ok) 0 else proxyFails + 1
                     val bailed = ok && lastEndInjectBail
-                    injectBailStreak = if (bailed && lived < HEALTHY_LIVED_MS) injectBailStreak + 1 else 0
+                    injectBailStreak = if (bailed) (injectBailStreak + 1).coerceAtMost(30) else if (lastSessionHealthy) 0 else injectBailStreak
                     if (bailed) {
                         // ADB vẫn sống: hệ thống từ chối nhận cảm ứng bơm vào. Chạy lại dồn dập vô ích và làm cảm ứng chớp tắt.
                         DebugLog.w("Bơm", "Helper tự thoát vì hệ thống từ chối bơm cảm ứng (lần liên tiếp $injectBailStreak) — ADB vẫn nối, không phải mất mạng/ADB")
@@ -574,14 +585,16 @@ class TouchWatcher(
                     // Helper đang chạy ổn định mà rớt (ADB chớp, bị kill...): chạy lại gần như ngay. Trong lúc không có helper,
                     // ngón đang đè (vuốt cam) không ai phát lại nên bị đơ; chờ thêm RETRY_MS (3s) chỉ kéo dài cú đơ đó.
                     // Helper chết nhanh sau khi lên (chập chờn liên tục) thì vẫn giãn nhịp như cũ để không bơm lại dồn dập.
-                    val quick = fastRetry || (ok && lived > HEALTHY_LIVED_MS)
+                    val quick = fastRetry || (ok && lastSessionHealthy)
                     val wait = when {
                         // Bị từ chối bơm liên tiếp: giãn dần 3s, 6s, 12s, 24s, tối đa 30s
                         injectBailStreak > 0 -> minOf(RETRY_MS shl (injectBailStreak - 1).coerceAtMost(4), INJECT_BAIL_MAX_MS)
                         quick -> FAST_RETRY_MS
                         else -> RETRY_MS
                     }
+                    nextProxyAttemptAt = SystemClock.elapsedRealtime() + wait
                     delay(wait)
+                    nextProxyAttemptAt = 0L
                     fastRetry = false
                     continue
                 }
@@ -659,6 +672,8 @@ class TouchWatcher(
         var sawReady = false
         var unknownLines = 0
         var injectBailed = false
+        var activeAt = 0L
+        lastSessionHealthy = false
         lastEndInjectBail = false
         // Helper không báo READY trong thời hạn (treo / app_process không chạy) -> đóng luồng để vòng thử lại, không đứng im
         val readyGuard = launch(Dispatchers.IO) {
@@ -695,6 +710,10 @@ class TouchWatcher(
                     while (true) {
                         val line = r.readLine() ?: break
                         when {
+                            line == "ACTIVE" -> {
+                                if (activeAt == 0L) activeAt = SystemClock.elapsedRealtime()
+                                DebugLog.i("Bơm", "Helper đã bơm thành công sự kiện đầu tiên (khác với chỉ READY)")
+                            }
                             line.startsWith("F ") -> onFingerLine(line)
                             // Click lỗi: helper chỉ bỏ click đó rồi báo một dòng (đã giãn nhịp phía helper), không có số thứ tự.
                             line.startsWith("ERR ") -> DebugLog.w("Bơm", "Helper: ${line.substring(4).trim()}")
@@ -703,14 +722,14 @@ class TouchWatcher(
                                 runCatching { l.send(zonesLine) }
                                 runCatching { l.send(assistLine) }
                                 setStage("Helper READY: ${line.trim()}", log = false)
-                                if (l.injecting) { reinjectGap = REINJECT_MIN_MS; DebugLog.i("Bơm", "Helper sẵn sàng: $line") }
+                                if (l.injecting) { DebugLog.i("Bơm", "Helper sẵn sàng: $line (chưa xác nhận sự kiện được hệ thống nhận)") }
                                 else DebugLog.e("Bơm", "Helper chạy nhưng KHÔNG bơm được ($line) — grab cảm ứng thất bại hoặc không tạo được bộ phát")
                             }
                             line.startsWith("LOG ") -> {
                                 // Helper báo cả thông tin bình thường lẫn sự cố thật. Chỉ dòng có dấu hiệu sự cố mới là cảnh báo, còn lại là log thường.
                                 val msg = line.substring(4).trim()
                                 val lower = msg.lowercase()
-                                if (lower.contains("inject hỏng liên tiếp")) injectBailed = true
+                                if (lower.contains("inject hỏng liên tiếp")) { injectBailed = true; l.injecting = false }
                                 val bad = listOf("fail", "lỗi", "hỏng", "watchdog", "bad cmd", "read:", "inject:", "grab:", "dropped", "dựng lại")
                                     .any { lower.contains(it) }
                                 if (bad) DebugLog.w("Bơm", "Helper báo: $msg") // log thông tin thường: bỏ, không ghi
@@ -725,7 +744,7 @@ class TouchWatcher(
             throw e
         } catch (e: Exception) {
             // Helper tự thoát sau khi bị từ chối bơm thì luồng đóng là HỆ QUẢ, không phải ADB đứt
-            if (!injectBailed) DebugLog.w("Bơm", "Luồng helper bị ngắt (ADB đứt?) — helper tự thoát và nhả cảm ứng", e)
+            if (!injectBailed && !l.plannedClose && currentCoroutineContext().isActive) DebugLog.w("Bơm", "Luồng helper bị ngắt (ADB đứt?) — helper tự thoát và nhả cảm ứng", e)
         } finally {
             beat.cancel()
             readyGuard.cancel()
@@ -735,6 +754,9 @@ class TouchWatcher(
             if (stream === s) stream = null
             main.post { sink.onLost() }
             lastEndInjectBail = injectBailed
+            lastSessionHealthy = activeAt != 0L && !injectBailed &&
+                SystemClock.elapsedRealtime() - activeAt >= HEALTHY_LIVED_MS
+            if (lastSessionHealthy) reinjectGap = REINJECT_MIN_MS
         }
         sawReady
     }
@@ -782,12 +804,16 @@ class TouchWatcher(
     private suspend fun runText(manager: ZynAdbConnectionManager, cmd: String): String {
         val opened = ArrayList<AdbStream>()
         val work = CompletableDeferred<String>()
+        val abandoned = AtomicBoolean(false)
         scope.launch {
             val sb = StringBuilder()
             try {
                 for (prefix in arrayOf("exec:", "shell:")) {
                     val s = try { manager.openStream(prefix + cmd) } catch (_: Exception) { continue }
-                    synchronized(opened) { opened.add(s) }
+                    val keep = synchronized(opened) {
+                        if (abandoned.get()) false else { opened.add(s); true }
+                    }
+                    if (!keep) { runCatching { s.close() }; break }
                     try {
                         s.openInputStream().bufferedReader().use { r ->
                             val cb = CharArray(4096)
@@ -810,9 +836,11 @@ class TouchWatcher(
         val r = try {
             withTimeoutOrNull(CMD_TIMEOUT_MS) { work.await() }
         } catch (e: CancellationException) {
+            abandoned.set(true)
             closeAll(opened); throw e
         }
         if (r == null) {
+            abandoned.set(true)
             closeAll(opened)
             throw AdbHangException("lệnh \"${cmd.take(40)}\" không xong sau ${CMD_TIMEOUT_MS / 1000}s")
         }
@@ -826,13 +854,35 @@ class TouchWatcher(
 
     /**
      * Diệt helper cũ còn sống sót (app bị tắt/kill khi helper đang chạy, ADB đứt không báo...). Helper cũ
-     * giữ EVIOCGRAB nên helper mới không grab được -> không click được. Mẫu `[c]om...` để
-     * lệnh `sh -c` của chính nó không tự khớp mẫu.
+     * giữ EVIOCGRAB nên helper mới không grab được -> không click được. Chỉ khớp
+     * nguyên token argv của lớp helper; xác minh /proc trước khi gửi signal.
      */
-    private suspend fun killStaleHelpers(manager: ZynAdbConnectionManager) {
-        val pat = "[c]om.zyntap.app.shell.InputProxy"
-        val out = runText(manager, "pkill -f '$pat'; sleep 0.3; pkill -9 -f '$pat'; echo ZYN_CLEAN_DONE")
-        if (!out.contains("ZYN_CLEAN_DONE")) DebugLog.w("Bơm", "Dọn helper cũ không xác nhận: ${out.take(120)}")
+    private suspend fun killStaleHelpers(manager: ZynAdbConnectionManager): Boolean {
+        // Exact argv token, not broad pkill -f regex. Re-check identity before every
+        // signal (PID reuse) and allow the helper's 3s cleanup watchdog to finish.
+        val cmd = """
+            cls='com.zyntap.app.shell.'InputProxy
+            is_helper() { [ -r /proc/${'$'}1/cmdline ] && tr '\000' '\n' < /proc/${'$'}1/cmdline 2>/dev/null | grep -Fxq "${'$'}cls"; }
+            rows=${'$'}(ps -A -o PID,ARGS) || { echo ZYN_CLEAN_FAIL; exit 1; }
+            pids=${'$'}(printf '%s\n' "${'$'}rows" | awk -v cls="${'$'}cls" 'NR>1 {for(i=2;i<=NF;i++) if(${'$'}i==cls) {print ${'$'}1; break}}')
+            for p in ${'$'}pids; do if is_helper "${'$'}p"; then kill -TERM "${'$'}p" 2>/dev/null; fi; done
+            i=0
+            while [ "${'$'}i" -lt 35 ]; do
+              live=''
+              for p in ${'$'}pids; do if is_helper "${'$'}p"; then live="${'$'}live ${'$'}p"; fi; done
+              [ -z "${'$'}live" ] && break
+              sleep 0.1
+              i=${'$'}((i+1))
+            done
+            for p in ${'$'}pids; do if is_helper "${'$'}p"; then kill -KILL "${'$'}p" 2>/dev/null; fi; done
+            sleep 0.1
+            for p in ${'$'}pids; do if is_helper "${'$'}p"; then echo ZYN_CLEAN_FAIL; exit 1; fi; done
+            echo ZYN_CLEAN_DONE
+        """.trimIndent()
+        val out = runText(manager, cmd)
+        val ok = out.lineSequence().any { it.trim() == "ZYN_CLEAN_DONE" }
+        if (!ok) DebugLog.w("Bơm", "Dọn helper cũ không xác nhận, hoãn helper mới: ${out.take(120)}")
+        return ok
     }
 
     // ---- nhớ thiết bị cảm ứng để lần mở sau khỏi chạy getevent (bước từng bị treo) -------------
@@ -866,6 +916,7 @@ class TouchWatcher(
     }
 
     companion object {
+        private val LOOP_OWNER = Mutex()
         /** Watcher đang chạy (để PointRunner gửi click qua proxy). */
         @Volatile var current: TouchWatcher? = null
 
@@ -874,7 +925,7 @@ class TouchWatcher(
         private const val FAST_RETRY_MS = 400L
         private const val INJECT_BAIL_MAX_MS = 30_000L
         /** Helper sống quá chừng này mới coi là "đang chạy ổn" (rớt thì chạy lại nhanh). */
-        private const val HEALTHY_LIVED_MS = 8_000L
+        private const val HEALTHY_LIVED_MS = 30_000L
         private const val READY_TIMEOUT_MS = 10_000L
         private const val REINJECT_MAX_MS = 120_000L
         private const val PROXY_RETRY_MS = 30_000L
