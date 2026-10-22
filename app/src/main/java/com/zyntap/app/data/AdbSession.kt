@@ -3,10 +3,8 @@ package com.zyntap.app.data
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.os.Build
-import android.os.SystemClock
 import io.github.muntashirakon.adb.AdbPairingRequiredException
 import java.io.IOException
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,8 +20,7 @@ import kotlinx.coroutines.withContext
  * Trước đây chỉ có đoạn "kiểm tra còn ghép nối không" rồi ngắt luôn, và lúc bấm nút main
  * thì không ai nối cả -> luôn báo "chưa kết nối". Giờ:
  *  - [connect] nối khi cần (có khoá, có thử lại) và GIỮ kết nối sống.
- *  - [ensureInBackground] được menu nổi gọi định kỳ để tự nối lại (sau khi cập nhật app,
- *    bật lại gỡ lỗi Wi-Fi, đổi mạng...) mà không cần mở app / ghép nối lại.
+ *  - KHÔNG còn tự nối lại ở nền / khi bấm nút main; chỉ nối khi người dùng chủ động từ app.
  *  - Một lần nối lỗi thoáng qua KHÔNG còn làm app "quên" ghép nối.
  */
 object AdbSession {
@@ -37,10 +34,6 @@ object AdbSession {
 
     private val mutex = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val connecting = AtomicBoolean(false)
-
-    @Volatile
-    private var nextBackgroundAt = 0L
 
     /**
      * Đảm bảo đã có kết nối ADB. Gọi từ coroutine (tự chuyển sang IO).
@@ -113,32 +106,4 @@ object AdbSession {
         runCatching { ZynAdbConnectionManager.get(context.applicationContext).disconnect() }
     }
 
-    /**
-     * Gọi nhẹ, gọi thoải mái (đã tự giãn nhịp): nếu đã ghép nối + gỡ lỗi Wi-Fi đang bật mà
-     * chưa có kết nối thì âm thầm nối lại ở nền.
-     */
-    fun ensureInBackground(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
-        val app = context.applicationContext
-        val now = SystemClock.elapsedRealtime()
-        if (now < nextBackgroundAt || !connecting.compareAndSet(false, true)) return
-        nextBackgroundAt = now + CHECK_EVERY_MS
-        scope.launch {
-            try {
-                if (!AdbLinkStore.isPaired(app) || !WifiAdbMonitor.isWifiAdbEnabled(app)) return@launch
-                val manager = ZynAdbConnectionManager.get(app)
-                if (!manager.isConnected) {
-                    val link = connect(app, attempts = 1)
-                    if (link !is Link.Connected) {
-                        nextBackgroundAt = SystemClock.elapsedRealtime() + RETRY_AFTER_FAIL_MS
-                    }
-                }
-            } finally {
-                connecting.set(false)
-            }
-        }
-    }
-
-    private const val CHECK_EVERY_MS = 1000L
-    private const val RETRY_AFTER_FAIL_MS = 3000L
 }
