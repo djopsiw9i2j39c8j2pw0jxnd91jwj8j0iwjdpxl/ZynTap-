@@ -34,7 +34,7 @@ class MainButtonView(context: Context) : View(context) {
 
     /** Độ đặc của thân nút, 0..100 (0 = vô hình). */
     var fillPct = 80
-        set(v) { field = v; invalidate() }
+        set(v) { if (field != v) { field = v; invalidate() } }
 
     /** Sàn độ đặc đang áp dụng (menu mở = [MainButton.MENU_MIN_ALPHA], đóng = 0), để nút 0% vẫn thấy được lúc chỉnh. */
     var minPct = 0
@@ -42,13 +42,13 @@ class MainButtonView(context: Context) : View(context) {
 
     /** Khoảng chừa quanh nút (px) cho vòng viền chỉnh sửa. */
     var ringPad = 0f
-        set(v) { field = v; invalidate() }
+        set(v) { if (field != v) { field = v; invalidate() } }
 
     var editing = false
         set(v) {
             if (field == v) return
             field = v
-            if (v) startSpin() else stopSpin()
+            if (v && isAttachedToWindow) startSpin() else stopSpin()
             invalidate()
         }
 
@@ -137,7 +137,7 @@ class MainButtonView(context: Context) : View(context) {
     }
 
     override fun onDetachedFromWindow() {
-        spinner?.cancel()
+        stopSpin()
         super.onDetachedFromWindow()
     }
 
@@ -705,6 +705,7 @@ class MainButtonOverlay(
 
     /** Vào/ra trạng thái chỉnh sửa của một nút (null = không nút nào đang chỉnh). */
     fun setEditing(id: Int?) {
+        if (editingId == id) return
         if (id != null) { clearCooldown(id); notifyCancel(id) }
         editingId = id
         entries.forEach { (k, e) ->

@@ -278,19 +278,19 @@ class OverlayService : Service() {
         }
     }
 
-    /** Nhịp nối lại ADB riêng 100ms (ensureInBackground tự chặn trùng lượt nên gọi dày vẫn an toàn). */
+    /** Reconnect checks run on the existing worker, not on the UI thread. */
     private val reconnectTick = object : Runnable {
         override fun run() {
             if (stopping || closing) return
             runCatching { AdbSession.ensureInBackground(this@OverlayService) }
-            if (!stopping && !closing) handler.postDelayed(this, RECONNECT_MS)
+            if (!stopping && !closing) targetHandler.postDelayed(this, RECONNECT_MS)
         }
     }
 
     private fun startWatchdog() {
         if (stopping || closing) return
-        handler.removeCallbacks(reconnectTick)
-        handler.postDelayed(reconnectTick, RECONNECT_MS)
+        targetHandler.removeCallbacks(reconnectTick)
+        targetHandler.postDelayed(reconnectTick, RECONNECT_MS)
         handler.removeCallbacks(watchdog)
         handler.postDelayed(watchdog, WATCHDOG_MS)
         targetHandler.removeCallbacks(targetWatcher)
@@ -311,7 +311,6 @@ class OverlayService : Service() {
         if (stopping || closing || !wanted(this)) return
         // One failed component must not prevent the remaining windows from recovering.
         safely("khôi phục cửa sổ") { wm.recoverDetached() }
-        safely("nối lại ADB") { AdbSession.ensureInBackground(this) }
         safely("tâm ảo") { crosshair.ensure() }
         safely("thanh thông số") { stats.ensure() }
         safely("nút main") { circles.ensureAll() }
@@ -882,41 +881,44 @@ class OverlayService : Service() {
         settingsTab = tab5
 
         // Thứ tự: 0 = Cài tâm ảo, 1 = Tạo nút chính, 2 = Chỉnh điểm nhấn, 3 = Cài cấu hình, 4 = Debug log, 5 = Cài đặt
-        val tabViews = listOf(
-            tab0.build(),
-            tab1.build(),
-            tab2.build(),
-            tab3.build(),
-            tab4.build(),
-            tab5.build(),
+        val tabBuilders: List<() -> View> = listOf(
+            { tab0.build() }, { tab1.build() }, { tab2.build() },
+            { tab3.build() }, { tab4.build() }, { tab5.build() },
         )
+        val tabViews = arrayOfNulls<View>(tabBuilders.size)
         // Mỗi lần đóng menu là cả cửa sổ bị gỡ và dựng lại -> phải nhớ tab đang chọn ở ngoài,
         // nếu không sẽ luôn quay về tab 1.
         val startTab = prefs.getInt(KEY_TAB, 1).coerceIn(0, tabViews.lastIndex)
         val tabContainer = FrameLayout(this)
-        tabViews.forEachIndexed { i, v ->
-            tabContainer.addView(v, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            if (i != startTab) { v.visibility = View.GONE; v.alpha = 0f }
+        fun viewForTab(index: Int): View = tabViews[index] ?: tabBuilders[index]().also { v ->
+            tabViews[index] = v
+            v.visibility = View.GONE
+            tabContainer.addView(v, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         }
+        viewForTab(startTab).visibility = View.VISIBLE
         if (startTab == 2) tab2.enter()
         if (startTab == 3) tab3.enter()
         if (startTab == 4) tab4.enter()
+        if (startTab == 5) tab5.enter()
         var shownTab = startTab
         shownTabIdx = startTab
         fun showTab(i: Int) {
             if (i == shownTab) return
             val oldIdx = shownTab
-            val old = tabViews[oldIdx]
-            val next = tabViews[i]
+            val old = viewForTab(oldIdx)
+            val next = viewForTab(i)
             if (oldIdx == 1) tab1.exitEdit()   // rời tab Tạo nút chính -> thoát trạng thái chỉnh nút
             if (oldIdx == 2) tab2.exit()
             if (oldIdx == 3) tab3.exit()
             if (oldIdx == 4) tab4.exit()
+            if (oldIdx == 5) tab5.exit()
             dd.dismissNow()
             pr.close()
             if (i == 2) tab2.enter()
             if (i == 3) tab3.enter()
             if (i == 4) tab4.enter()
+            if (i == 5) tab5.enter()
             old.animate().cancel(); next.animate().cancel()
             old.animate().alpha(0f).setDuration(140L)
                 .withEndAction { if (shownTab != oldIdx) old.visibility = View.GONE }.start()
@@ -1576,7 +1578,7 @@ class OverlayService : Service() {
         closing = true
         setWanted(this, false) // chủ động đóng -> không tự khôi phục
         handler.removeCallbacks(watchdog)
-        handler.removeCallbacks(reconnectTick)
+        targetHandler.removeCallbacks(reconnectTick)
         solidAnim?.cancel()
         editDimAnim?.cancel()
         promptLayer?.close()
@@ -1795,6 +1797,7 @@ class OverlayService : Service() {
         resetPanelState()
         confirmLayer?.let { it.animate().cancel(); it.visibility = View.GONE }
         panelHidden = true
+        settingsTab?.exit()
         if (::circles.isInitialized) setMenuOpenAll(false)
         handler.removeCallbacks(statusTick)
         stopHaloBreath()
@@ -1826,7 +1829,9 @@ class OverlayService : Service() {
         startStatusTick()
         startHaloBreath()
         if (shownTabIdx == 2) pointsTab?.enter()
+        if (shownTabIdx == 3) configTab?.enter()
         if (shownTabIdx == 4) debugTab?.enter()
+        if (shownTabIdx == 5) settingsTab?.enter()
     }
 
     private fun removePanel() {
@@ -1965,7 +1970,7 @@ class OverlayService : Service() {
         private const val STATUS_MS = 1500L
         private const val BREATH_MS = 1600L
         private const val BREATH_FAST_MS = 800L
-        private const val RECONNECT_MS = 100L // nhịp gọi nối lại ADB (trước đây gộp trong watchdog 2000ms)
+        private const val RECONNECT_MS = 1000L // nhịp gọi nối lại ADB (trước đây gộp trong watchdog 2000ms)
         private const val WATCHDOG_MS = 2000L
         private const val ATTACH_GRACE_MS = 1500L
 

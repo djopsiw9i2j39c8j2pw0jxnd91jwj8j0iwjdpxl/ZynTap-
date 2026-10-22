@@ -337,36 +337,37 @@ internal class StatsBarView(ctx: Context, private val settings: StatsSettings) :
         }
     }
 
-    fun update(s: StatSnapshot) {
-        // FPS
-        if (s.fps < 0) {
-            fpsValue.text = "--"; fpsValue.setTextColor(C_MUTED)
-        } else {
-            fpsValue.text = s.fps.toString()
-            fpsValue.setTextColor(if (s.fps >= 55) C_OK else if (s.fps >= 30) C_WARN else C_BAD)
-        }
-        // Pin
-        if (s.batteryPct < 0) {
-            batText.text = "--%"; batGlyph.pct = 0
-        } else {
-            batText.text = s.batteryPct.toString() + "%"
-            batGlyph.pct = s.batteryPct
-        }
-        val bc = when {
-            s.charging -> C_CYAN
-            s.batteryPct in 0..15 -> C_BAD
-            s.batteryPct in 0..30 -> C_WARN
-            else -> C_OK
-        }
-        batGlyph.charging = s.charging
-        batGlyph.tint = bc
-        batText.setTextColor(if (s.charging || s.batteryPct in 0..30) bc else C_FG)
-        // Giờ
-        timeText.text = s.time
-        // Mạng
-        netDown.text = "↓" + fmtRate(s.rxBps)
-        netUp.text = "↑" + fmtRate(s.txBps)
+    private fun TextView.textIfChanged(value: String) {
+        if (text.toString() != value) text = value
     }
+
+    fun update(s: StatSnapshot) {
+        if (settings.isOn(StatKind.FPS)) {
+            fpsValue.textIfChanged(if (s.fps < 0) "--" else s.fps.toString())
+            val color = when { s.fps < 0 -> C_MUTED; s.fps >= 55 -> C_OK; s.fps >= 30 -> C_WARN; else -> C_BAD }
+            if (fpsValue.currentTextColor != color) fpsValue.setTextColor(color)
+        }
+        if (settings.isOn(StatKind.BATTERY)) {
+            batText.textIfChanged(if (s.batteryPct < 0) "--%" else "${s.batteryPct}%")
+            batGlyph.pct = s.batteryPct.coerceAtLeast(0)
+            val bc = when {
+                s.charging -> C_CYAN
+                s.batteryPct in 0..15 -> C_BAD
+                s.batteryPct in 0..30 -> C_WARN
+                else -> C_OK
+            }
+            batGlyph.charging = s.charging
+            batGlyph.tint = bc
+            val color = if (s.charging || s.batteryPct in 0..30) bc else C_FG
+            if (batText.currentTextColor != color) batText.setTextColor(color)
+        }
+        if (settings.isOn(StatKind.TIME)) timeText.textIfChanged(s.time)
+        if (settings.isOn(StatKind.NET)) {
+            netDown.textIfChanged("↓" + fmtRate(s.rxBps))
+            netUp.textIfChanged("↑" + fmtRate(s.txBps))
+        }
+    }
+
 }
 
 // ---- cửa sổ nổi ----------------------------------------------------------------------------
@@ -415,9 +416,23 @@ class StatsBarOverlay(
 
     private fun stopTickerIfIdle() {
         if (view == null && previews.isEmpty()) {
+            val wasTicking = ticking
             main.removeCallbacks(tick)
             ticking = false
             stopScreenFpsMeter()
+            if (wasTicking) disableTimeStatsIfStarted()
+        }
+    }
+
+    private fun disableTimeStatsIfStarted() {
+        // Runs behind the current sample: it may still be enabling TimeStats right now.
+        fpsExecutor.execute {
+            if (timeStatsStarted.compareAndSet(true, false)) {
+                runCatching {
+                    val manager = ZynAdbConnectionManager.get(ctx.applicationContext)
+                    if (manager.isConnected) runAdbText(manager, "dumpsys SurfaceFlinger --timestats -disable", 8_000)
+                }
+            }
         }
     }
 
@@ -437,12 +452,17 @@ class StatsBarOverlay(
         return Pair(pct, charging)
     }
 
+    private var timeFormatter: SimpleDateFormat? = null
+    private var timeFormatKey = ""
+
     private fun refreshOnce() {
         val now = SystemClock.elapsedRealtime()
         var rxBps = -1L
         var txBps = -1L
-        val rx = TrafficStats.getTotalRxBytes()
-        val tx = TrafficStats.getTotalTxBytes()
+        val needNet = settings.isOn(StatKind.NET)
+        val rx = if (needNet) TrafficStats.getTotalRxBytes() else -1L
+        val tx = if (needNet) TrafficStats.getTotalTxBytes() else -1L
+        if (!needNet) { lastRx = -1L; lastTx = -1L; lastNetAt = 0L }
         if (rx >= 0L && tx >= 0L) {
             if (lastNetAt > 0L && lastRx >= 0L && lastTx >= 0L) {
                 val dt = (now - lastNetAt).coerceAtLeast(1L)
@@ -451,9 +471,11 @@ class StatsBarOverlay(
             }
             lastRx = rx; lastTx = tx; lastNetAt = now
         }
-        val bat = readBattery()
+        val bat = if (settings.isOn(StatKind.BATTERY)) readBattery() else (-1 to false)
         if (settings.isOn(StatKind.FPS)) {
-            startScreenFpsMeter()
+            // Do not keep a per-VSync callback alive when a fresh game sample exists.
+            if (fpsValue >= 0 && now - fpsUpdatedAt < 6500L) stopScreenFpsMeter()
+            else startScreenFpsMeter()
             requestFpsSample()
         } else {
             stopScreenFpsMeter()
@@ -467,10 +489,18 @@ class StatsBarOverlay(
                 }
             }
         }
-        val pattern = if (android.text.format.DateFormat.is24HourFormat(ctx)) "HH:mm" else "h:mm a"
-        val time = SimpleDateFormat(pattern, Locale.getDefault()).format(Date())
+        val time = if (settings.isOn(StatKind.TIME)) {
+            val pattern = if (android.text.format.DateFormat.is24HourFormat(ctx)) "HH:mm" else "h:mm a"
+            val locale = Locale.getDefault()
+            val key = "$pattern|$locale|${java.util.TimeZone.getDefault().id}"
+            if (timeFormatter == null || key != timeFormatKey) {
+                timeFormatKey = key
+                timeFormatter = SimpleDateFormat(pattern, locale)
+            }
+            timeFormatter!!.format(Date())
+        } else ""
         val nowForFps = SystemClock.elapsedRealtime()
-        val measuredGameFps = fpsValue.takeIf { it >= 0 && nowForFps - fpsUpdatedAt < 3500L }
+        val measuredGameFps = fpsValue.takeIf { it >= 0 && nowForFps - fpsUpdatedAt < 6500L }
         val measuredScreenFps = screenFpsValue.takeIf { it >= 0 && nowForFps - screenFpsUpdatedAt < 1500L }
         val snap = StatSnapshot(
             // Nếu ADB đọc được FPS game thì ưu tiên; nếu không, hiện nhịp VSync của màn hình.
@@ -588,14 +618,14 @@ class StatsBarOverlay(
                 }
 
                 val nowFocus = SystemClock.elapsedRealtime()
-                if (cachedFocusPkg == null || nowFocus - cachedFocusAt > FOCUS_CACHE_MS) {
+                if (targetPkg().isNullOrBlank() && nowFocus - cachedFocusAt > FOCUS_CACHE_MS) {
                     val focusOut = runCatching { runAdbText(manager, FOCUS_CMD, 16_000) }.getOrDefault("")
                     cachedFocusPkg = FOCUS_RE.find(focusOut)?.groupValues?.getOrNull(1)
                         ?.takeIf { PKG_RE.matches(it) && it != "com.zyntap.app" }
                     cachedFocusAt = nowFocus
                 }
                 val focusedPkg = cachedFocusPkg
-                val pkg = focusedPkg ?: targetPkg()?.takeIf { PKG_RE.matches(it) }
+                val pkg = targetPkg()?.takeIf { PKG_RE.matches(it) } ?: focusedPkg
                 if (pkg.isNullOrBlank()) {
                     publishFps(-1)
                     previousLayer = ""; previousFrames = -1L; previousSampleAt = 0L
@@ -947,8 +977,8 @@ class StatsBarOverlay(
         private val RLS_RE = Regex("RequestedLayerState\\{[0-9a-fA-F]+\\s+(.+?)(?:\\s+parentId=.*|\\s+ROOT.*|\\}.*)?$")
         private val FOCUS_RE = Regex("([A-Za-z0-9_.]+)/[A-Za-z0-9_.$]+")
         /** Nhịp đo FPS tối thiểu (ms) — trước đây đo mỗi 1s làm SurfaceFlinger + đường ADB chung với cảm ứng bị nghẽn. */
-        private const val FPS_SAMPLE_GAP_MS = 2000L
-        private const val FOCUS_CACHE_MS = 5000L
+        private const val FPS_SAMPLE_GAP_MS = 5000L
+        private const val FOCUS_CACHE_MS = 10000L
         /** Chỉ giữ 4 trường parseLayerStats cần, lọc ngay trên máy để không kéo hàng trăm KB qua ADB mỗi lần. */
         private const val TIMESTATS_CMD =
             "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
@@ -1000,6 +1030,7 @@ class SettingsTab(
     private fun dp(n: Int) = (n * d).toInt()
 
     private var preview: StatsBarView? = null
+    private var previewActive = false
     private var binding = false
     private lateinit var toggleSwitch: Switch
     private lateinit var summary: TextView
@@ -1049,7 +1080,7 @@ class SettingsTab(
             }
         }
         page.addView(box, LinearLayout.LayoutParams(-1, dp(84)))
-        overlay.addPreview(pv)
+        // enter()/exit() own live sampling; building an invisible tab must not start it.
 
         // ---- MỘT công tắc tổng: hiện thanh trạng thái ----
         val row = LinearLayout(ctx).apply {
@@ -1126,9 +1157,22 @@ class SettingsTab(
         return root
     }
 
+    fun enter() {
+        if (previewActive) return
+        val pv = preview ?: return
+        previewActive = true
+        overlay.addPreview(pv)
+    }
+
+    fun exit() {
+        if (!previewActive) return
+        previewActive = false
+        preview?.let { overlay.removePreview(it) }
+    }
+
     /** Menu bị gỡ: bỏ ô xem trước khỏi nhịp cập nhật. */
     fun dispose() {
-        preview?.let { overlay.removePreview(it) }
+        exit()
         preview = null
     }
 }

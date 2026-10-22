@@ -42,7 +42,9 @@ interface PanelHost {
 private class RevealLayout(context: Context) : FrameLayout(context) {
     var fraction = 1f
         set(v) {
-            field = v.coerceIn(0f, 1f)
+            val next = v.coerceIn(0f, 1f)
+            if (field == next) return
+            field = next
             requestLayout()
         }
 
@@ -237,7 +239,7 @@ class MainButtonsTab(
             head.addView(chevron, LinearLayout.LayoutParams(dp(20), dp(20)))
             container.addView(head, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)))
 
-            reveal.addView(buildBody(), FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            // Build the expensive switches/sliders only when this particular row opens.
             container.addView(reveal, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
             // wrapper chừa khoảng cách giữa các thanh
@@ -297,6 +299,10 @@ class MainButtonsTab(
         }
 
         fun setExpanded(on: Boolean, animate: Boolean) {
+            if (on && reveal.childCount == 0) {
+                reveal.addView(buildBody(), FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            }
             anim?.cancel()
             val from = reveal.fraction
             val to = if (on) 1f else 0f

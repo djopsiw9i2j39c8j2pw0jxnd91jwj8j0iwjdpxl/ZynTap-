@@ -31,6 +31,28 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
 
     private var popup: View? = null
     private var closing = false
+    private var onPopupDismissed: (() -> Unit)? = null
+    private var pendingLayout: OnLayoutChangeListener? = null
+
+    private fun awaitLayout(anchor: View, action: () -> Unit) {
+        if (!isAttachedToWindow || !anchor.isAttachedToWindow) return
+        val listener = object : OnLayoutChangeListener {
+            override fun onLayoutChange(v: View, l: Int, t: Int, r: Int, b: Int,
+                oldL: Int, oldT: Int, oldR: Int, oldB: Int) {
+                removeOnLayoutChangeListener(this)
+                pendingLayout = null
+                if (isAttachedToWindow && anchor.isAttachedToWindow && width > 0 && height > 0) action()
+            }
+        }
+        pendingLayout = listener
+        addOnLayoutChangeListener(listener)
+        requestLayout()
+    }
+
+    override fun onDetachedFromWindow() {
+        dismissNow()
+        super.onDetachedFromWindow()
+    }
 
     val isOpen: Boolean get() = popup != null
 
@@ -42,7 +64,8 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         setOnClickListener { dismiss() }
     }
 
-    fun show(anchor: View, items: List<String>, selected: Int, onPick: (Int) -> Unit) {
+    fun show(anchor: View, items: List<String>, selected: Int,
+        onDismiss: () -> Unit = {}, onPick: (Int) -> Unit) {
         if (items.isEmpty()) return
         dismissNow()
         closing = false
@@ -59,7 +82,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         val layerH = if (height > 0) height else (parent as? View)?.height ?: 0
         if (layerW <= 0 || layerH <= 0) {
             // Chưa có kích thước thật: đợi bố cục xong rồi mở lại (hiếm khi xảy ra)
-            post { show(anchor, items, selected, onPick) }
+            awaitLayout(anchor) { show(anchor, items, selected, onDismiss, onPick) }
             return
         }
 
@@ -114,6 +137,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
             topMargin = top
         })
         popup = scroll
+        onPopupDismissed = onDismiss
         visibility = View.VISIBLE
         isClickable = true
 
@@ -131,7 +155,8 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
      * Dropdown CHỌN NHIỀU: bảng không tự đóng khi chọn; mỗi hàng có ô tích. Hàng đầu "Tất cả" bật/tắt cả danh sách.
      * [onChange] được gọi mỗi lần đổi với trạng thái mới của toàn bộ [checked]. Ấn ra ngoài bảng = đóng.
      */
-    fun showMulti(anchor: View, items: List<String>, checked: BooleanArray, onChange: (BooleanArray) -> Unit) {
+    fun showMulti(anchor: View, items: List<String>, checked: BooleanArray,
+        onDismiss: () -> Unit = {}, onChange: (BooleanArray) -> Unit) {
         if (items.isEmpty()) return
         dismissNow()
         closing = false
@@ -146,7 +171,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         val layerW = if (width > 0) width else (parent as? View)?.width ?: 0
         val layerH = if (height > 0) height else (parent as? View)?.height ?: 0
         if (layerW <= 0 || layerH <= 0) {
-            post { showMulti(anchor, items, checked, onChange) }
+            awaitLayout(anchor) { showMulti(anchor, items, checked, onDismiss, onChange) }
             return
         }
 
@@ -212,6 +237,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
             topMargin = top
         })
         popup = scroll
+        onPopupDismissed = onDismiss
         visibility = View.VISIBLE
         isClickable = true
 
@@ -282,11 +308,16 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
 
     /** Đóng ngay, không hiệu ứng. */
     fun dismissNow() {
+        pendingLayout?.let { removeOnLayoutChangeListener(it) }
+        pendingLayout = null
+        val dismissed = onPopupDismissed
+        onPopupDismissed = null
         popup?.let { it.animate().cancel(); removeView(it) }
         popup = null
         closing = false
         visibility = View.INVISIBLE
         isClickable = false
+        dismissed?.invoke()
     }
 
     private fun buildItem(label: String, selected: Boolean, onClick: () -> Unit): View {
@@ -377,21 +408,16 @@ class DropdownField(
     }
 
     private fun open() {
+        layer.dismissNow() // finish the previous arrow callback before starting a new one
         arrow.animate().cancel()
         arrow.animate().rotation(180f).setDuration(180L).start()
-        layer.show(this, items, current) { i ->
+        layer.show(this, items, current, onDismiss = {
+            arrow.animate().rotation(0f).setDuration(160L).start()
+        }) { i ->
             current = i
             valueText.text = items[i]
             onSelect(i)
         }
-        // Mũi tên quay về khi bảng đóng
-        postDelayed(object : Runnable {
-            override fun run() {
-                if (!isAttachedToWindow) return
-                if (layer.isOpen) postDelayed(this, 120L)
-                else arrow.animate().rotation(0f).setDuration(160L).start()
-            }
-        }, 200L)
     }
 }
 
@@ -457,19 +483,15 @@ class MultiDropdownField(
     }
 
     private fun open() {
+        layer.dismissNow() // finish the previous arrow callback before starting a new one
         arrow.animate().cancel()
         arrow.animate().rotation(180f).setDuration(180L).start()
-        layer.showMulti(this, items, state) { s ->
+        layer.showMulti(this, items, state, onDismiss = {
+            arrow.animate().rotation(0f).setDuration(160L).start()
+        }) { s ->
             state = s
             renderValue()
             onChange(s)
         }
-        postDelayed(object : Runnable {
-            override fun run() {
-                if (!isAttachedToWindow) return
-                if (layer.isOpen) postDelayed(this, 120L)
-                else arrow.animate().rotation(0f).setDuration(160L).start()
-            }
-        }, 200L)
     }
 }
