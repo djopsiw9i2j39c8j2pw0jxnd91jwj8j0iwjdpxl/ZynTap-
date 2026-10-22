@@ -120,15 +120,12 @@ object AdbSession {
     fun ensureInBackground(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         val app = context.applicationContext
-        // Đã nối rồi thì thôi: vòng này chạy mỗi 100ms nên không được tốn thêm việc nào khi mọi thứ đang ổn
-        if (runCatching { ZynAdbConnectionManager.get(app).isConnected }.getOrDefault(false)) return
-        if (!AdbLinkStore.isPaired(app) || !WifiAdbMonitor.isWifiAdbEnabled(app)) return
         val now = SystemClock.elapsedRealtime()
-        if (now < nextBackgroundAt) return
+        if (now < nextBackgroundAt || !connecting.compareAndSet(false, true)) return
         nextBackgroundAt = now + CHECK_EVERY_MS
-        if (!connecting.compareAndSet(false, true)) return
         scope.launch {
             try {
+                if (!AdbLinkStore.isPaired(app) || !WifiAdbMonitor.isWifiAdbEnabled(app)) return@launch
                 val manager = ZynAdbConnectionManager.get(app)
                 if (!manager.isConnected) {
                     val link = connect(app, attempts = 1)
@@ -142,6 +139,6 @@ object AdbSession {
         }
     }
 
-    private const val CHECK_EVERY_MS = 100L
-    private const val RETRY_AFTER_FAIL_MS = 100L
+    private const val CHECK_EVERY_MS = 1000L
+    private const val RETRY_AFTER_FAIL_MS = 3000L
 }
