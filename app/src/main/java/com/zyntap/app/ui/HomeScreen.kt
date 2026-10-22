@@ -122,7 +122,8 @@ private fun StatusCard(
         StatusRow(
             dotColor = when {
                 ready -> Zyn.Ok
-                onCount == 0 -> Zyn.Danger
+                // Đỏ khi tắt hết: không Wi-Fi, không gỡ lỗi Wi-Fi, không dữ liệu di động
+                !wifiConnected && !wifiAdbOn && !mobileData -> Zyn.Danger
                 else -> Zyn.Warn
             },
             title = if (ready) "Sẵn sàng" else "Chưa sẵn sàng",
