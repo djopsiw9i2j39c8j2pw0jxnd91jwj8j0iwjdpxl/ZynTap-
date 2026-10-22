@@ -1152,6 +1152,7 @@ public final class InputProxy {
 
     private static void pump() {
         synchronized (LOCK) {
+            int immediateSteps = 0;
             while (!stopping) {
                 long now = SystemClock.uptimeMillis();
                 long wait = 1000;
@@ -1167,9 +1168,13 @@ public final class InputProxy {
                 }
                 if (!curTaps.isEmpty()) wait = Math.min(wait, curReleaseAt - SystemClock.uptimeMillis());
                 if (driftActive()) { sync(); wait = Math.min(wait, 8); }
-                if (wait <= 0) continue;          // tới hạn ngay (hold = 0 / click kế tiếp): KHÔNG nghỉ
+                // Bound zero-delay bursts. Holding LOCK forever starves the raw reader,
+                // STOP/ROT and injection recovery even though each individual op terminates.
+                // DOWN/UP still happen immediately; yield only after a small batch.
+                if (wait <= 0 && ++immediateSteps < 8) continue;
+                immediateSteps = 0;
                 try {
-                    LOCK.wait(wait);
+                    LOCK.wait(Math.max(1L, wait));
                 } catch (InterruptedException e) {
                     return;
                 }
