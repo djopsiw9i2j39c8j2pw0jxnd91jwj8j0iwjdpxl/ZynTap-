@@ -100,8 +100,8 @@ class PointRunner(
             try {
                 val manager = withContext(Dispatchers.IO) { ZynAdbConnectionManager.get(context) }
                 if (!withContext(Dispatchers.IO) { manager.isConnected }) {
-                    // Không tự nối lại khi bấm nút main: báo để người dùng nối từ app
-                    message("ADB chưa kết nối. Mở app ZynTap để kết nối lại.", DebugLog.Level.ERROR)
+                    // Không tự nối lại khi bấm nút main
+                    message("ADB chưa kết nối. Hãy mở app và kết nối lại.", DebugLog.Level.ERROR)
                     return@launch
                 }
                 ensureActive()

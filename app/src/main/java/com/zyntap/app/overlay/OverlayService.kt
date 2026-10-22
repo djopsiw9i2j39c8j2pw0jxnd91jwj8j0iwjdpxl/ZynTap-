@@ -45,7 +45,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.zyntap.app.R
 import com.zyntap.app.data.AdbLinkStore
-import com.zyntap.app.data.AdbSession
 import com.zyntap.app.data.DebugLog
 import com.zyntap.app.data.WifiAdbMonitor
 import com.zyntap.app.data.WifiState
@@ -220,7 +219,6 @@ class OverlayService : Service() {
                 crosshair.ensure()
                 stats.ensure()
                 startWatchdog()
-                AdbSession.ensureInBackground(this)
             }
         }
         return START_STICKY
@@ -278,19 +276,8 @@ class OverlayService : Service() {
         }
     }
 
-    /** Reconnect checks run on the existing worker, not on the UI thread. */
-    private val reconnectTick = object : Runnable {
-        override fun run() {
-            if (stopping || closing) return
-            runCatching { AdbSession.ensureInBackground(this@OverlayService) }
-            if (!stopping && !closing) targetHandler.postDelayed(this, RECONNECT_MS)
-        }
-    }
-
     private fun startWatchdog() {
         if (stopping || closing) return
-        targetHandler.removeCallbacks(reconnectTick)
-        targetHandler.postDelayed(reconnectTick, RECONNECT_MS)
         handler.removeCallbacks(watchdog)
         handler.postDelayed(watchdog, WATCHDOG_MS)
         targetHandler.removeCallbacks(targetWatcher)
@@ -325,6 +312,8 @@ class OverlayService : Service() {
                     handleView = null
                     handleParams = null
                     ensureHandle()
+                } else if (!handleDragging && handleParams?.let { it.y != placeHandleY(savedHandleY()) } == true) {
+                    relayoutHandle() // vị trí đang đè lên vùng bị che -> né lại
                 } else if (h.isAttachedToWindow && (panelView == null || panelHidden) && !panelAnimating && !handleDragging) {
                     if (h.alpha != 1f) h.alpha = 1f
                     if (h.visibility != View.VISIBLE) h.visibility = View.VISIBLE
@@ -505,10 +494,34 @@ class OverlayService : Service() {
     private val screenW get() = realBounds.width()
     private val screenH get() = realBounds.height()
 
+    /**
+     * Tất cả vùng bị che (tai thỏ / giọt nước / đục lỗ) theo hướng màn hình HIỆN TẠI.
+     * Gộp nhiều nguồn vì service không phải "visual context": WindowMetrics đôi khi trả rỗng
+     * hoặc trễ khi xoay, còn Display.getCutout() thì luôn đúng theo hướng hiện tại.
+     */
+    private fun cutoutRects(): List<Rect> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return emptyList()
+        val out = ArrayList<Rect>()
+        fun add(c: DisplayCutout?) { c?.boundingRects?.forEach { if (!it.isEmpty && out.none { o -> o == it }) out.add(Rect(it)) } }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching {
+                val dm = getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+                add(dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.cutout)
+            }
+            runCatching { add(wm.currentWindowMetrics.windowInsets.displayCutout) }
+        }
+        runCatching { add(handleView?.rootWindowInsets?.displayCutout) }
+        return out
+    }
+
     /** Thông tin tai thỏ / giọt nước / đục lỗ (null nếu máy không có). */
     private fun displayCutoutCompat(): DisplayCutout? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching {
+                val dm = getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+                dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.cutout?.let { return it }
+            }
             runCatching { wm.currentWindowMetrics.windowInsets.displayCutout?.let { return it } }
         }
         return handleView?.rootWindowInsets?.displayCutout
@@ -592,8 +605,7 @@ class OverlayService : Service() {
     private fun placeHandleY(desired: Int): Int {
         val maxY = (screenH - handleH).coerceAtLeast(0)
         var y = desired.coerceIn(0, maxY)
-        val rects = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
-            displayCutoutCompat()?.boundingRects.orEmpty() else emptyList()
+        val rects = cutoutRects()
         val pad = dp(6)
         repeat(2) {
             for (r in rects) {
@@ -641,8 +653,11 @@ class OverlayService : Service() {
         circles.relayoutAll()
         crosshair.ensure()
         stats.ensure()
+        // Hệ thống cập nhật cutout/kích thước trễ sau khi xoay -> đặt lại nhiều nhịp
         handler.removeCallbacks(rotationRelayout)
-        handler.postDelayed(rotationRelayout, 400L)
+        handler.postDelayed(rotationRelayout, 150L)
+        handler.postDelayed(rotationRelayout, 500L)
+        handler.postDelayed(rotationRelayout, 1200L)
     }
 
     private val rotationRelayout = Runnable {
@@ -759,6 +774,11 @@ class OverlayService : Service() {
             handleView = null
             handleParams = null
             return
+        }
+        // Cutout/insets đổi (xoay, gập máy...) -> đặt lại vị trí để né
+        handle.setOnApplyWindowInsetsListener { v, insets ->
+            v.post { if (!stopping && !closing) relayoutHandle() }
+            insets
         }
         // Sau khi gắn vào cửa sổ mới có thông tin cutout -> đặt lại vị trí cho chắc
         handle.post { relayoutHandle() }
@@ -1578,8 +1598,7 @@ class OverlayService : Service() {
         closing = true
         setWanted(this, false) // chủ động đóng -> không tự khôi phục
         handler.removeCallbacks(watchdog)
-        targetHandler.removeCallbacks(reconnectTick)
-        solidAnim?.cancel()
+            solidAnim?.cancel()
         editDimAnim?.cancel()
         promptLayer?.close()
         setMenuOpenAll(false)
@@ -1970,7 +1989,6 @@ class OverlayService : Service() {
         private const val STATUS_MS = 1500L
         private const val BREATH_MS = 1600L
         private const val BREATH_FAST_MS = 800L
-        private const val RECONNECT_MS = 1000L // nhịp gọi nối lại ADB (trước đây gộp trong watchdog 2000ms)
         private const val WATCHDOG_MS = 2000L
         private const val ATTACH_GRACE_MS = 1500L
 
