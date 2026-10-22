@@ -15,12 +15,16 @@ object BatteryExemption {
         return pm.isIgnoringBatteryOptimizations(context.packageName)
     }
 
-    /** Hộp thoại hệ thống "Cho phép ZynTap chạy nền?"; nếu máy không có thì mở danh sách tối ưu pin. */
-    fun requestIntent(context: Context): Intent? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
-        val direct = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}"))
-        if (direct.resolveActivity(context.packageManager) != null) return direct
-        val list = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-        return if (list.resolveActivity(context.packageManager) != null) list else null
+    /**
+     * Các intent thử lần lượt: hộp thoại "Cho phép chạy nền?", rồi danh sách tối ưu pin, rồi trang thông tin app.
+     * KHÔNG dùng resolveActivity: Android 11+ che các activity của Cài đặt nếu thiếu <queries>, nên nó trả về null sai.
+     */
+    fun requestIntents(context: Context): List<Intent> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return emptyList()
+        return listOf(
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}")),
+            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")),
+        )
     }
 }
