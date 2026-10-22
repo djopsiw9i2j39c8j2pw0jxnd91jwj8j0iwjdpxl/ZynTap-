@@ -14,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.zyntap.app.data.DebugLog
 import com.zyntap.app.overlay.CrosshairOverlay
+import com.zyntap.app.overlay.BatteryExemption
 import com.zyntap.app.overlay.OverlayPermission
 import com.zyntap.app.overlay.OverlayService
 import com.zyntap.app.overlay.UsageAccess
@@ -24,7 +25,7 @@ import com.zyntap.app.ui.ZynTapTheme
 class MainActivity : ComponentActivity() {
 
     /**
-     * Bước xin quyền: 0 = thông báo, 1 = hiển thị trên ứng dụng khác, 2 = truy cập dữ liệu sử dụng.
+     * Bước xin quyền: 0 = thông báo, 1 = hiển thị trên ứng dụng khác, 2 = truy cập dữ liệu sử dụng, 3 = bỏ tối ưu pin (không bị hệ thống kill khi chơi game).
      * Mỗi bước chỉ thử đúng 1 lần mỗi lần mở app, nên không bị hỏi lặp khi người dùng từ chối.
      */
     private var permissionStep = 0
@@ -62,7 +63,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestNextPermission() {
-        while (permissionStep < 4) {
+        while (permissionStep < 5) {
             val step = permissionStep++
             if (step == 0 &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -81,7 +82,14 @@ class MainActivity : ComponentActivity() {
                 overlayLauncher.launch(UsageAccess.settingsIntent(this))
                 return
             }
-            if (step == 3) offerQuickSettingsTile()
+            if (step == 3 && !BatteryExemption.granted(this)) {
+                // Không có quyền này, game nặng + chế độ tiết kiệm pin dễ khiến hệ thống kill menu nổi
+                for (i in BatteryExemption.requestIntents(this)) {
+                    if (runCatching { overlayLauncher.launch(i) }.isSuccess) return
+                }
+                DebugLog.w("Pin", "Không mở được màn hình bỏ tối ưu pin")
+            }
+            if (step == 4) offerQuickSettingsTile()
         }
     }
 
