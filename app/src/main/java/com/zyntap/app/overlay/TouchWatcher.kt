@@ -445,6 +445,7 @@ class TouchWatcher(
     private class ProxyLink(val stream: AdbStream) {
         private val out: OutputStream = stream.openOutputStream()
         @Volatile var injecting = false
+        @Volatile var closeAfter = 0L
         /** Helper đã báo READY (dù có bơm được hay không). */
         @Volatile var ready = false
         @Volatile var plannedClose = false
@@ -503,19 +504,25 @@ class TouchWatcher(
         if (job == null && stream == null) return
         setStage("đã dừng", log = false)
         if (current === this) current = null
-        job?.cancel()
-        job = null
+        val oldJob = job
         val s = stream
         val l = link
+        job = null
         stream = null
         link = null
-        if (l != null) {
-            l.plannedClose = true
-            // Closing has an independent deadline: send() may block behind a stuck heartbeat.
-            scope.launch { runCatching { l.send("QUIT") } }
+        l?.plannedClose = true
+        l?.closeAfter = SystemClock.elapsedRealtime() + 2300L
+        // Cancel the loop now so a fast QUIT cannot trigger an unwanted new helper.
+        // runProxy.finally honors closeAfter before closing the transport.
+        oldJob?.cancel()
+        scope.launch {
+            runCatching { l?.send("STOPALL"); l?.send("QUIT") }
         }
-        if (s != null) scope.launch { delay(700); runCatching { s.close() } }
-
+        scope.launch {
+            delay(2300) // <=1500ms physical release + 700ms writer cleanup + margin
+            runCatching { s?.close() }
+            DebugLog.i("Dọn dẹp", "Đã yêu cầu STOPALL/QUIT và đóng phiên helper; watchdog là chốt khi app bị kill")
+        }
     }
 
     private suspend fun loop() {
@@ -572,7 +579,11 @@ class TouchWatcher(
                     if (bailed) {
                         // ADB vẫn sống: hệ thống từ chối nhận cảm ứng bơm vào. Chạy lại dồn dập vô ích và làm cảm ứng chớp tắt.
                         DebugLog.w("Bơm", "Helper tự thoát vì hệ thống từ chối bơm cảm ứng (lần liên tiếp $injectBailStreak) — ADB vẫn nối, không phải mất mạng/ADB")
-                        setStage("Hệ thống từ chối bơm cảm ứng, chờ rồi thử lại", log = false)
+                        if (injectBailStreak == 1 || injectBailStreak == 3) {
+                            val detail = runText(manager, "logcat -d -t 160 -s InputDispatcher InputReader 2>&1 | tail -c 5000")
+                            DebugLog.w("Input hệ thống", detail.ifBlank { "Không lấy được log hệ thống; chưa biết lý do từ chối" })
+                        }
+                        setStage("Hệ thống từ chối bơm; đã nhả grab, chờ phục hồi có giãn nhịp", log = false)
                     } else if (ok) {
                         DebugLog.w("Bơm", "Helper đã dừng (mất ADB / bị đóng) -> chạy lại")
                         setStage("Helper dừng, chuẩn bị chạy lại", log = false)
@@ -661,10 +672,11 @@ class TouchWatcher(
     private suspend fun runProxy(manager: ZynAdbConnectionManager, dev: TouchDevice): Boolean = coroutineScope {
         if (!PATH_RE.matches(dev.path)) return@coroutineScope false
         val b = screen()
+        val boot = runCatching { android.provider.Settings.Global.getInt(app.contentResolver, android.provider.Settings.Global.BOOT_COUNT) }.getOrDefault(-1)
         val cmd = "exec:CLASSPATH='${app.applicationInfo.sourceDir}' exec app_process /system/bin " +
             "com.zyntap.app.shell.InputProxy dev=${dev.path} maxx=${dev.maxX} maxy=${dev.maxY} " +
             "maxp=${dev.maxPressure} maxmaj=${dev.maxMajor} w=${b.width()} h=${b.height()} rot=${rotation()} " +
-            "name=${URLEncoder.encode(dev.name, "UTF-8")}"
+            "name=${URLEncoder.encode(dev.name, "UTF-8")} boot=$boot"
         val s = openTimed(manager, cmd)
         stream = s
         val l = ProxyLink(s)
@@ -732,7 +744,8 @@ class TouchWatcher(
                                 if (lower.contains("inject hỏng liên tiếp")) { injectBailed = true; l.injecting = false }
                                 val bad = listOf("fail", "lỗi", "hỏng", "watchdog", "bad cmd", "read:", "inject:", "grab:", "dropped", "dựng lại")
                                     .any { lower.contains(it) }
-                                if (bad) DebugLog.w("Bơm", "Helper báo: $msg") // log thông tin thường: bỏ, không ghi
+                                if (bad) DebugLog.w("Bơm", "Helper báo: $msg")
+                                else if (msg.startsWith("RECOVERED:") || msg.startsWith("Journal")) DebugLog.i("Bơm", msg)
                             }
                             line.startsWith("FAIL") -> { DebugLog.e("Bơm", "Helper báo lỗi: ${line.trim()}"); break }
                             else -> if (unknownLines++ < 5) DebugLog.w("Bơm", "Helper nói: ${line.take(200)}")
@@ -750,9 +763,12 @@ class TouchWatcher(
             readyGuard.cancel()
             l.injecting = false
             if (link === l) link = null
-            runCatching { s.close() }
+            withContext(kotlinx.coroutines.NonCancellable) {
+                delay((l.closeAfter - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+                runCatching { s.close() }
+            }
             if (stream === s) stream = null
-            main.post { sink.onLost() }
+            main.post { if (current == null || current === this@TouchWatcher) sink.onLost() }
             lastEndInjectBail = injectBailed
             lastSessionHealthy = activeAt != 0L && !injectBailed &&
                 SystemClock.elapsedRealtime() - activeAt >= HEALTHY_LIVED_MS
