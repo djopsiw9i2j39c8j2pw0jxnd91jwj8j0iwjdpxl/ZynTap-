@@ -360,6 +360,16 @@ class TouchWatcher(
     /** Dò cảm ứng / mở luồng ADB bị treo quá lâu (adbd không trả lời). */
     private class AdbHangException(msg: String) : IOException(msg)
 
+    /**
+     * Lệnh đã MỞ được luồng (adbd còn trả lời) nhưng chạy lâu quá 8s. Khác [AdbHangException]: ADB vẫn sống,
+     * nên TUYỆT ĐỐI không ngắt kết nối (ngắt là mất phiên Gỡ lỗi Wi-Fi, phải tắt/bật lại bằng tay).
+     */
+    private class CmdSlowException(msg: String) : IOException(msg)
+
+    /** Số lần liên tiếp bước dọn helper cũ bị chậm; quá ngưỡng thì bỏ qua bước dọn để khỏi kẹt vòng lặp. */
+    @Volatile private var cleanSlowStreak = 0
+    @Volatile private var lastReconnectAt = 0L
+
     private fun setStage(text: String, log: Boolean = true) {
         if (stage == text) return
         stage = text
@@ -543,8 +553,18 @@ class TouchWatcher(
             try {
                 val manager = ZynAdbConnectionManager.get(app)
                 if (!manager.isConnected) {
-                    // Không tự nối lại: chờ người dùng kết nối ADB thủ công trong app
+                    // Tự nối lại (đã ghép nối + Wi-Fi + Gỡ lỗi Wi-Fi đang bật) để khỏi phải tắt/bật gỡ lỗi bằng tay
                     setStage("Chờ ADB nối để chạy helper bơm")
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastReconnectAt >= RECONNECT_GAP_MS &&
+                        com.zyntap.app.data.AdbLinkStore.isPaired(app) &&
+                        com.zyntap.app.data.WifiState.isConnected(app) &&
+                        com.zyntap.app.data.WifiAdbMonitor.isWifiAdbEnabled(app)
+                    ) {
+                        lastReconnectAt = now
+                        DebugLog.i("ADB", "ADB đang ngắt -> tự nối lại")
+                        com.zyntap.app.data.AdbSession.connect(app, attempts = 2)
+                    }
                     delay(RETRY_MS)
                     continue
                 }
@@ -821,11 +841,13 @@ class TouchWatcher(
         val opened = ArrayList<AdbStream>()
         val work = CompletableDeferred<String>()
         val abandoned = AtomicBoolean(false)
+        val streamOpened = AtomicBoolean(false)
         scope.launch {
             val sb = StringBuilder()
             try {
                 for (prefix in arrayOf("exec:", "shell:")) {
                     val s = try { manager.openStream(prefix + cmd) } catch (_: Exception) { continue }
+                    streamOpened.set(true)
                     val keep = synchronized(opened) {
                         if (abandoned.get()) false else { opened.add(s); true }
                     }
@@ -858,6 +880,7 @@ class TouchWatcher(
         if (r == null) {
             abandoned.set(true)
             closeAll(opened)
+            if (streamOpened.get()) throw CmdSlowException("lệnh \"${cmd.take(40)}\" chạy chậm quá ${CMD_TIMEOUT_MS / 1000}s (ADB vẫn sống)")
             throw AdbHangException("lệnh \"${cmd.take(40)}\" không xong sau ${CMD_TIMEOUT_MS / 1000}s")
         }
         return r
@@ -895,7 +918,20 @@ class TouchWatcher(
             for p in ${'$'}pids; do if is_helper "${'$'}p"; then echo ZYN_CLEAN_FAIL; exit 1; fi; done
             echo ZYN_CLEAN_DONE
         """.trimIndent()
-        val out = runText(manager, cmd)
+        val out = try {
+            runText(manager, cmd)
+        } catch (e: CmdSlowException) {
+            // ADB còn sống, chỉ là script dọn chạy chậm (helper cũ đang thoát). KHÔNG ngắt ADB.
+            cleanSlowStreak++
+            DebugLog.w("Bơm", "Dọn helper cũ chậm (lần $cleanSlowStreak): ${e.message}")
+            if (cleanSlowStreak >= 2) {
+                DebugLog.w("Bơm", "Bỏ qua bước dọn helper cũ, chạy helper mới luôn")
+                cleanSlowStreak = 0
+                return true
+            }
+            return false
+        }
+        cleanSlowStreak = 0
         val ok = out.lineSequence().any { it.trim() == "ZYN_CLEAN_DONE" }
         if (!ok) DebugLog.w("Bơm", "Dọn helper cũ không xác nhận, hoãn helper mới: ${out.take(120)}")
         return ok
@@ -937,6 +973,7 @@ class TouchWatcher(
         @Volatile var current: TouchWatcher? = null
 
         private const val RETRY_MS = 3_000L
+        private const val RECONNECT_GAP_MS = 6_000L
         private const val MAX_PROXY_FAILS = 3
         private const val FAST_RETRY_MS = 400L
         private const val INJECT_BAIL_MAX_MS = 30_000L
