@@ -24,18 +24,36 @@ object WifiState {
     private fun cm(context: Context) =
         context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
+    /**
+     * Mạng thật sự thuộc [transport] và CHỈ thuộc transport đó (không phải VPN, không lai 4G+Wi-Fi),
+     * để 4G/5G không bao giờ bị tính là Wi-Fi và ngược lại.
+     */
     @Suppress("DEPRECATION")
     private fun anyNetwork(context: Context, transport: Int, exclude: Network? = null): Boolean = try {
         val cm = cm(context)
+        val other = if (transport == NetworkCapabilities.TRANSPORT_WIFI)
+            NetworkCapabilities.TRANSPORT_CELLULAR else NetworkCapabilities.TRANSPORT_WIFI
         cm.allNetworks.any { n ->
-            n != exclude && cm.getNetworkCapabilities(n)?.hasTransport(transport) == true
+            if (n == exclude) return@any false
+            val c = cm.getNetworkCapabilities(n) ?: return@any false
+            c.hasTransport(transport) && !c.hasTransport(other) &&
+                !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                cm.getNetworkInfo(n)?.isConnected != false
         }
     } catch (t: Throwable) {
         false
     }
 
+    /** Công tắc Wi-Fi của máy đang bật (tắt hẳn Wi-Fi thì chắc chắn không có kết nối Wi-Fi). */
+    private fun wifiRadioOn(context: Context): Boolean = try {
+        (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager).isWifiEnabled
+    } catch (t: Throwable) {
+        true
+    }
+
     /** Đang nối vào một mạng Wi-Fi (không tính dữ liệu di động). */
-    fun isConnected(context: Context): Boolean = anyNetwork(context, NetworkCapabilities.TRANSPORT_WIFI)
+    fun isConnected(context: Context): Boolean =
+        wifiRadioOn(context) && anyNetwork(context, NetworkCapabilities.TRANSPORT_WIFI)
 
     /** Có dữ liệu di động (4G/5G) đang hoạt động. */
     fun hasMobile(context: Context): Boolean = anyNetwork(context, NetworkCapabilities.TRANSPORT_CELLULAR)
@@ -77,7 +95,7 @@ object WifiState {
     }
 
     private fun publish(context: Context, lost: Network? = null) {
-        val wifi = anyNetwork(context, NetworkCapabilities.TRANSPORT_WIFI, lost)
+        val wifi = wifiRadioOn(context) && anyNetwork(context, NetworkCapabilities.TRANSPORT_WIFI, lost)
         val mobile = anyNetwork(context, NetworkCapabilities.TRANSPORT_CELLULAR, lost)
         if (lastWifi == wifi && lastMobile == mobile) return
         val wifiChanged = lastWifi != wifi
