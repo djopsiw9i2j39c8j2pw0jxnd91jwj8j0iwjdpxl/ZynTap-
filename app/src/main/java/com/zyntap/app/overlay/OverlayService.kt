@@ -140,6 +140,7 @@ class OverlayService : Service() {
         DebugLog.i("Dịch vụ", "Menu nổi bắt đầu chạy")
         running = true
         WifiState.start(this)
+        com.zyntap.app.data.ConnectionWatcher.start(this)
         wm = OverlayWindowManager(getSystemService(Context.WINDOW_SERVICE) as WindowManager)
         // Dọn tâm ảo còn sót lại từ lần chạy trước (nếu lần đó bị tắt giữa chừng)
         runCatching { CrosshairOverlay.sweepOrphans() }
