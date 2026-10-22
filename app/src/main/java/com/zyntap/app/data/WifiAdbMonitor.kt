@@ -34,6 +34,14 @@ object WifiAdbMonitor {
     @Volatile
     var onChanged: ((enabled: Boolean, connectPort: Int?) -> Unit)? = null
 
+    private val listeners = java.util.concurrent.CopyOnWriteArraySet<(Boolean, Int?) -> Unit>()
+    fun addListener(l: (enabled: Boolean, connectPort: Int?) -> Unit) { listeners.add(l) }
+
+    private fun notifyAll(enabled: Boolean, port: Int?) {
+        onChanged?.let { runCatching { it(enabled, port) } }
+        listeners.forEach { runCatching { it(enabled, port) } }
+    }
+
     fun start(context: Context) {
         if (observer != null) return
         val appContext = context.applicationContext
@@ -47,10 +55,10 @@ object WifiAdbMonitor {
                         if (port != null && port > 0) {
                             AdbLinkStore.saveConnectPort(appContext, port)
                         }
-                        onChanged?.invoke(true, port)
+                        notifyAll(true, port)
                     }
                 } else {
-                    onChanged?.invoke(false, null)
+                    notifyAll(false, null)
                 }
             }
         }

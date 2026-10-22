@@ -18,15 +18,18 @@ object WifiState {
 
     private var callback: ConnectivityManager.NetworkCallback? = null
     private val listeners = CopyOnWriteArraySet<(Boolean) -> Unit>()
-    @Volatile private var last: Boolean? = null
+    @Volatile private var lastWifi: Boolean? = null
+    @Volatile private var lastMobile: Boolean? = null
 
     private fun cm(context: Context) =
         context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
     @Suppress("DEPRECATION")
-    private fun anyNetwork(context: Context, transport: Int): Boolean = try {
+    private fun anyNetwork(context: Context, transport: Int, exclude: Network? = null): Boolean = try {
         val cm = cm(context)
-        cm.allNetworks.any { n -> cm.getNetworkCapabilities(n)?.hasTransport(transport) == true }
+        cm.allNetworks.any { n ->
+            n != exclude && cm.getNetworkCapabilities(n)?.hasTransport(transport) == true
+        }
     } catch (t: Throwable) {
         false
     }
@@ -54,29 +57,39 @@ object WifiState {
             val app = context.applicationContext
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) = publish(app)
-                override fun onLost(network: Network) = publish(app)
+                // Lúc onLost, mạng vừa mất có thể còn nằm trong allNetworks -> loại ra khi tính
+                override fun onLost(network: Network) = publish(app, network)
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = publish(app)
             }
             val ok = runCatching {
                 cm(app).registerNetworkCallback(
-                    NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),
+                    NetworkRequest.Builder().build(), // mọi loại mạng: Wi-Fi lẫn 4G/5G
                     cb,
                 )
             }.onFailure { DebugLog.w("Wi-Fi", "Không theo dõi được trạng thái Wi-Fi", it) }.isSuccess
             if (ok) {
                 callback = cb
-                last = isConnected(app)
+                lastWifi = isConnected(app)
+                lastMobile = hasMobile(app)
                 DebugLog.i("Wi-Fi", describe(app))
             }
         }
     }
 
-    private fun publish(context: Context) {
-        val now = isConnected(context)
-        if (last == now) return
-        last = now
-        if (now) DebugLog.i("Wi-Fi", "Đã kết nối Wi-Fi")
-        else DebugLog.w("Wi-Fi", "Mất Wi-Fi — ${if (hasMobile(context)) "đang dùng dữ liệu di động, ADB không dây sẽ không nối được" else "không có mạng"}")
-        listeners.forEach { runCatching { it(now) } }
+    private fun publish(context: Context, lost: Network? = null) {
+        val wifi = anyNetwork(context, NetworkCapabilities.TRANSPORT_WIFI, lost)
+        val mobile = anyNetwork(context, NetworkCapabilities.TRANSPORT_CELLULAR, lost)
+        if (lastWifi == wifi && lastMobile == mobile) return
+        val wifiChanged = lastWifi != wifi
+        val mobileChanged = lastMobile != mobile
+        lastWifi = wifi
+        lastMobile = mobile
+        if (wifiChanged) {
+            if (wifi) DebugLog.i("Wi-Fi", "Đã kết nối Wi-Fi")
+            else DebugLog.w("Wi-Fi", "Mất Wi-Fi — ${if (mobile) "đang dùng dữ liệu di động, ADB không dây sẽ không nối được" else "không có mạng"}")
+        }
+        if (mobileChanged) DebugLog.i("Mạng", "Dữ liệu di động: ${if (mobile) "đang có" else "đã tắt/mất"}")
+        // Báo cho mọi nơi nghe khi Wi-Fi HOẶC dữ liệu di động đổi (người nghe tự đọc lại cả hai)
+        listeners.forEach { runCatching { it(wifi) } }
     }
 }
