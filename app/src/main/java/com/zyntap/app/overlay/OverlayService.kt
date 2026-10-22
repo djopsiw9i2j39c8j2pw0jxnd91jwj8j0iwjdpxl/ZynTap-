@@ -225,7 +225,20 @@ class OverlayService : Service() {
         return START_STICKY
     }
 
+    /** Vuốt ZynTap khỏi đa nhiệm không phải là "tắt": nếu người dùng vẫn muốn bật thì dựng lại ngay. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        if (!stopping && wanted(this)) {
+            DebugLog.w("Dịch vụ", "ZynTap bị vuốt khỏi đa nhiệm -> giữ menu nổi chạy")
+            runCatching { restoreIfWanted(applicationContext) }
+        }
+    }
+
     override fun onDestroy() {
+        if (!stopping && wanted(this)) {
+            DebugLog.w("Dịch vụ", "Dịch vụ bị hệ thống dừng khi người dùng vẫn đang bật -> xin dựng lại")
+            runCatching { restoreIfWanted(applicationContext) }
+        }
         shutdownOverlays()
         targetThread.quitSafely()
         running = false
