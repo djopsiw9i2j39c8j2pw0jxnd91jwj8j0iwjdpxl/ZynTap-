@@ -38,7 +38,12 @@ object WifiState {
             val c = cm.getNetworkCapabilities(n) ?: return@any false
             c.hasTransport(transport) && !c.hasTransport(other) &&
                 !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
-                cm.getNetworkInfo(n)?.isConnected != false
+                cm.getNetworkInfo(n)?.isConnected != false &&
+                // Nhiều máy giữ sẵn mạng di động chỉ để gọi/IMS/MMS dù đã TẮT dữ liệu: loại ra,
+                // chỉ tính mạng thật sự ra Internet được
+                (transport != NetworkCapabilities.TRANSPORT_CELLULAR ||
+                    (c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                        c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)))
         }
     } catch (t: Throwable) {
         false
