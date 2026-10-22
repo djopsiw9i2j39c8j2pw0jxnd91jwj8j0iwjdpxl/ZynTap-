@@ -3,8 +3,10 @@ package com.zyntap.app.data
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.SystemClock
 import io.github.muntashirakon.adb.AdbPairingRequiredException
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -20,7 +22,8 @@ import kotlinx.coroutines.withContext
  * Trước đây chỉ có đoạn "kiểm tra còn ghép nối không" rồi ngắt luôn, và lúc bấm nút main
  * thì không ai nối cả -> luôn báo "chưa kết nối". Giờ:
  *  - [connect] nối khi cần (có khoá, có thử lại) và GIỮ kết nối sống.
- *  - KHÔNG còn tự nối lại ở nền / khi bấm nút main; chỉ nối khi người dùng chủ động từ app.
+ *  - [ensureInBackground] được menu nổi gọi định kỳ để tự nối lại (sau khi cập nhật app,
+ *    bật lại gỡ lỗi Wi-Fi, đổi mạng...) mà không cần mở app / ghép nối lại.
  *  - Một lần nối lỗi thoáng qua KHÔNG còn làm app "quên" ghép nối.
  */
 object AdbSession {
@@ -34,7 +37,6 @@ object AdbSession {
 
     private val mutex = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
     /**
      * Đảm bảo đã có kết nối ADB. Gọi từ coroutine (tự chuyển sang IO).
      * @param attempts số lần thử; chỉ khi TẤT CẢ lần thử đều bị máy từ chối khoá mới trả [Link.PairingLost].
