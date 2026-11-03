@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- vòng tròn -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,3a9,9 0 1,0 0,18a9,9 0 1,0 0,-18zM12,5a7,7 0 1,1 0,14a7,7 0 1,1 0,-14z" />
+    <!-- gạch chéo -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M5.6,4.2L19.8,18.4L18.4,19.8L4.2,5.6z" />
+</vector>

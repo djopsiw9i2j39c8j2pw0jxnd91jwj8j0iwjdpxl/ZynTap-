@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="nuliz_bg">#FF050508</color>
+    <color name="ic_launcher_background">#FF000000</color>
+
+    <style name="Theme.NulizAds" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/nuliz_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

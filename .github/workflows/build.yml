@@ -1,0 +1,69 @@
+name: Build Nuliz Ads
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "Tên phiên bản (để trống = lấy từ version.properties)"
+        required: false
+      version_code:
+        description: "Số build (để trống = VERSION_CODE + số lần chạy)"
+        required: false
+      release:
+        description: "Đăng APK lên mục Releases"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      IN_NAME: ${{ inputs.version_name }}
+      IN_CODE: ${{ inputs.version_code }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Cập nhật blocklist mới nhất
+        run: bash scripts/update_blocklist.sh
+
+      - name: Xác định phiên bản
+        run: |
+          NAME="${IN_NAME:-$(grep '^VERSION_NAME=' version.properties | cut -d= -f2)}"
+          BASE="$(grep '^VERSION_CODE=' version.properties | cut -d= -f2)"
+          CODE="${IN_CODE:-$((BASE + GITHUB_RUN_NUMBER))}"
+          echo "VERSION_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$CODE" >> "$GITHUB_ENV"
+          echo "Phiên bản: $NAME (build $CODE)"
+
+      - name: Build APK đã ký
+        run: gradle :app:assembleRelease -PversionName="$VERSION_NAME" -PversionCode="$VERSION_CODE"
+
+      - name: Đặt tên APK
+        run: cp app/build/outputs/apk/release/app-release.apk "NulizAds-v${VERSION_NAME}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NulizAds-v${{ env.VERSION_NAME }}
+          path: NulizAds-v${{ env.VERSION_NAME }}.apk
+
+      - name: Đăng lên Releases
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${VERSION_NAME}" "NulizAds-v${VERSION_NAME}.apk" \
+            --title "Nuliz Ads v${VERSION_NAME}" --generate-notes
