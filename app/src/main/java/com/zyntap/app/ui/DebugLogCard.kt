@@ -44,7 +44,6 @@ import com.zyntap.app.data.ZynAdbConnectionManager
 import com.zyntap.app.overlay.OverlayPermission
 import com.zyntap.app.overlay.OverlayService
 import com.zyntap.app.overlay.TouchWatcher
-import com.zyntap.app.overlay.UsageAccess
 import kotlinx.coroutines.delay
 
 @Composable
@@ -222,6 +221,6 @@ private fun statusText(ctx: Context, vm: MainViewModel): String {
         append("Gỡ lỗi Wi-Fi bật: ${yn(vm.wifiAdbOn)} · Đã ghép nối: ${yn(vm.isPaired)} · ADB đang nối: ${yn(linked)}\n")
         append("Menu nổi đang chạy: ${yn(OverlayService.wanted(ctx))} · Helper bơm: ${if (w == null) "chưa chạy" else if (w.proxyReady) "sẵn sàng" else "chưa bơm được"}\n")
         append("Vòng helper: ${w?.stage ?: "chưa chạy"}\n")
-        append("Quyền vẽ đè: ${yn(OverlayPermission.granted(ctx))} · Truy cập dữ liệu sử dụng: ${yn(UsageAccess.granted(ctx))}")
+        append("Quyền vẽ đè: ${yn(OverlayPermission.granted(ctx))}")
     }
 }

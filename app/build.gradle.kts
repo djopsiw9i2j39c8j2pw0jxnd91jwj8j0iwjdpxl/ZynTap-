@@ -5,7 +5,7 @@ plugins {
 }
 
 val appVersionName: String = (project.findProperty("appVersion") as String?)?.trim().orEmpty()
-    .ifEmpty { "1.00.04" }
+    .ifEmpty { "1.00.36" }
 
 fun versionCodeFrom(name: String): Int {
     val p = name.split(".").map { it.filter(Char::isDigit).toIntOrNull() ?: 0 }
@@ -28,10 +28,13 @@ android {
     val signingStorePassword = providers.gradleProperty("zynStorePassword").orNull ?: System.getenv("ZYNTAP_STORE_PASSWORD")
     val signingKeyPassword = providers.gradleProperty("zynKeyPassword").orNull ?: System.getenv("ZYNTAP_KEY_PASSWORD")
     val signingAlias = System.getenv("ZYNTAP_KEY_ALIAS")?.takeIf { it.isNotBlank() } ?: "zyntap"
-    val hasReleaseKey = file("zyntap-release.jks").exists() && !signingStorePassword.isNullOrEmpty() && !signingKeyPassword.isNullOrEmpty()
+    val signingStore = file(System.getenv("ZYNTAP_KEYSTORE_PATH")?.takeIf { it.isNotBlank() } ?: "zyntap-release.jks")
+    val hasReleaseKey = signingStore.exists() && !signingStorePassword.isNullOrEmpty() && !signingKeyPassword.isNullOrEmpty()
+    val signingRequested = signingStore.exists() || !signingStorePassword.isNullOrEmpty() || !signingKeyPassword.isNullOrEmpty()
+    check(!signingRequested || hasReleaseKey) { "Release signing is incomplete: provide the same keystore and both passwords." }
     signingConfigs {
         if (hasReleaseKey) create("zyntap") {
-            storeFile = file("zyntap-release.jks")
+            storeFile = signingStore
             storePassword = signingStorePassword
             keyAlias = signingAlias
             keyPassword = signingKeyPassword
@@ -42,7 +45,7 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName(if (hasReleaseKey) "zyntap" else "debug")
+            signingConfig = if (hasReleaseKey) signingConfigs.getByName("zyntap") else null
         }
         debug {
             signingConfig = signingConfigs.getByName(if (hasReleaseKey) "zyntap" else "debug")

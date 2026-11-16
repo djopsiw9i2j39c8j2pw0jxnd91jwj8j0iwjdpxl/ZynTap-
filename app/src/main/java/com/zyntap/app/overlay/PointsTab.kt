@@ -31,6 +31,8 @@ class PointsTab(
     private val keyboard: (Boolean) -> Unit,
     private val stopRuns: () -> Unit,
 ) {
+    @Suppress("DEPRECATION")
+    private fun rotation() = (ctx.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager).defaultDisplay.rotation
     private val d = UiScale.density(ctx.resources)
     private fun dp(n: Int) = (n * d).toInt()
     private val fg = 0xFFE8EEFA.toInt()
@@ -120,7 +122,15 @@ class PointsTab(
         editor.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                if (!loading) { selected()?.let { it.pointScript = s.toString(); repo.save() }; validate() }
+                if (!loading) {
+                    selected()?.let {
+                        val frame = bounds()
+                        it.pointScript = s.toString()
+                        it.pointWidth = frame.width(); it.pointHeight = frame.height(); it.pointRotation = rotation()
+                        repo.save()
+                    }
+                    validate()
+                }
             }
             override fun afterTextChanged(s: Editable?) {}
         })
@@ -276,7 +286,8 @@ class PointsTab(
     private fun select(id: Int?) {
         picker.close(); selectedId = id; lastInput = null
         loading = true
-        editor.setText(selected()?.pointScript.orEmpty())
+        val frame = bounds()
+        editor.setText(selected()?.textFor(frame.width(), frame.height(), rotation()).orEmpty())
         xField.setText(""); yField.setText(""); delayField.setText("")
         multiXField.setText(""); multiYField.setText("")
         loading = false

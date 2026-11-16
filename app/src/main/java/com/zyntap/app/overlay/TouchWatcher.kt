@@ -394,7 +394,11 @@ class TouchWatcher(
         val l = link ?: return false
         if (!l.injecting) return false
         try {
-            withContext(Dispatchers.IO) { l.send("RUN $id ${if (repeat) 1 else 0} $holdMs $gapMs $ops") }
+            val frame = screen()
+            val rot = rotation()
+            withContext(Dispatchers.IO) {
+                l.send("ROT $rot ${frame.width()} ${frame.height()}\nRUN $id ${if (repeat) 1 else 0} $holdMs $gapMs $ops")
+            }
         } catch (e: IOException) {
             DebugLog.w("Bơm", "Gửi kịch bản cho helper lỗi, bỏ lần chạy này", e)
             l.injecting = false

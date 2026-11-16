@@ -80,3 +80,48 @@ object PointScriptParser {
         return PointScript(steps, errors)
     }
 }
+
+/** Pixel coordinates are bound to the display frame in which they were authored. */
+object PointCoordinates {
+    fun map(x: Int, y: Int, fromWidth: Int, fromHeight: Int, fromRotation: Int,
+            width: Int, height: Int, rotation: Int): Pair<Int, Int> {
+        require(fromWidth > 0 && fromHeight > 0 && width > 0 && height > 0)
+        val nx = x.toDouble() / (fromWidth - 1).coerceAtLeast(1)
+        val ny = y.toDouble() / (fromHeight - 1).coerceAtLeast(1)
+        val (fx, fy) = when ((rotation - fromRotation + 4) % 4) {
+            1 -> ny to (1.0 - nx)
+            2 -> (1.0 - nx) to (1.0 - ny)
+            3 -> (1.0 - ny) to nx
+            else -> nx to ny
+        }
+        return kotlin.math.round(fx * (width - 1)).toInt().coerceIn(0, width - 1) to
+            kotlin.math.round(fy * (height - 1)).toInt().coerceIn(0, height - 1)
+    }
+
+    fun transform(script: PointScript, fromWidth: Int, fromHeight: Int, fromRotation: Int,
+                  width: Int, height: Int, rotation: Int): PointScript {
+        fun point(x: Int, y: Int) = map(x, y, fromWidth, fromHeight, fromRotation, width, height, rotation)
+        return script.copy(steps = script.steps.map { step ->
+            when (step) {
+                is PointStep.Tap -> point(step.x, step.y).let { PointStep.Tap(it.first, it.second) }
+                is PointStep.Multi -> PointStep.Multi(step.points.map { point(it.first, it.second) })
+                is PointStep.Wait -> step
+            }
+        })
+    }
+
+    /** Keep comments, spacing and invalid lines intact while showing the new display frame. */
+    fun reframeText(text: String, fromWidth: Int, fromHeight: Int, fromRotation: Int,
+                    width: Int, height: Int, rotation: Int): String {
+        val pattern = Regex("^(\\s*(?:(?:click|multi(?:click)?)\\s*:?\\s*)?)([0-9]+)\\s*,\\s*([0-9]+)(\\s*)$", RegexOption.IGNORE_CASE)
+        return text.lineSequence().joinToString("\n") { line ->
+            val m = pattern.matchEntire(line)
+            val x = m?.groupValues?.get(2)?.toIntOrNull()
+            val y = m?.groupValues?.get(3)?.toIntOrNull()
+            if (m == null || x == null || y == null || x !in 0 until fromWidth || y !in 0 until fromHeight) line
+            else map(x, y, fromWidth, fromHeight, fromRotation, width, height, rotation).let { (px, py) ->
+                "${m.groupValues[1]}$px, $py${m.groupValues[4]}"
+            }
+        }
+    }
+}

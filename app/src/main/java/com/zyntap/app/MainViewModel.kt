@@ -10,8 +10,6 @@ import androidx.lifecycle.viewModelScope
 import com.zyntap.app.data.AdbLinkStore
 import com.zyntap.app.data.AdbPairing
 import com.zyntap.app.data.AdbSession
-import com.zyntap.app.data.AppEntry
-import com.zyntap.app.data.AppRepository
 import com.zyntap.app.data.PairState
 import com.zyntap.app.data.PendingAdbPairing
 import com.zyntap.app.data.ConnectionWatcher
@@ -20,41 +18,24 @@ import com.zyntap.app.data.WifiAdbPairing
 import com.zyntap.app.data.WifiState
 import com.zyntap.app.overlay.OverlayPermission
 import com.zyntap.app.overlay.OverlayService
-import com.zyntap.app.overlay.UsageAccess
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 enum class Screen { Home, Pair }
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
-    var settingsOpen by mutableStateOf(false)
     var debugEnabled by mutableStateOf(com.zyntap.app.data.DebugLog.run { init(app); enabled })
         private set
     fun setDebugLogging(value: Boolean) {
         com.zyntap.app.data.DebugLog.setEnabled(value)
         debugEnabled = value
     }
-    private val repo = AppRepository(app)
     private val pairing: AdbPairing =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) WifiAdbPairing(app) else PendingAdbPairing()
 
     var screen by mutableStateOf(Screen.Home)
         private set
-    var editMode by mutableStateOf(false)
-        private set
-    var pinned by mutableStateOf<List<AppEntry>>(emptyList())
-        private set
-
-    var pickerOpen by mutableStateOf(false)
-        private set
-    var allApps by mutableStateOf<List<AppEntry>>(emptyList())
-        private set
-    var loadingApps by mutableStateOf(false)
-        private set
-
     var code by mutableStateOf("")
         private set
     var pairState by mutableStateOf<PairState>(PairState.Idle)
@@ -98,12 +79,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    var overlayEnabled by mutableStateOf(OverlayService.wanted(app))
+        private set
+    private val overlayPrefs = app.getSharedPreferences("zyntap_overlay", Application.MODE_PRIVATE)
+    private val overlayListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        viewModelScope.launch { overlayEnabled = OverlayService.wanted(getApplication<Application>()) }
+    }
+
     init {
-        viewModelScope.launch {
-            pinned = withContext(Dispatchers.Default) {
-                repo.loadPinned().mapNotNull { repo.resolve(it) }
-            }
-        }
+        overlayPrefs.registerOnSharedPreferenceChangeListener(overlayListener)
 
         WifiAdbMonitor.addListener(adbListener)
         WifiAdbMonitor.start(app)
@@ -117,6 +101,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        overlayPrefs.unregisterOnSharedPreferenceChangeListener(overlayListener)
         WifiState.removeListener(wifiListener)
         WifiAdbMonitor.removeListener(adbListener)
         super.onCleared()
@@ -150,10 +135,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshOverlayPermission() {
         overlayGranted = OverlayPermission.granted(getApplication<Application>())
+        overlayEnabled = OverlayService.wanted(getApplication<Application>())
     }
 
     fun openActivate() {
-        editMode = false
         screen = Screen.Pair
         
         if (!isActive && !PairNotifier.showEnterCode(getApplication())) {
@@ -162,67 +147,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun back() {
-        when {
-            pickerOpen -> pickerOpen = false
-            screen == Screen.Pair -> screen = Screen.Home
-            editMode -> editMode = false
-        }
+        screen = Screen.Home
     }
 
-    fun toggleEditMode() {
-        editMode = !editMode
-    }
-
-    fun openPicker() {
-        pickerOpen = true
-        if (allApps.isEmpty()) {
-            viewModelScope.launch {
-                loadingApps = true
-                allApps = withContext(Dispatchers.Default) { repo.launchable() }
-                loadingApps = false
-            }
-        }
-    }
-
-    fun closePicker() {
-        pickerOpen = false
-    }
-
-    fun isPinned(packageName: String): Boolean = pinned.any { it.packageName == packageName }
-
-    fun toggle(entry: AppEntry) {
-        if (isPinned(entry.packageName)) remove(entry.packageName) else add(entry)
-    }
-
-    private fun add(entry: AppEntry) {
-        pinned = pinned + entry
-        repo.savePinned(pinned.map { it.packageName })
-    }
-
-    fun remove(packageName: String) {
-        pinned = pinned.filterNot { it.packageName == packageName }
-        repo.savePinned(pinned.map { it.packageName })
-    }
-
-    fun launchApp(entry: AppEntry) {
-        val ctx = getApplication<Application>()
-        
-        if (!OverlayPermission.granted(ctx)) {
-            show("Cần cấp quyền hiển thị trên ứng dụng khác để mở ${entry.label}")
-            OverlayPermission.openSettings(ctx)
+    fun changeOverlayEnabled(value: Boolean) {
+        val app = getApplication<Application>()
+        if (value && !OverlayPermission.granted(app)) {
+            show("Cấp quyền hiển thị trên ứng dụng khác rồi bật UI nổi.")
+            requestOverlayPermission()
             return
         }
-        if (!UsageAccess.granted(ctx)) {
-            show("Cần bật Truy cập dữ liệu sử dụng cho ZynTap để mở ${entry.label}")
-            UsageAccess.openSettings(ctx)
-            return
-        }
-        if (!repo.launch(entry.packageName)) {
-            show("Không mở được ${entry.label}")
-            return
-        }
-        
-        OverlayService.start(ctx, entry.packageName)
+        if (!OverlayService.setEnabled(app, value)) show("Không đổi được trạng thái UI nổi. Hãy thử lại.")
+        overlayEnabled = OverlayService.wanted(app)
     }
 
     fun requestOverlayPermission() {

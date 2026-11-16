@@ -9,6 +9,7 @@ import kotlinx.coroutines.*
 class PointRunner(
     private val context: Context,
     private val bounds: () -> Rect,
+    private val rotation: () -> Int,
     private val targetBlocked: (Int, Int) -> Boolean,
     private val report: (String) -> Unit,
 ) {
@@ -74,7 +75,8 @@ class PointRunner(
         
         if (runs[button.id]?.job?.isActive == true) return false
         val screen = bounds()
-        val script = PointScriptParser.parse(button.pointScript, screen.width(), screen.height())
+        val frameRotation = rotation()
+        val script = button.scriptFor(screen.width(), screen.height(), frameRotation)
         if (!script.valid) {
             message(script.errors.firstOrNull() ?: "${button.code}: chưa có điểm nhấn ở tab 2")
             return false
@@ -97,7 +99,7 @@ class PointRunner(
                     return@launch
                 }
                 ensureActive()
-                if (bounds() != screen) error("Màn hình đã đổi kích thước. Chọn lại tọa độ.")
+                if (bounds() != screen || rotation() != frameRotation) error("Màn hình đang xoay. Nhấn lại khi màn hình ổn định.")
                 sendScript(button.id, repeat, holdMs, gapMs, encode(script))
             } catch (_: CancellationException) {
                 

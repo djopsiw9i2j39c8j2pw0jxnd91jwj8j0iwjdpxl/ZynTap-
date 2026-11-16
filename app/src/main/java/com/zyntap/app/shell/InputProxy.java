@@ -285,11 +285,17 @@ public final class InputProxy {
             switch (t[0]) {
                 case "ROT":
                     synchronized (LOCK) {
-                        rot = Integer.parseInt(t[1]) & 3;
-                        scrW = Math.max(1, Integer.parseInt(t[2]));
-                        scrH = Math.max(1, Integer.parseInt(t[3]));
-                        stopAllTaps(); 
-                        sync(); 
+                        int nextRot = Integer.parseInt(t[1]) & 3;
+                        int nextW = Math.max(1, Integer.parseInt(t[2]));
+                        int nextH = Math.max(1, Integer.parseInt(t[3]));
+                        // RUN sends its frame atomically first. An unchanged frame must not cancel other runs.
+                        if (rot != nextRot || scrW != nextW || scrH != nextH) {
+                            stopAllTaps();
+                            rot = nextRot;
+                            scrW = nextW;
+                            scrH = nextH;
+                            sync();
+                        }
                     }
                     break;
                 case "ZONE": {

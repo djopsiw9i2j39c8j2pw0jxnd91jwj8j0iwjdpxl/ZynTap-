@@ -18,6 +18,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -53,9 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zyntap.app.BuildConfig
 import com.zyntap.app.MainViewModel
-import com.zyntap.app.data.AppEntry
 
-private const val COLUMNS = 4
 
 @Composable
 fun HomeScreen(vm: MainViewModel) {
@@ -79,7 +78,7 @@ fun HomeScreen(vm: MainViewModel) {
             Spacer(Modifier.height(14.dp))
             ActivateButton(onClick = vm::openActivate)
             Spacer(Modifier.height(18.dp))
-            AppsCard(vm)
+            OverlayControlCard(vm)
             Spacer(Modifier.height(18.dp))
             if (vm.debugEnabled) DebugLogCard(vm)
         }
@@ -233,133 +232,54 @@ private fun ActivateButton(onClick: () -> Unit) {
 }
 
 @Composable
-private fun AppsCard(vm: MainViewModel) {
-    val shape = RoundedCornerShape(22.dp)
+private fun OverlayControlCard(vm: MainViewModel) {
+    val on = vm.overlayEnabled
+    val shape = RoundedCornerShape(24.dp)
+    val outline by animateColorAsState(if (on) Zyn.Cyan.copy(alpha = 0.60f) else Zyn.Border, tween(220), label = "overlay-outline")
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(Zyn.Surface)
-            .border(1.dp, Zyn.Border, shape)
-            .animateContentSize()
-            .padding(18.dp),
+        Modifier.fillMaxWidth().clip(shape)
+            .background(Brush.linearGradient(listOf(if (on) Color(0xFF102B46) else Zyn.Surface, Zyn.Surface)))
+            .border(1.dp, outline, shape)
+            .padding(20.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("KHÔNG GIAN ĐIỀU KHIỂN", color = Zyn.Cyan, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+        Spacer(Modifier.height(14.dp))
+        Row(
+            Modifier.fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .toggleable(value = on, role = androidx.compose.ui.semantics.Role.Switch, onValueChange = vm::changeOverlayEnabled)
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(52.dp).background(Zyn.Blue.copy(alpha = 0.16f), RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+                Image(painter = androidx.compose.ui.res.painterResource(com.zyntap.app.R.drawable.logo_transparent), contentDescription = null, modifier = Modifier.size(36.dp))
+            }
+            Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text("Ứng dụng", color = Zyn.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                Text(
-                    text = if (vm.editMode) "Ấn dấu trừ để bỏ app, dấu cộng để thêm" else "Ấn vào app để mở",
-                    color = Zyn.TextDim,
-                    fontSize = 13.sp,
-                )
+                Text("UI nổi", color = Zyn.Text, fontWeight = FontWeight.Bold, fontSize = 21.sp)
+                Text(if (on) "Đang hiển thị" else "Đã ẩn hoàn toàn", color = if (on) Zyn.Cyan else Zyn.TextDim, fontSize = 12.sp)
             }
-            RoundIconButton(
-                icon = if (vm.editMode) Lucide.Plus else Lucide.Pencil,
-                description = if (vm.editMode) "Thêm ứng dụng" else "Chỉnh sửa danh sách",
-                onClick = { if (vm.editMode) vm.openPicker() else vm.toggleEditMode() },
-                size = 42.dp,
-                accent = vm.editMode,
+            androidx.compose.material3.Switch(
+                checked = on, onCheckedChange = null,
+                colors = androidx.compose.material3.SwitchDefaults.colors(
+                    checkedThumbColor = Color.White, checkedTrackColor = Zyn.Blue,
+                    checkedBorderColor = Zyn.Cyan.copy(alpha = 0.55f),
+                    uncheckedThumbColor = Zyn.TextDim, uncheckedTrackColor = Zyn.SurfaceHi,
+                    uncheckedBorderColor = Zyn.Border,
+                ),
             )
         }
-        Spacer(Modifier.height(16.dp))
-
-        if (vm.pinned.isEmpty()) {
-            EmptyApps(editMode = vm.editMode)
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                vm.pinned.chunked(COLUMNS).forEach { row ->
-                    Row(Modifier.fillMaxWidth()) {
-                        row.forEach { app ->
-                            AppTile(
-                                app = app,
-                                editMode = vm.editMode,
-                                onOpen = { vm.launchApp(app) },
-                                onRemove = { vm.remove(app.packageName) },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                        repeat(COLUMNS - row.size) { Spacer(Modifier.weight(1f)) }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun EmptyApps(editMode: Boolean) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 14.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text("Chưa có ứng dụng nào", color = Zyn.Text, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(14.dp))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Zyn.Border))
+        Spacer(Modifier.height(14.dp))
         Text(
-            text = if (editMode) "Ấn dấu + để chọn app muốn thêm" else "Ấn nút bút chì rồi dấu + để thêm app",
-            color = Zyn.TextDim,
-            fontSize = 13.sp,
-            textAlign = TextAlign.Center,
+            if (on) "Chuyển app thoải mái — UI nổi vẫn giữ nguyên. Dùng tay nắm ở cạnh màn hình để mở menu."
+            else "Bật một lần để hiện UI trên các ứng dụng. Không chọn app, không theo dõi thoát app.",
+            color = Zyn.TextDim, fontSize = 13.sp, lineHeight = 20.sp,
         )
-    }
-}
-
-@Composable
-private fun AppTile(
-    app: AppEntry,
-    editMode: Boolean,
-    onOpen: () -> Unit,
-    onRemove: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val badge by animateFloatAsState(if (editMode) 1f else 0f, label = "minus-badge")
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .clickable(enabled = !editMode, onClick = onOpen)
-            .padding(vertical = 4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Box(Modifier.size(56.dp)) {
-            Image(
-                bitmap = app.icon,
-                contentDescription = app.label,
-                modifier = Modifier
-                    .size(52.dp)
-                    .align(Alignment.Center)
-                    .clip(RoundedCornerShape(14.dp)),
-            )
-            if (badge > 0.01f) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .offset(x = 6.dp, y = (-4).dp)
-                        .graphicsLayer {
-                            scaleX = badge
-                            scaleY = badge
-                            alpha = badge
-                        }
-                        .size(24.dp)
-                        .background(Zyn.Danger, CircleShape)
-                        .border(2.dp, Zyn.Surface, CircleShape)
-                        .clip(CircleShape)
-                        .clickable(enabled = editMode, onClick = onRemove),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Lucide.Minus, contentDescription = "Bỏ ${app.label}", tint = Color.White, modifier = Modifier.size(14.dp))
-                }
-            }
+        if (on && !vm.isActive) {
+            Spacer(Modifier.height(10.dp))
+            Text("UI đã bật. Ghép nối ADB để dùng các thao tác click.", color = Zyn.Warn, fontSize = 12.sp)
         }
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = app.label,
-            color = Zyn.TextDim,
-            fontSize = 11.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(horizontal = 2.dp),
-        )
     }
 }

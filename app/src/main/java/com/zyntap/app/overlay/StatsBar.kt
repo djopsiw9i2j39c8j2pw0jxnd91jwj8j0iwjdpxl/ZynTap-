@@ -27,17 +27,13 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import com.zyntap.app.data.DebugLog
-import com.zyntap.app.data.ZynAdbConnectionManager
-import io.github.muntashirakon.adb.AdbStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 enum class StatKind(val key: String, val title: String, val desc: String) {
-    FPS("fps", "FPS", "FPS lớp game qua ADB, lấy mẫu mỗi 3 giây; hiện -- nếu ROM không cung cấp số liệu."),
+    FPS("fps", "FPS", "Chế độ thủ công không theo dõi game; FPS theo app không khả dụng, hiện --."),
     BATTERY("battery", "Pin", "Phần trăm pin; đổi màu khi đang sạc hoặc pin yếu."),
     TIME("time", "Giờ", "Giờ hiện tại của máy."),
     NET("net", "Dữ liệu mạng", "Tốc độ tải xuống / tải lên theo thời gian thực."),
@@ -349,7 +345,6 @@ class StatsBarOverlay(
     private val settings: StatsSettings,
     private val screenBounds: () -> Rect,
     private val newParams: (width: Int, height: Int, flags: Int) -> WindowManager.LayoutParams,
-    private val targetPkg: () -> String?,
 ) {
      
     var onDrag: ((Boolean) -> Unit)? = null
@@ -411,7 +406,6 @@ class StatsBarOverlay(
             lastRx = rx; lastTx = tx; lastNetAt = now
         }
         val bat = if (settings.isOn(StatKind.BATTERY)) readBattery() else (-1 to false)
-        if (settings.isOn(StatKind.FPS)) requestFpsSample()
         val time = if (settings.isOn(StatKind.TIME)) {
             val pattern = if (android.text.format.DateFormat.is24HourFormat(ctx)) "HH:mm" else "h:mm a"
             val locale = Locale.getDefault()
@@ -422,11 +416,9 @@ class StatsBarOverlay(
             }
             timeFormatter!!.format(Date())
         } else ""
-        val nowForFps = SystemClock.elapsedRealtime()
-        val measuredGameFps = fpsValue.takeIf { it >= 0 && nowForFps - fpsUpdatedAt < 8000L }
         val snap = StatSnapshot(
             
-            fps = if (settings.isOn(StatKind.FPS)) (measuredGameFps ?: -1) else -1,
+            fps = -1, // No target application is observed or sampled in manual mode.
             batteryPct = bat.first, charging = bat.second,
             time = time, rxBps = rxBps, txBps = txBps,
         )
@@ -445,88 +437,6 @@ class StatsBarOverlay(
     internal fun removePreview(v: StatsBarView) {
         previews.remove(v)
         stopTickerIfIdle()
-    }
-
-    @Volatile private var fpsValue = -1
-    @Volatile private var fpsUpdatedAt = 0L
-    private val fpsSampling = AtomicBoolean(false)
-    private val fpsExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "ZynTap-FPS").apply { isDaemon = true } }
-    @Volatile private var activeFpsStream: AdbStream? = null
-    private var lastFpsReqAt = 0L
-    private var cachedLayer: String? = null
-    private var cachedLayerPkg: String? = null
-    private var cachedLayerAt = 0L
-
-    private fun requestFpsSample() {
-        if (closed) return
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastFpsReqAt < FPS_SAMPLE_GAP_MS || !fpsSampling.compareAndSet(false, true)) return
-        val pkg = targetPkg()?.takeIf { PKG_RE.matches(it) }
-        if (pkg == null) { fpsSampling.set(false); return }
-        lastFpsReqAt = now
-        fpsExecutor.execute {
-            try {
-                if (closed) return@execute
-                val manager = ZynAdbConnectionManager.get(ctx.applicationContext)
-                val value = if (manager.isConnected) readLatencyFps(manager, pkg) else -1
-                if (!closed) {
-                    fpsValue = value
-                    fpsUpdatedAt = if (value >= 0) SystemClock.elapsedRealtime() else 0L
-                }
-            } catch (t: Throwable) {
-                fpsValue = -1
-                DebugLog.w("FPS", "Không đọc được FPS game", t)
-            } finally { fpsSampling.set(false) }
-        }
-    }
-
-    private fun readLatencyFps(manager: ZynAdbConnectionManager, pkg: String): Int {
-        val now = SystemClock.elapsedRealtime()
-        if (cachedLayerPkg != pkg || now - cachedLayerAt >= 30000L) {
-            val list = runAdbText(manager, "dumpsys SurfaceFlinger --list 2>/dev/null", 120_000)
-            cachedLayer = list.lineSequence().map { it.trim() }
-                .filter { it.contains(pkg) && !it.contains("Background", true) && !it.contains("ZynTap", true) }
-                .maxByOrNull { if (it.contains("SurfaceView", true)) 2 else if (it.contains("BLAST", true)) 1 else 0 }
-            cachedLayerPkg = pkg
-            cachedLayerAt = now
-        }
-        val layer = cachedLayer ?: return -1
-        val safe = layer.replace("'", "'\\''")
-        val text = runAdbText(manager, "dumpsys SurfaceFlinger --latency '$safe'", 24000)
-        val times = text.lineSequence().drop(1).mapNotNull {
-            it.trim().split(WS_RE).getOrNull(1)?.toLongOrNull()?.takeIf { n -> n > 0L && n != Long.MAX_VALUE }
-        }.distinct().sorted().toList()
-        val newest = times.lastOrNull()
-        if (newest == null || System.nanoTime() - newest !in 0L..5_000_000_000L) {
-            cachedLayer = null
-            cachedLayerAt = now
-            return -1
-        }
-        return FrameRateMath.calculate(times, newest)
-    }
-
-    private fun runAdbText(manager: ZynAdbConnectionManager, command: String, maxChars: Int = 200_000): String {
-        val stream = manager.openStream("shell:$command")
-        activeFpsStream = stream
-        val timeout = Runnable { runCatching { stream.close() } }
-        main.postDelayed(timeout, 1500L)
-        return try {
-            if (closed) return ""
-            stream.openInputStream().bufferedReader().use { reader ->
-                val out = StringBuilder()
-                val buf = CharArray(8192)
-                while (out.length < maxChars) {
-                    val n = reader.read(buf)
-                    if (n < 0) break
-                    out.append(buf, 0, minOf(n, maxChars - out.length))
-                }
-                out.toString()
-            }
-        } finally {
-            main.removeCallbacks(timeout)
-            activeFpsStream = null
-            runCatching { stream.close() }
-        }
     }
 
     private fun flagsFor(drag: Boolean): Int {
@@ -712,10 +622,7 @@ class StatsBarOverlay(
         main.removeCallbacksAndMessages(null)
         ticking = false
         previews.clear()
-        activeFpsStream?.let { stream -> Thread({ runCatching { stream.close() } }, "ZynTap-FPS-close").apply { isDaemon = true }.start() }
-        activeFpsStream = null
         onDrag = null
-        fpsExecutor.shutdown() 
     }
 
     fun state(): String {
@@ -726,13 +633,10 @@ class StatsBarOverlay(
             v.isAttachedToWindow -> "đang hiện"
             else -> "cửa sổ chưa gắn"
         }
-        return "tổng=${settings.enabled} · bật: ${if (on.isEmpty()) "không" else on} · $w · fps=$fpsValue (SurfaceFlinger)"
+        return "tổng=${settings.enabled} · bật: ${if (on.isEmpty()) "không" else on} · $w · fps=-- (không theo dõi app)"
     }
 
     companion object {
-        private val PKG_RE = Regex("^[A-Za-z0-9_.]+$")
-        private val WS_RE = Regex("\\s+")
-        private const val FPS_SAMPLE_GAP_MS = 3000L
 
         private val live = java.util.Collections.synchronizedList(ArrayList<Pair<WindowManager, View>>())
 

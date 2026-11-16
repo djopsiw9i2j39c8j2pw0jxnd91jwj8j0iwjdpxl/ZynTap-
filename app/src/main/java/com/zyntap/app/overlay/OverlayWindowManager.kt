@@ -13,6 +13,7 @@ import java.util.IdentityHashMap
 internal class OverlayWindowManager(
     private val delegate: WindowManager,
     private val main: Handler = Handler(Looper.getMainLooper()),
+    private val canRecover: () -> Boolean = { true },
 ) : WindowManager by delegate {
     private val windows = Collections.newSetFromMap(IdentityHashMap<View, Boolean>())
     private class Desired(var params: ViewGroup.LayoutParams, var retryAt: Long) {
@@ -89,7 +90,7 @@ internal class OverlayWindowManager(
     fun owns(view: View): Boolean = !closed && desired.containsKey(view)
 
     fun recoverDetached() {
-        if (closed) return
+        if (closed || !canRecover()) return
         val now = SystemClock.uptimeMillis()
         for ((view, record) in desired.entries.toList()) {
             if (closed || desired[view] !== record) continue

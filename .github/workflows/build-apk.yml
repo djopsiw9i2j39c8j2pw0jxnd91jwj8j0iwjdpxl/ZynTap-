@@ -30,11 +30,18 @@ jobs:
       - name: Cài Gradle (có cache)
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Restore optional release signing key
+      - name: Restore stable release signing key
+        id: signing
         env:
           KEYSTORE_BASE64: ${{ secrets.ZYNTAP_KEYSTORE_BASE64 }}
         run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then printf '%s' "$KEYSTORE_BASE64" | base64 --decode > app/zyntap-release.jks; fi
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > app/zyntap-release.jks
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No persistent signing key configured. This run produces an UNSIGNED APK, not an installable update. Set the ZYNTAP signing secrets from your private signing kit."
+          fi
 
       - name: Xác định phiên bản
         id: ver
@@ -64,17 +71,21 @@ jobs:
       - name: Đổi tên file APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk "dist/ZynTap-${{ steps.ver.outputs.version }}.apk"
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            cp app/build/outputs/apk/release/app-release.apk "dist/ZynTap-${{ steps.ver.outputs.version }}.apk"
+          else
+            cp app/build/outputs/apk/release/app-release-unsigned.apk "dist/ZynTap-${{ steps.ver.outputs.version }}-UNSIGNED.apk"
+          fi
 
       - name: Tải APK lên (tab Actions → Artifacts)
         uses: actions/upload-artifact@v4
         with:
           name: ZynTap-${{ steps.ver.outputs.version }}
-          path: dist/ZynTap-${{ steps.ver.outputs.version }}.apk
+          path: dist/*.apk
           if-no-files-found: error
 
       - name: Đăng lên Releases (khi đẩy tag v...)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && steps.signing.outputs.signed == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ZynTap-${{ steps.ver.outputs.version }}.apk
+          files: dist/*.apk

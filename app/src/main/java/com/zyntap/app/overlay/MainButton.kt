@@ -13,6 +13,9 @@ class MainButton(
     var x: Float = 0.8f,
     var y: Float = 0.5f,
     var pointScript: String = "",
+    var pointWidth: Int = 0,
+    var pointHeight: Int = 0,
+    var pointRotation: Int = 0,
      
     var passThrough: Boolean = false,
      
@@ -30,6 +33,18 @@ class MainButton(
     var delayEnabled: Boolean = false,
     var delayMs: Int = DEFAULT_DELAY_MS,
 ) {
+    fun scriptFor(width: Int, height: Int, rotation: Int): PointScript {
+        val w = pointWidth.takeIf { it > 0 } ?: width
+        val h = pointHeight.takeIf { it > 0 } ?: height
+        return PointCoordinates.transform(PointScriptParser.parse(pointScript, w, h),
+            w, h, if (pointWidth > 0 && pointHeight > 0) pointRotation else rotation, width, height, rotation)
+    }
+
+    fun textFor(width: Int, height: Int, rotation: Int): String {
+        if (pointWidth <= 0 || pointHeight <= 0) return pointScript
+        return PointCoordinates.reframeText(pointScript, pointWidth, pointHeight, pointRotation, width, height, rotation)
+    }
+
     val code: String get() = "main$id"
 
     val delayActive: Boolean get() = delayEnabled && !assistEnabled && mode != MODE_HOLD
@@ -115,6 +130,15 @@ class MainButtonRepo(context: Context) {
         save()
     }
 
+    fun bindLegacyCoordinates(width: Int, height: Int, rotation: Int) {
+        var changed = false
+        buttons.filter { it.pointWidth <= 0 || it.pointHeight <= 0 }.forEach {
+            it.pointWidth = width; it.pointHeight = height; it.pointRotation = rotation
+            changed = true
+        }
+        if (changed) save()
+    }
+
     fun save() {
         prefs.edit().putString(KEY, toArray().toString()).apply()
     }
@@ -132,6 +156,9 @@ class MainButtonRepo(context: Context) {
                     .put("x", b.x.toDouble())
                     .put("y", b.y.toDouble())
                     .put("pointScript", b.pointScript)
+                    .put("pointWidth", b.pointWidth)
+                    .put("pointHeight", b.pointHeight)
+                    .put("pointRotation", b.pointRotation)
                     .put("passThrough", b.passThrough)
                     .put("assistEnabled", b.assistEnabled)
                     .put("assistMode", b.assistMode)
@@ -176,6 +203,9 @@ class MainButtonRepo(context: Context) {
                         sizeDp = o.optInt("size", MainButton.DEFAULT_SIZE)
                             .coerceIn(MainButton.MIN_SIZE, MainButton.MAX_SIZE),
                         pointScript = o.optString("pointScript", "").take(PointScriptParser.MAX_TEXT),
+                        pointWidth = o.optInt("pointWidth", 0).coerceAtLeast(0),
+                        pointHeight = o.optInt("pointHeight", 0).coerceAtLeast(0),
+                        pointRotation = o.optInt("pointRotation", 0).coerceIn(0, 3),
                         passThrough = o.optBoolean("passThrough", false),
                         assistEnabled = o.optBoolean("assistEnabled", false),
                         assistMode = o.optInt("assistMode", MainButton.ASSIST_PULL_UP)

@@ -416,18 +416,23 @@ class MainButtonOverlay(
 
     private fun isPassThrough(b: MainButton) = (b.passThrough || b.assistEnabled || overlapsTapPoint(b)) && editingId != b.id
 
+    val interacting: Boolean get() = watched.isNotEmpty() || entries.values.any { it.view.isAttachedToWindow && it.view.pressedVisual }
+
+    @Suppress("DEPRECATION")
+    private fun rotation() = (ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation
+
     private var pointsKey = ""
     private var pointsCache: List<Pair<Int, Int>> = emptyList()
     private var pointsScreen = Rect()
 
     private fun allTapPoints(): List<Pair<Int, Int>> {
         val s = screenBounds()
-        val key = repo.buttons.joinToString("\u0001") { it.pointScript }
+        val key = rotation().toString() + repo.buttons.joinToString("\u0001") { "${it.pointWidth}:${it.pointHeight}:${it.pointRotation}:${it.pointScript}" }
         if (key == pointsKey && s == pointsScreen) return pointsCache
         pointsKey = key
         pointsScreen = Rect(s)
         pointsCache = repo.buttons.filter { it.pointScript.isNotBlank() }.flatMap { b ->
-            PointScriptParser.parse(b.pointScript, s.width(), s.height()).allPoints
+            b.scriptFor(s.width(), s.height(), rotation()).allPoints
         }
         return pointsCache
     }
