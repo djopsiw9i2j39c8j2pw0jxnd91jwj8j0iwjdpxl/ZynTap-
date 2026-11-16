@@ -67,44 +67,17 @@ luồng lấy mẫu này đã bỏ cùng cơ chế chọn/theo dõi app. Nếu c
 
 ## Khóa ký và cập nhật cài đè
 
-Muốn cài đè phải giữ **cùng applicationId, cùng chứng thư khóa ký**, đồng thời
-tăng `appVersion`/versionCode. Không phải thêm một chuỗi “key nhận diện” vào code.
-`versionCodeFrom` vẫn lấy số tăng dần từ phiên bản, ví dụ 1.00.36 → 1000036.
+Khóa ký cố định nằm ở `app/zyntap-release.jks` (alias `zyntap`, mật khẩu trong
+`gradle.properties`). Mọi bản build (debug/release, máy nào, GitHub Actions) đều ký
+bằng khóa này với **v1 + v2 + v3**, nên cài đè bản mới không cần gỡ app.
+Workflow kiểm tra `apksigner verify` đủ v1/v2/v3 trước khi đăng lên Releases.
 
-Bộ khóa riêng tạo cho bản bàn giao nằm trong **ZIP riêng tư**, không có trong repo
-hay ZIP source. Giữ ít nhất hai bản sao an toàn của keystore và mật khẩu. Không
-commit `.jks`, `.keystore`, base64 keystore hoặc token lên GitHub.
-
-Nếu còn keystore của bản đang cài, **ưu tiên dùng chính khóa đó**. Khóa mới không
-ký thay được bản cũ; thiếu khóa cũ không thể bảo đảm cập nhật cài đè lần chuyển này.
-Xuất cấu hình trước khi chuyển bản nếu chứng thư không khớp.
-
-GitHub → Settings → Secrets and variables → Actions, đặt đủ:
-
-| Secret | Giá trị |
-|---|---|
-| `ZYNTAP_KEYSTORE_BASE64` | Nội dung `keystore-base64.txt` trong bộ khóa riêng, hoặc base64 của khóa cũ |
-| `ZYNTAP_STORE_PASSWORD` | Mật khẩu keystore tương ứng |
-| `ZYNTAP_KEY_PASSWORD` | Mật khẩu alias tương ứng |
-| `ZYNTAP_KEY_ALIAS` | Alias tương ứng, khóa mới là `zyntap` |
-
-Workflow dùng các secrets này để ký. **Không tự ký release bằng debug key tạm nữa.**
-Nếu không có khóa, CI vẫn kiểm thử/build nhưng artifact có hậu tố `UNSIGNED`, không
-phải APK cài được. Nếu cấu hình khóa thiếu một phần, build báo lỗi thay vì âm thầm
-đổi chữ ký. Chỉ bản đã ký mới được đăng Releases khi đẩy tag v*.
-Token bàn giao không có quyền quản lý Actions secrets nên cần chủ repo tự đặt các
-secret ở trên. Không đưa bộ khóa riêng vào issue, commit hoặc artifact công khai.
-
-Build local: Java 17, Android SDK 34; đặt `ZYNTAP_KEYSTORE_PATH` tới keystore,
-`ZYNTAP_STORE_PASSWORD`, `ZYNTAP_KEY_PASSWORD`, `ZYNTAP_KEY_ALIAS`, rồi chạy:
-
-```sh
-./gradlew testReleaseUnitTest assembleRelease --no-daemon
-```
-
-Có thể đặt keystore tại `app/zyntap-release.jks` (đã gitignore) thay cho biến đường dẫn.
-Muốn bản tiếp theo, tăng `appVersion` trong `gradle.properties`, không đổi applicationId
-và không tạo lại khóa. Cùng versionCode có thể bị trình cài đặt/OEM từ chối cập nhật.
+- **Không đổi hoặc xóa `app/zyntap-release.jks`**: đổi khóa = Android bắt gỡ app cài lại.
+- `versionCode` tự tăng theo `appVersion` (1.00.36 → 1000036), mỗi bản mới phải cao hơn.
+- Muốn dùng khóa riêng: đặt secrets `ZYNTAP_KEYSTORE_BASE64`, `ZYNTAP_STORE_PASSWORD`,
+  `ZYNTAP_KEY_PASSWORD`, `ZYNTAP_KEY_ALIAS` (secrets được ưu tiên hơn khóa trong repo).
+- Nên để repo **private**, vì ai có file khóa đều ký được bản giả mạo.
+- Lần đầu chuyển từ bản đã cài bằng khóa khác sang bản này vẫn phải gỡ một lần.
 
 ## Kiểm chứng và thử máy thật
 
