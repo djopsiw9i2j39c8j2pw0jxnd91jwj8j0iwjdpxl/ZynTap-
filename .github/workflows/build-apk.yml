@@ -64,12 +64,24 @@ jobs:
           ZYNTAP_KEY_ALIAS: ${{ secrets.ZYNTAP_KEY_ALIAS }}
         run: ./gradlew testReleaseUnitTest assembleRelease -PappVersion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
 
-      - name: Đổi tên file APK và kiểm tra chữ ký v1/v2/v3
+      - name: Ký lại v1+v2+v3 và kiểm tra chữ ký
+        env:
+          ZYNTAP_STORE_PASSWORD: ${{ secrets.ZYNTAP_STORE_PASSWORD }}
+          ZYNTAP_KEY_PASSWORD: ${{ secrets.ZYNTAP_KEY_PASSWORD }}
+          ZYNTAP_KEY_ALIAS: ${{ secrets.ZYNTAP_KEY_ALIAS }}
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk "dist/ZynTap-${{ steps.ver.outputs.version }}.apk"
+          OUT="dist/ZynTap-${{ steps.ver.outputs.version }}.apk"
+          KS_PASS="${ZYNTAP_STORE_PASSWORD:-$(grep '^zynStorePassword=' gradle.properties | cut -d= -f2)}"
+          KEY_PASS="${ZYNTAP_KEY_PASSWORD:-$(grep '^zynKeyPassword=' gradle.properties | cut -d= -f2)}"
+          ALIAS="${ZYNTAP_KEY_ALIAS:-zyntap}"
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
-          "$APKSIGNER" verify --verbose --print-certs "dist/ZynTap-${{ steps.ver.outputs.version }}.apk" | tee sig.txt
+          # AGP tự tắt v1 khi minSdk >= 24, nên ký lại bằng apksigner với min-sdk 23 để có đủ v1+v2+v3
+          "$APKSIGNER" sign --ks app/zyntap-release.jks --ks-key-alias "$ALIAS" \
+            --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" \
+            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+            --min-sdk-version 23 --out "$OUT" app/build/outputs/apk/release/app-release.apk
+          "$APKSIGNER" verify --verbose --print-certs "$OUT" | tee sig.txt
           grep -q "v1 scheme (JAR signing): true" sig.txt
           grep -q "v2 scheme (APK Signature Scheme v2): true" sig.txt
           grep -q "v3 scheme (APK Signature Scheme v3): true" sig.txt
