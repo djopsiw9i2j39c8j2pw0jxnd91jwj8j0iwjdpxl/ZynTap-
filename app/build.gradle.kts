@@ -41,7 +41,7 @@ android {
             storePassword = signingStorePassword
             keyAlias = signingAlias
             keyPassword = signingKeyPassword
-            enableV1Signing = true
+            enableV1Signing = true // AGP vẫn bỏ v1 khi minSdk >= 24; workflow ký lại bằng apksigner để có v1
             enableV2Signing = true
             enableV3Signing = true
         }
