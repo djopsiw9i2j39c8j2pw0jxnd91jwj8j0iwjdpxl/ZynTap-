@@ -25,19 +25,25 @@ android {
         vectorDrawables.useSupportLibrary = true
     }
 
-    val signingStorePassword = providers.gradleProperty("zynStorePassword").orNull ?: System.getenv("ZYNTAP_STORE_PASSWORD")
-    val signingKeyPassword = providers.gradleProperty("zynKeyPassword").orNull ?: System.getenv("ZYNTAP_KEY_PASSWORD")
+    // Khóa ký cố định nằm trong repo (app/zyntap-release.jks) nên máy nào build ra cũng cùng chữ ký.
+    // Muốn dùng khóa riêng thì đặt env ZYNTAP_* (GitHub Secrets) - env được ưu tiên.
+    val signingStorePassword = System.getenv("ZYNTAP_STORE_PASSWORD")?.takeIf { it.isNotBlank() }
+        ?: providers.gradleProperty("zynStorePassword").orNull
+    val signingKeyPassword = System.getenv("ZYNTAP_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+        ?: providers.gradleProperty("zynKeyPassword").orNull
     val signingAlias = System.getenv("ZYNTAP_KEY_ALIAS")?.takeIf { it.isNotBlank() } ?: "zyntap"
     val signingStore = file(System.getenv("ZYNTAP_KEYSTORE_PATH")?.takeIf { it.isNotBlank() } ?: "zyntap-release.jks")
-    val hasReleaseKey = signingStore.exists() && !signingStorePassword.isNullOrEmpty() && !signingKeyPassword.isNullOrEmpty()
-    val signingRequested = signingStore.exists() || !signingStorePassword.isNullOrEmpty() || !signingKeyPassword.isNullOrEmpty()
-    check(!signingRequested || hasReleaseKey) { "Release signing is incomplete: provide the same keystore and both passwords." }
+    check(signingStore.exists()) { "Thiếu khóa ký: ${signingStore.path}" }
+    check(!signingStorePassword.isNullOrEmpty() && !signingKeyPassword.isNullOrEmpty()) { "Thiếu mật khẩu khóa ký (zynStorePassword / zynKeyPassword)." }
     signingConfigs {
-        if (hasReleaseKey) create("zyntap") {
+        create("zyntap") {
             storeFile = signingStore
             storePassword = signingStorePassword
             keyAlias = signingAlias
             keyPassword = signingKeyPassword
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
         }
     }
 
@@ -45,10 +51,10 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = if (hasReleaseKey) signingConfigs.getByName("zyntap") else null
+            signingConfig = signingConfigs.getByName("zyntap")
         }
         debug {
-            signingConfig = signingConfigs.getByName(if (hasReleaseKey) "zyntap" else "debug")
+            signingConfig = signingConfigs.getByName("zyntap")
         }
     }
 
