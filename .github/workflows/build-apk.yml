@@ -81,7 +81,9 @@ jobs:
             --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" \
             --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
             --min-sdk-version 23 --out "$OUT" app/build/outputs/apk/release/app-release.apk
-          "$APKSIGNER" verify --verbose --print-certs "$OUT" | tee sig.txt
+          # verify cũng đọc minSdk=26 trong manifest nên mặc định bỏ qua v1 -> phải ép --min-sdk-version 23
+          "$APKSIGNER" verify --min-sdk-version 23 --verbose --print-certs "$OUT" | tee sig.txt
+          unzip -l "$OUT" | grep -E "META-INF/.*\.(SF|RSA)"
           grep -q "v1 scheme (JAR signing): true" sig.txt
           grep -q "v2 scheme (APK Signature Scheme v2): true" sig.txt
           grep -q "v3 scheme (APK Signature Scheme v3): true" sig.txt
