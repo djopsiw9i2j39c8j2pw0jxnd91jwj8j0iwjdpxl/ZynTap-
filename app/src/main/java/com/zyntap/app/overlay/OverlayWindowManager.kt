@@ -16,7 +16,6 @@ internal class OverlayWindowManager(
     private val canRecover: () -> Boolean = { true },
 ) : WindowManager by delegate {
     private class Desired(var params: ViewGroup.LayoutParams, var graceUntil: Long) {
-        var badTicks = 0
         var retryAt = 0L
         var listener: View.OnAttachStateChangeListener? = null
     }
@@ -33,9 +32,7 @@ internal class OverlayWindowManager(
         windows.add(view)
         val record = Desired(params, SystemClock.uptimeMillis() + GRACE_MS)
         record.listener = object : View.OnAttachStateChangeListener {
-            override fun onViewAttachedToWindow(v: View) {
-                record.badTicks = 0
-            }
+            override fun onViewAttachedToWindow(v: View) = Unit
 
             override fun onViewDetachedFromWindow(v: View) {
                 if (desired[view] === record) requestSweep(DETACH_SWEEP_MS)
@@ -93,15 +90,11 @@ internal class OverlayWindowManager(
         var waiting = false
         for ((view, record) in desired.entries.toList()) {
             if (closed || desired[view] !== record) continue
-            if (view.isAttachedToWindow && view.windowVisibility == View.VISIBLE) {
-                record.badTicks = 0
-                continue
-            }
+            if (view.isAttachedToWindow) continue
             if (now < record.graceUntil) {
                 waiting = true
                 continue
             }
-            record.badTicks++
             if (now < record.retryAt) continue
             if (revived || !canRecover()) {
                 waiting = true
@@ -115,13 +108,8 @@ internal class OverlayWindowManager(
 
     private fun revive(view: View, record: Desired, now: Long) {
         try {
-            if (view.isAttachedToWindow && record.badTicks < 2) {
-                delegate.updateViewLayout(view, record.params)
-                return
-            }
             runCatching { delegate.removeViewImmediate(view) }
             record.graceUntil = now + GRACE_MS
-            record.badTicks = 0
             delegate.addView(view, record.params)
             DebugLog.i("Khôi phục", "Đã gắn lại cửa sổ nổi bị mất")
         } catch (t: Throwable) {
