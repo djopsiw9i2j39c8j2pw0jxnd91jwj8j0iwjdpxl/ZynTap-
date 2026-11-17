@@ -59,7 +59,7 @@ class PointPickerOverlay(
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.rawX; downY = event.rawY
                     startX = p.x; startY = p.y; dragging = false
-                    view.animate().alpha(0.8f).setDuration(100).start()
+                    view.animate().alpha(0.8f).setDuration(UiAnim.ms(100)).start()
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -74,7 +74,7 @@ class PointPickerOverlay(
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    view.animate().alpha(1f).setDuration(140).start()
+                    view.animate().alpha(1f).setDuration(UiAnim.ms(140)).start()
                     if (dragging) onDrag(false)
                     if (!dragging) {
                         val location = IntArray(2)
@@ -90,7 +90,7 @@ class PointPickerOverlay(
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     if (dragging) onDrag(false)
-                    view.animate().alpha(1f).setDuration(100).start(); true
+                    view.animate().alpha(1f).setDuration(UiAnim.ms(100)).start(); true
                 }
                 else -> true
             }
@@ -117,7 +117,7 @@ class PointPickerOverlay(
             wm.addView(view, p)
             wm.addView(cancel, cp)
             view.alpha = 0f
-            view.animate().alpha(1f).setDuration(160).start()
+            view.animate().alpha(1f).setDuration(UiAnim.ms(160)).start()
         } catch (_: Exception) { close() }
     }
 
@@ -142,7 +142,7 @@ class PointPickerOverlay(
             strokeWidth = 2.4f * d; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
         }
         private val path = Path().apply {
-            
+
             moveTo(20f, 10f)
             cubicTo(20f, 14.993f, 14.461f, 20.193f, 12.601f, 21.799f)
             cubicTo(12.25f, 22.07f, 11.75f, 22.07f, 11.399f, 21.799f)
@@ -152,7 +152,7 @@ class PointPickerOverlay(
         }
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            
+
             canvas.save()
             canvas.translate((TIP_X_DP - 12f * PIN_SCALE) * d, (TIP_Y_DP - 21.8f * PIN_SCALE) * d)
             canvas.scale(PIN_SCALE * d, PIN_SCALE * d)
@@ -164,12 +164,12 @@ class PointPickerOverlay(
     }
 
     private companion object {
-         
+
         const val PIN_WIN_DP = 44
-         
+
         const val TIP_X_DP = 22
         const val TIP_Y_DP = 36
-         
+
         const val PIN_SCALE = 1.25f
     }
 }

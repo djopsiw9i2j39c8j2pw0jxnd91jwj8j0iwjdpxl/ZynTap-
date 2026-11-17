@@ -24,7 +24,7 @@ import android.widget.TextView
 import com.zyntap.app.R
 
 interface PanelHost {
-     
+
     val dropdown: DropdownLayer
 
     val prompt: TextPromptLayer
@@ -290,13 +290,13 @@ class MainButtonsTab(
             }
             if (!animate) { setFrac(to); return }
             anim = ValueAnimator.ofFloat(from, to).apply {
-                duration = 340L
+                duration = UiAnim.ms(340L)
                 interpolator = EASE
                 addUpdateListener { setFrac(it.animatedValue as Float) }
                 addListener(object : AnimatorListenerAdapter() {
                     override fun onAnimationEnd(animation: Animator) {
                         if (on && expandedId == b.id) {
-                            
+
                             scroll.post { scroll.smoothScrollTo(0, (slot.top - dp(2)).coerceAtLeast(0)) }
                         }
                     }
@@ -309,7 +309,7 @@ class MainButtonsTab(
             slot.fraction = 0f
             slot.alpha = 0f
             ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 320L
+                duration = UiAnim.ms(320L)
                 interpolator = EASE
                 addUpdateListener {
                     val f = it.animatedValue as Float
@@ -323,7 +323,7 @@ class MainButtonsTab(
         fun animateOut(onEnd: () -> Unit) {
             anim?.cancel()
             ValueAnimator.ofFloat(slot.fraction, 0f).apply {
-                duration = 260L
+                duration = UiAnim.ms(260L)
                 interpolator = EASE
                 addUpdateListener {
                     val f = it.animatedValue as Float
@@ -341,7 +341,7 @@ class MainButtonsTab(
     private fun addBar(b: MainButton, animate: Boolean) {
         val bar = Bar(b)
         bars[b.id] = bar
-        
+
         val idx = repo.buttons.sortedBy { it.id }.indexOfFirst { it.id == b.id }.coerceAtLeast(0)
         listBox.addView(
             bar.slot,
@@ -524,7 +524,7 @@ class MainButtonsTab(
 
         form.addView(slider("Độ mờ", MainButton.MIN_ALPHA, MainButton.MAX_ALPHA, b.alphaPct, "%",
             onValue = { b.alphaPct = it; onLive() }, onStop = onCommit))
-        
+
         form.addView(slider("Kích thước", MainButton.MIN_SIZE, MainButton.MAX_SIZE, b.sizeDp, " dp",
             onValue = { b.sizeDp = it; onLive() }, onStop = onCommit))
         return form
@@ -610,7 +610,7 @@ class MainButtonsTab(
             progressTintList = ColorStateList.valueOf(0xFF19D3FF.toInt())
             progressBackgroundTintList = ColorStateList.valueOf(0xFF2A3A5C.toInt())
             thumbTintList = ColorStateList.valueOf(0xFFFFFFFF.toInt())
-            
+
             setOnTouchListener { v, e ->
                 if (e.actionMasked == MotionEvent.ACTION_DOWN) v.parent?.requestDisallowInterceptTouchEvent(true)
                 false
@@ -641,7 +641,7 @@ class MainButtonsTab(
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xFF0D1524.toInt())
             setPadding(dp(14), dp(14), dp(14), dp(12))
-            isClickable = true 
+            isClickable = true
         }
 
         val top = LinearLayout(ctx).apply {
@@ -680,7 +680,7 @@ class MainButtonsTab(
         val preview = MainButtonView(ctx).apply {
             label = draft.name
             fillPct = draft.alphaPct
-            minPct = MainButton.MENU_MIN_ALPHA 
+            minPct = MainButton.MENU_MIN_ALPHA
             ringPad = 0f
         }
         fun syncPreview() {
@@ -721,7 +721,7 @@ class MainButtonsTab(
         page.alpha = 0f
         page.post {
             page.translationX = page.width * 0.35f
-            page.animate().translationX(0f).alpha(1f).setDuration(300L)
+            page.animate().translationX(0f).alpha(1f).setDuration(UiAnim.ms(300L))
                 .setInterpolator(DecelerateInterpolator(1.6f)).start()
         }
     }
@@ -733,7 +733,7 @@ class MainButtonsTab(
         host.dropdown.dismissNow()
         host.prompt.close()
         page.animate().cancel()
-        page.animate().translationX(page.width * 0.35f).alpha(0f).setDuration(230L)
+        page.animate().translationX(page.width * 0.35f).alpha(0f).setDuration(UiAnim.ms(230L))
             .setInterpolator(DecelerateInterpolator(1.4f))
             .withEndAction {
                 root.removeView(page)

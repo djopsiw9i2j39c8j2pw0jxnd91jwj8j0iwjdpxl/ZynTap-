@@ -99,7 +99,7 @@ class TextPromptLayer(
         this.onDone = onDone
         titleText.text = title
         input.filters = arrayOf(InputFilter.LengthFilter(maxLen))
-        
+
         input.inputType = if (numeric) InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
         else InputType.TYPE_CLASS_TEXT
         input.setText(initial)
@@ -109,12 +109,12 @@ class TextPromptLayer(
         alpha = 0f
         dialog.scaleX = 0.88f; dialog.scaleY = 0.88f
         animate().cancel(); dialog.animate().cancel()
-        animate().alpha(1f).setDuration(160L).start()
-        dialog.animate().scaleX(1f).scaleY(1f).setDuration(240L).setInterpolator(OvershootInterpolator(1.2f)).start()
+        animate().alpha(1f).setDuration(UiAnim.ms(160L)).start()
+        dialog.animate().scaleX(1f).scaleY(1f).setDuration(UiAnim.ms(240L)).setInterpolator(OvershootInterpolator(1.2f)).start()
 
-        onKeyboard(true)               
+        onKeyboard(true)
         input.requestFocus()
-        
+
         postDelayed({ showIme() }, 120L)
         postDelayed({ showIme() }, 380L)
     }
@@ -150,7 +150,7 @@ class TextPromptLayer(
         input.clearFocus()
         onKeyboard(false)
         animate().cancel()
-        animate().alpha(0f).setDuration(140L).withEndAction { if (!shown) visibility = View.GONE }.start()
+        animate().alpha(0f).setDuration(UiAnim.ms(140L)).withEndAction { if (!shown) visibility = View.GONE }.start()
     }
 
     private fun button(label: String, bg: Int, fg: Int, onClick: () -> Unit) = TextView(context).apply {

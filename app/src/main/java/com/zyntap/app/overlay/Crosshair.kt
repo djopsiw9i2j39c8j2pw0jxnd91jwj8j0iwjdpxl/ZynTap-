@@ -25,12 +25,12 @@ import kotlin.math.max
 import kotlin.math.min
 
 internal val CROSS_COLORS = intArrayOf(
-    0xFF19D3FF.toInt(), 
-    0xFFFFFFFF.toInt(), 
-    0xFFFF4D5E.toInt(), 
-    0xFF3DFF8A.toInt(), 
-    0xFFFFE14D.toInt(), 
-    0xFFFF5BD1.toInt(), 
+    0xFF19D3FF.toInt(),
+    0xFFFFFFFF.toInt(),
+    0xFFFF4D5E.toInt(),
+    0xFF3DFF8A.toInt(),
+    0xFFFFE14D.toInt(),
+    0xFFFF5BD1.toInt(),
 )
 
 internal val CROSS_STYLES = listOf(
@@ -44,7 +44,7 @@ internal data class CrossSpec(
     val alphaPct: Int,
     val color: Int,
     val ringOn: Boolean,
-    val ringPx: Float,       
+    val ringPx: Float,
     val ringThickPx: Float,
     val ringAlphaPct: Int,
     val ringColor: Int,
@@ -178,18 +178,18 @@ internal class CrosshairView(context: Context) : View(context) {
         val col = s.color
         val a = s.alphaPct
         when (s.style) {
-            0 -> { 
+            0 -> {
                 val gap = half * 0.28f
                 stroked(c, col, a, w) { cv, p ->
                     cv.drawLine(-half, 0f, -gap, 0f, p); cv.drawLine(gap, 0f, half, 0f, p)
                     cv.drawLine(0f, -half, 0f, -gap, p); cv.drawLine(0f, gap, 0f, half, p)
                 }
             }
-            1 -> { 
+            1 -> {
                 solid(c, col, a, 0f, 0f, max(half * 0.17f, w))
                 stroked(c, col, a, w) { cv, p -> cv.drawCircle(0f, 0f, half * 0.62f, p) }
             }
-            2 -> { 
+            2 -> {
                 val gap = half * 0.36f
                 stroked(c, col, a, w) { cv, p ->
                     cv.drawLine(-half, 0f, -gap, 0f, p); cv.drawLine(gap, 0f, half, 0f, p)
@@ -197,7 +197,7 @@ internal class CrosshairView(context: Context) : View(context) {
                 }
                 solid(c, col, a, 0f, 0f, max(half * 0.09f, w * 0.8f))
             }
-            3 -> { 
+            3 -> {
                 val o = half * 0.92f
                 val arm = half * 0.38f
                 stroked(c, col, a, w) { cv, p ->
@@ -210,7 +210,7 @@ internal class CrosshairView(context: Context) : View(context) {
                 }
                 solid(c, col, a, 0f, 0f, max(half * 0.07f, w * 0.75f))
             }
-            4 -> { 
+            4 -> {
                 val gap = half * 0.22f
                 stroked(c, col, a, w) { cv, p ->
                     cv.drawLine(-half, 0f, -gap, 0f, p); cv.drawLine(gap, 0f, half, 0f, p)
@@ -218,7 +218,7 @@ internal class CrosshairView(context: Context) : View(context) {
                 }
                 solid(c, col, a, 0f, 0f, max(half * 0.07f, w * 0.75f))
             }
-            else -> { 
+            else -> {
                 val r = half * 0.85f
                 stroked(c, col, a, w) { cv, p ->
                     path.reset()
@@ -267,7 +267,7 @@ class CrosshairOverlay(
         val cur = view
         val p = params
         if (cur == null || p == null) {
-            
+
             sweepOrphans()
             val size = windowSize(s)
             val np = newParams(
@@ -294,7 +294,7 @@ class CrosshairOverlay(
         }
     }
 
-    fun fadeOut(ms: Long) { view?.animate()?.alpha(0f)?.setDuration(ms)?.start() }
+    fun fadeOut(ms: Long) { view?.animate()?.alpha(0f)?.setDuration(UiAnim.ms(ms))?.start() }
 
     fun restore() { view?.animate()?.cancel(); view?.alpha = 1f }
 
@@ -323,7 +323,7 @@ class CrosshairOverlay(
     }
 
     companion object {
-         
+
         private val live = java.util.Collections.synchronizedList(ArrayList<Pair<WindowManager, View>>())
 
         private fun detach(wm: WindowManager, v: View): Boolean {
@@ -331,7 +331,7 @@ class CrosshairOverlay(
             var err: Throwable? = null
             var ok = runCatching { wm.removeViewImmediate(v) }.onFailure { err = it }.isSuccess
             if (!ok) ok = runCatching { wm.removeView(v) }.onFailure { err = it }.isSuccess
-            
+
             val gone = ok || !v.isAttachedToWindow
             if (gone) live.removeAll { it.second === v }
             else DebugLog.e("Tâm ảo", "Không gỡ được cửa sổ tâm khỏi màn hình (sẽ thử lại)", err)
@@ -354,7 +354,7 @@ class CrosshairOverlay(
 class CrosshairTab(
     private val ctx: Context,
     private val settings: CrosshairSettings,
-     
+
     private val onChanged: () -> Unit,
 ) {
     private val d = UiScale.density(ctx.resources)
@@ -516,7 +516,7 @@ class CrosshairTab(
                     if (col > 0) marginStart = dp(6)
                 })
             }
-            
+
             repeat(perRow - idxs.size) { row.addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f).apply { marginStart = dp(6) }) }
             grid.addView(row, LinearLayout.LayoutParams(-1, -2).apply { if (rowIdx > 0) topMargin = dp(6) })
         }
@@ -562,7 +562,7 @@ class CrosshairTab(
             progressTintList = ColorStateList.valueOf(cyan)
             progressBackgroundTintList = ColorStateList.valueOf(0xFF2A3A5C.toInt())
             thumbTintList = ColorStateList.valueOf(0xFFFFFFFF.toInt())
-            
+
             setOnTouchListener { v, e ->
                 if (e.actionMasked == MotionEvent.ACTION_DOWN) v.parent?.requestDisallowInterceptTouchEvent(true)
                 false

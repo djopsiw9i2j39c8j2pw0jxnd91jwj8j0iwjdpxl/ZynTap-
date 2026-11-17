@@ -123,6 +123,7 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         DebugLog.init(this)
+        UiAnim.init(this)
         runtimePrefs.registerOnSharedPreferenceChangeListener(runtimeListener)
         DebugLog.i("Dịch vụ", "Menu nổi bắt đầu chạy")
         running = true
@@ -995,7 +996,7 @@ class OverlayService : Service() {
             val target = i * step.toFloat()
             indicator.animate().cancel()
             if (animate) {
-                indicator.animate().translationY(target).setDuration(TAB_ANIM_MS)
+                indicator.animate().translationY(target).setDuration(UiAnim.ms(TAB_ANIM_MS))
                     .setInterpolator(TAB_INTERPOLATOR).start()
             } else {
                 indicator.translationY = target
@@ -1011,7 +1012,7 @@ class OverlayService : Service() {
                     android.animation.ValueAnimator.ofObject(
                         android.animation.ArgbEvaluator(), t.currentTextColor, to,
                     ).apply {
-                        duration = TAB_ANIM_MS
+                        duration = UiAnim.ms(TAB_ANIM_MS)
                         addUpdateListener { paint(t, it.animatedValue as Int) }
                     }.start()
                 } else {
@@ -1206,7 +1207,7 @@ class OverlayService : Service() {
         prefs.edit().putBoolean(KEY_SOLID, solid).apply()
         solidAnim?.cancel()
         solidAnim = ValueAnimator.ofFloat(solidAmount, if (solid) 1f else 0f).apply {
-            duration = 260L
+            duration = UiAnim.ms(260L)
             interpolator = TAB_INTERPOLATOR
             addUpdateListener { applySolid(it.animatedValue as Float) }
             start()
@@ -1214,9 +1215,9 @@ class OverlayService : Service() {
 
         eyeIcon?.let { icon ->
             icon.animate().cancel()
-            icon.animate().scaleX(0.6f).scaleY(0.6f).alpha(0.3f).setDuration(90L).withEndAction {
+            icon.animate().scaleX(0.6f).scaleY(0.6f).alpha(0.3f).setDuration(UiAnim.ms(90L)).withEndAction {
                 icon.setImageResource(if (solid) R.drawable.ic_eye_off else R.drawable.ic_eye)
-                icon.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(180L)
+                icon.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(UiAnim.ms(180L))
                     .setInterpolator(OvershootInterpolator(2f)).start()
             }.start()
         }
@@ -1237,7 +1238,7 @@ class OverlayService : Service() {
 
         ghostAnim?.cancel()
         ghostAnim = ValueAnimator.ofFloat(ghostAmt, if (on) 1f else 0f).apply {
-            duration = if (on) 220L else 280L
+            duration = UiAnim.ms(if (on) 220L else 280L)
             interpolator = if (on) AccelerateDecelerateInterpolator() else TAB_INTERPOLATOR
             addUpdateListener {
                 ghostAmt = it.animatedValue as Float
@@ -1276,7 +1277,7 @@ class OverlayService : Service() {
         editLock = on
         editDimAnim?.cancel()
         editDimAnim = ValueAnimator.ofFloat(editDim, if (on) 1f else 0f).apply {
-            duration = 260L
+            duration = UiAnim.ms(260L)
             interpolator = TAB_INTERPOLATOR
             addUpdateListener {
                 editDim = it.animatedValue as Float
@@ -1418,18 +1419,18 @@ class OverlayService : Service() {
 
         scrim.post {
             if (stopping || closing || panelClosing || panelTransition != transition || panelView !== scrim) return@post
-            card.animate().translationX(0f).setDuration(PANEL_ANIM_MS)
+            card.animate().translationX(0f).setDuration(UiAnim.ms(PANEL_ANIM_MS))
                 .setInterpolator(DecelerateInterpolator(1.6f))
                 .withEndAction { panelAnimating = false }.start()
-            scrim.animate().alpha(1f).setDuration(PANEL_ANIM_MS).start()
-            handleView?.animate()?.alpha(0f)?.setDuration(PANEL_ANIM_MS)?.start()
+            scrim.animate().alpha(1f).setDuration(UiAnim.ms(PANEL_ANIM_MS)).start()
+            handleView?.animate()?.alpha(0f)?.setDuration(UiAnim.ms(PANEL_ANIM_MS))?.start()
         }
     }
 
     private fun closePanel() {
         if (stopping || closing || panelClosing) return
         panelTransition++
-        menuGesture.blockUntil(SystemClock.uptimeMillis() + PANEL_ANIM_MS + 350L)
+        menuGesture.blockUntil(SystemClock.uptimeMillis() + UiAnim.ms(PANEL_ANIM_MS) + 350L)
         val card = panelCard
         val scrim = panelView
         if (card == null || scrim == null || panelHidden) {
@@ -1447,7 +1448,7 @@ class OverlayService : Service() {
         promptLayer?.close()
         card.animate().cancel(); scrim.animate().cancel()
         panelAnimating = true
-        card.animate().translationX(hiddenX).setDuration(PANEL_ANIM_MS)
+        card.animate().translationX(hiddenX).setDuration(UiAnim.ms(PANEL_ANIM_MS))
             .setInterpolator(DecelerateInterpolator(1.4f))
             .withEndAction {
                 panelAnimating = false
@@ -1455,8 +1456,8 @@ class OverlayService : Service() {
                 if (panelCard === card && card.translationX <= hiddenX + 1f) hidePanel()
                 panelClosing = false
             }.start()
-        scrim.animate().alpha(0f).setDuration(PANEL_ANIM_MS).start()
-        handleView?.animate()?.alpha(1f)?.setDuration(PANEL_ANIM_MS)?.start()
+        scrim.animate().alpha(0f).setDuration(UiAnim.ms(PANEL_ANIM_MS)).start()
+        handleView?.animate()?.alpha(1f)?.setDuration(UiAnim.ms(PANEL_ANIM_MS))?.start()
     }
 
     private fun resetPanelState() {

@@ -48,11 +48,11 @@ class MainButtonView(context: Context) : View(context) {
             if (field == v) return
             field = v
             animate().cancel()
-            animate().scaleX(if (v) 0.92f else 1f).scaleY(if (v) 0.92f else 1f).setDuration(110L).start()
+            animate().scaleX(if (v) 0.92f else 1f).scaleY(if (v) 0.92f else 1f).setDuration(UiAnim.ms(110L)).start()
             invalidate()
         }
 
-    private var cdEnd = 0L      
+    private var cdEnd = 0L
     private var cdTotal = 1L
 
     fun startCountdown(totalMs: Long) {
@@ -68,12 +68,12 @@ class MainButtonView(context: Context) : View(context) {
     }
 
     private val d = UiScale.density(resources)
-     
+
     private val dim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private var dimKey = 0f
-     
+
     private val delayHead = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = 0xFFFFC2C2.toInt() }
-     
+
     private val delayEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.BUTT
@@ -84,7 +84,7 @@ class MainButtonView(context: Context) : View(context) {
         color = 0xFFFFFFFF.toInt()
         textAlign = Paint.Align.CENTER
         typeface = Typeface.DEFAULT_BOLD
-        fontFeatureSettings = "tnum" 
+        fontFeatureSettings = "tnum"
     }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1.5f * d }
@@ -109,6 +109,7 @@ class MainButtonView(context: Context) : View(context) {
 
     private fun startSpin() {
         spinner?.cancel()
+        if (!UiAnim.enabled) return
         spinner = ValueAnimator.ofFloat(0f, 360f).apply {
             duration = 7000L
             repeatCount = ValueAnimator.INFINITE
@@ -142,12 +143,12 @@ class MainButtonView(context: Context) : View(context) {
         val now = SystemClock.uptimeMillis()
         val counting = cdEnd != 0L && now < cdEnd
         if (cdEnd != 0L && !counting) {
-            
+
             cdEnd = 0L
             post { pulseReady() }
         }
         if (a <= 0f && !editing) {
-            
+
             if (counting) postInvalidateDelayed(cdEnd - now + 16L)
             return
         }
@@ -168,7 +169,7 @@ class MainButtonView(context: Context) : View(context) {
         val lay = fitLabel(r)
         if (lay != null) {
             val labelA = if (a <= 0f) 0f else 0.55f + 0.45f * a
-            
+
             text.alpha = (255 * labelA * (1f - 0.85f * delayVis(now))).toInt()
             canvas.save()
             canvas.translate(cx - lay.width / 2f, cy - lay.height / 2f)
@@ -199,7 +200,7 @@ class MainButtonView(context: Context) : View(context) {
     }
 
     private fun drawCountdown(canvas: Canvas, cx: Float, cy: Float, r: Float, remainMs: Long, a: Float) {
-        
+
         val k = a * delayVis(SystemClock.uptimeMillis())
         if (k <= 0f) { postInvalidateOnAnimation(); return }
         val edgeW = edge.strokeWidth
@@ -269,8 +270,8 @@ class MainButtonView(context: Context) : View(context) {
     private fun pulseReady() {
         if (!isAttachedToWindow || pressedVisual) return
         animate().cancel()
-        animate().scaleX(1.18f).scaleY(1.18f).setDuration(110L).withEndAction {
-            animate().scaleX(1f).scaleY(1f).setDuration(170L).start()
+        animate().scaleX(1.18f).scaleY(1.18f).setDuration(UiAnim.ms(110L)).withEndAction {
+            animate().scaleX(1f).scaleY(1f).setDuration(UiAnim.ms(170L)).start()
         }.start()
     }
 
@@ -297,7 +298,7 @@ class MainButtonView(context: Context) : View(context) {
         }
         fun fits(l: StaticLayout, maxLines: Int): Boolean {
             if (l.height > boxH || l.lineCount > maxLines) return false
-            
+
             val last = l.lineCount - 1
             return l.getEllipsisCount(last) == 0 && l.getLineEnd(last) >= t.length
         }
@@ -316,7 +317,7 @@ class MainButtonView(context: Context) : View(context) {
         val result = when {
             oneSize >= minSize && (multiSize == 0f || oneSize >= multiSize * 0.72f) -> build(oneSize, 1)
             multiSize > 0f -> build(multiSize, 3)
-            else -> build(minSize, 3) 
+            else -> build(minSize, 3)
         }
         labelLayout = result
         return result
@@ -347,8 +348,8 @@ class MainButtonOverlay(
     private val entries = HashMap<Int, Entry>()
     private var editingId: Int? = null
 
-    private val cooldownEnd = HashMap<Int, Long>()   
-    private val blockedDown = HashSet<Int>()          
+    private val cooldownEnd = HashMap<Int, Long>()
+    private val blockedDown = HashSet<Int>()
 
     private fun isBlocked(b: MainButton) =
         b.delayActive && editingId != b.id && (cooldownEnd[b.id] ?: 0L) > SystemClock.uptimeMillis()
@@ -369,14 +370,14 @@ class MainButtonOverlay(
         if (isBlocked(b)) { blockedDown.add(b.id); return false }
         blockedDown.remove(b.id)
         onAction?.invoke(b, true)
-        if (b.delayActive && b.mode == MainButton.MODE_TAP) startCooldown(b) 
+        if (b.delayActive && b.mode == MainButton.MODE_TAP) startCooldown(b)
         return true
     }
 
     private fun fireUp(b: MainButton) {
-        if (blockedDown.remove(b.id)) return 
+        if (blockedDown.remove(b.id)) return
         onAction?.invoke(b, false)
-        if (b.delayActive && b.mode == MainButton.MODE_RELEASE) startCooldown(b) 
+        if (b.delayActive && b.mode == MainButton.MODE_RELEASE) startCooldown(b)
     }
 
     private fun notifyCancel(id: Int) {
@@ -495,7 +496,7 @@ class MainButtonOverlay(
     }
 
     private fun buttonAt(x: Int, y: Int): Int? {
-        
+
         for (id in entries.keys.sortedDescending()) {
             val e = entries[id] ?: continue
             val b = repo.find(id) ?: continue
@@ -517,7 +518,7 @@ class MainButtonOverlay(
             val id = buttonAt(x, y) ?: return
             val b = repo.find(id) ?: return
             watched[slot] = id
-            entries[id]?.view?.pressedVisual = fireDown(b) 
+            entries[id]?.view?.pressedVisual = fireDown(b)
         } else {
             val id = watched.remove(slot) ?: return
             entries[id]?.view?.pressedVisual = watched.containsValue(id)
@@ -550,7 +551,7 @@ class MainButtonOverlay(
         bind(v, b)
         v.editing = b.id == editingId
         attachTouch(b.id, v, p)
-        entries[b.id] = Entry(v, p, SystemClock.uptimeMillis()) 
+        entries[b.id] = Entry(v, p, SystemClock.uptimeMillis())
         applyTouchable(b, p)
         if (runCatching { wm.addView(v, p) }.isFailure) entries.remove(b.id)
     }
@@ -560,7 +561,7 @@ class MainButtonOverlay(
     fun setMenuOpen(open: Boolean) {
         menuOpen = open
         entries.values.forEach { it.view.minPct = if (open) MainButton.MENU_MIN_ALPHA else 0 }
-        if (!open) refreshTouchable() 
+        if (!open) refreshTouchable()
         pushAssistZones()
     }
 
@@ -589,7 +590,7 @@ class MainButtonOverlay(
             v.alpha = 0f
             v.scaleX = 0.5f
             v.scaleY = 0.5f
-            v.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(260L).start()
+            v.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(UiAnim.ms(260L)).start()
         }
     }
 
@@ -601,12 +602,12 @@ class MainButtonOverlay(
         refreshWatcher()
         val e = entries[id] ?: return
         e.view.animate().cancel()
-        e.view.animate().alpha(0f).scaleX(0.4f).scaleY(0.4f).setDuration(180L)
+        e.view.animate().alpha(0f).scaleX(0.4f).scaleY(0.4f).setDuration(UiAnim.ms(180L))
             .withEndAction { removeView(id); refreshWatcher() }.start()
     }
 
     fun onChanged(b: MainButton) {
-        clearCooldown(b.id) 
+        clearCooldown(b.id)
         notifyCancel(b.id)
         watched.entries.removeAll { it.value == b.id }
         val e = entries[b.id] ?: return
@@ -617,7 +618,7 @@ class MainButtonOverlay(
         refreshWatcher()
         val win = winSize(b)
         if (e.params.width != win) {
-            
+
             val cx = e.params.x + e.params.width / 2
             val cy = e.params.y + e.params.height / 2
             e.params.width = win
@@ -630,7 +631,7 @@ class MainButtonOverlay(
             b.x = if (maxX > 0) e.params.x / maxX.toFloat() else 0.5f
             b.y = if (maxY > 0) e.params.y / maxY.toFloat() else 0.5f
             runCatching { wm.updateViewLayout(e.view, e.params) }
-            pushSwallowZones() 
+            pushSwallowZones()
         }
     }
 
@@ -643,7 +644,7 @@ class MainButtonOverlay(
             val b = repo.find(k) ?: return@forEach
             val wasThrough = (e.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
             applyTouchable(b, e.params)
-            
+
             if (wasThrough != isPassThrough(b) && k != id) runCatching { wm.updateViewLayout(e.view, e.params) }
         }
         if (id != null) bringToFront(id)
@@ -667,7 +668,7 @@ class MainButtonOverlay(
     }
 
     fun fadeAll(to: Float, durationMs: Long) {
-        entries.values.forEach { it.view.animate().alpha(to).setDuration(durationMs).start() }
+        entries.values.forEach { it.view.animate().alpha(to).setDuration(UiAnim.ms(durationMs)).start() }
     }
 
     var onDrag: ((Boolean) -> Unit)? = null
@@ -726,7 +727,7 @@ class MainButtonOverlay(
                         val dy = e.rawY - downY
                         if (!moved && (kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop)) {
                             moved = true
-                            onDrag?.invoke(true) 
+                            onDrag?.invoke(true)
                         }
                         if (moved) {
                             val s = screenBounds()
@@ -766,7 +767,7 @@ class MainButtonOverlay(
         const val RING_PAD_DP = 8
         const val ATTACH_GRACE_MS = 1500L
         const val PASS_THROUGH_ALPHA = 0.8f
-         
+
         const val ASSIST_SLOP_DP = 10
     }
 }

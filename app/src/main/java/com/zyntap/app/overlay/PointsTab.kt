@@ -48,7 +48,7 @@ class PointsTab(
     private lateinit var status: TextView
     private var selectedId: Int? = null
     private var loading = false
-     
+
     private var lastInput: EditText? = null
     private var visible = false
     private fun selected() = selectedId?.let(repo::find)
@@ -76,7 +76,7 @@ class PointsTab(
     }
 
     fun build(): View {
-        
+
         val root = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), 0)
         }
@@ -206,7 +206,7 @@ class PointsTab(
                     }
                     MotionEvent.ACTION_CANCEL -> pick = false
                 }
-                pick   
+                pick
             }
             input.setOnEditorActionListener { _, action, event ->
                 if (isEnter(action, event)) { onEnter(); true } else false
@@ -268,7 +268,7 @@ class PointsTab(
         editor.setSelection(editor.length())
         editor.post { editor.scrollTo(0, ((editor.layout?.height ?: 0) - editor.height + editor.totalPaddingTop + editor.totalPaddingBottom).coerceAtLeast(0)) }
         editor.animate().cancel(); editor.alpha = 0.65f
-        editor.animate().alpha(1f).setDuration(200).start()
+        editor.animate().alpha(1f).setDuration(UiAnim.ms(200)).start()
     }
 
     private fun showStatus(text: String, error: Boolean) {

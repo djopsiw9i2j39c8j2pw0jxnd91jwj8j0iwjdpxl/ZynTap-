@@ -64,7 +64,6 @@ fun ZynTapApp(vm: MainViewModel = viewModel()) {
         }
     }
 
-    // Drawer trượt từ mép phải: đảo hướng cho riêng drawer, nội dung bên trong giữ nguyên trái -> phải
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
         ModalNavigationDrawer(
             drawerState = drawer,
@@ -149,19 +148,26 @@ private fun SettingsFrame(vm: MainViewModel, onClose: () -> Unit, onPair: () -> 
                 }
                 HorizontalDivider(color = Zyn.Border)
                 Text("CÀI ĐẶT", color = Zyn.TextDim, fontSize = 11.sp, letterSpacing = 1.6.sp)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Nhật ký gỡ lỗi", fontWeight = FontWeight.Medium, fontSize = 14.sp)
-                        Spacer(Modifier.height(4.dp))
-                        Text("Tắt để ngừng thu và ghi log.", color = Zyn.TextDim, fontSize = 12.sp)
-                    }
-                    Switch(vm.debugEnabled, vm::setDebugLogging)
-                }
+                SettingRow("Nhật ký gỡ lỗi", "Tắt để ngừng thu và ghi log.", vm.debugEnabled, vm::setDebugLogging)
+                SettingRow("Hiệu ứng UI nổi", "Tắt để giảm lag: menu, nút main và hộp thoại đổi trạng thái ngay, không chuyển động.", vm.uiAnimations, vm::setUiAnimations)
             }
             HorizontalDivider(color = Zyn.Border)
             Text("ZynTap · ${BuildConfig.VERSION_NAME}\n${BuildConfig.APPLICATION_ID}", color = Zyn.TextDim, fontSize = 11.sp, lineHeight = 18.sp,
                 modifier = Modifier.navigationBarsPadding().padding(vertical = 18.dp))
         }
+    }
+}
+
+@Composable
+private fun SettingRow(title: String, desc: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+            Spacer(Modifier.height(4.dp))
+            Text(desc, color = Zyn.TextDim, fontSize = 12.sp)
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked, onChange)
     }
 }
 

@@ -31,6 +31,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         com.zyntap.app.data.DebugLog.setEnabled(value)
         debugEnabled = value
     }
+
+    var uiAnimations by mutableStateOf(com.zyntap.app.overlay.UiAnim.run { init(app); enabled })
+        private set
+    fun setUiAnimations(value: Boolean) {
+        com.zyntap.app.overlay.UiAnim.set(getApplication(), value)
+        uiAnimations = value
+    }
     private val pairing: AdbPairing =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) WifiAdbPairing(app) else PendingAdbPairing()
 
@@ -91,11 +98,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         WifiAdbMonitor.addListener(adbListener)
         WifiAdbMonitor.start(app)
-        
+
         WifiState.addListener(wifiListener)
         WifiState.start(app)
         ConnectionWatcher.start(app)
-        
+
         if (WifiAdbMonitor.isWifiAdbEnabled(app)) verifyPairing()
 
     }
@@ -140,7 +147,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openActivate() {
         screen = Screen.Pair
-        
+
         if (!isActive && !PairNotifier.showEnterCode(getApplication())) {
             show("Nhập mã 6 số đang hiện trong mục Ghép nối bằng mã")
         }
@@ -180,7 +187,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 AdbLinkStore.setPaired(getApplication<Application>(), true)
                 PairNotifier.cancel(getApplication())
                 pairedPersisted = true
-                verifyPairing() 
+                verifyPairing()
                 delay(900)
                 screen = Screen.Home
             } else {

@@ -51,7 +51,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
     init {
 
         visibility = View.INVISIBLE
-        
+
         setOnClickListener { dismiss() }
     }
 
@@ -64,14 +64,14 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         val itemH = dp(ITEM_H_DP)
         val pad = dp(4)
         val full = items.size * itemH + pad * 2
-        val maxByCount = (ITEM_VISIBLE * itemH + itemH / 2 + pad * 2)   
+        val maxByCount = (ITEM_VISIBLE * itemH + itemH / 2 + pad * 2)
         val gap = dp(6)
         val margin = dp(8)
 
         val layerW = if (width > 0) width else (parent as? View)?.width ?: 0
         val layerH = if (height > 0) height else (parent as? View)?.height ?: 0
         if (layerW <= 0 || layerH <= 0) {
-            
+
             awaitLayout(anchor) { show(anchor, items, selected, onDismiss, onPick) }
             return
         }
@@ -116,7 +116,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
             clipToOutline = true
             elevation = dpf(8f)
         }
-        
+
         scroll.post {
             val target = (selected * itemH + pad - popH / 2 + itemH / 2).coerceAtLeast(0)
             scroll.scrollTo(0, target)
@@ -136,7 +136,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         scroll.alpha = 0f
         scroll.scaleX = 0.9f
         scroll.scaleY = 0.55f
-        scroll.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(190L)
+        scroll.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(UiAnim.ms(190L))
             .setInterpolator(DecelerateInterpolator(1.6f)).start()
     }
 
@@ -146,7 +146,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         dismissNow()
         closing = false
 
-        val rows = items.size + 1   
+        val rows = items.size + 1
         val itemH = dp(ITEM_H_DP)
         val pad = dp(4)
         val full = rows * itemH + pad * 2
@@ -184,7 +184,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
             orientation = LinearLayout.VERTICAL
             setPadding(0, pad, 0, pad)
         }
-        
+
         val all = buildCheckItem("Tất cả", bold = true) {
             val target = !state.all { it }
             for (i in state.indices) state[i] = target
@@ -231,7 +231,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         scroll.alpha = 0f
         scroll.scaleX = 0.9f
         scroll.scaleY = 0.55f
-        scroll.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(190L)
+        scroll.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(UiAnim.ms(190L))
             .setInterpolator(DecelerateInterpolator(1.6f)).start()
     }
 
@@ -253,7 +253,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
             if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
         row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        
+
         val tick = ImageView(context).apply {
             setImageResource(R.drawable.ic_check)
             setColorFilter(0xFF19D3FF.toInt())
@@ -285,7 +285,7 @@ class DropdownLayer(context: Context) : FrameLayout(context) {
         if (closing) return
         closing = true
         p.animate().cancel()
-        p.animate().alpha(0f).scaleX(0.92f).scaleY(0.6f).setDuration(130L)
+        p.animate().alpha(0f).scaleX(0.92f).scaleY(0.6f).setDuration(UiAnim.ms(130L))
             .withEndAction { if (popup === p) dismissNow() }.start()
     }
 
@@ -386,11 +386,11 @@ class DropdownField(
     }
 
     private fun open() {
-        layer.dismissNow() 
+        layer.dismissNow()
         arrow.animate().cancel()
-        arrow.animate().rotation(180f).setDuration(180L).start()
+        arrow.animate().rotation(180f).setDuration(UiAnim.ms(180L)).start()
         layer.show(this, items, current, onDismiss = {
-            arrow.animate().rotation(0f).setDuration(160L).start()
+            arrow.animate().rotation(0f).setDuration(UiAnim.ms(160L)).start()
         }) { i ->
             current = i
             valueText.text = items[i]
@@ -457,11 +457,11 @@ class MultiDropdownField(
     }
 
     private fun open() {
-        layer.dismissNow() 
+        layer.dismissNow()
         arrow.animate().cancel()
-        arrow.animate().rotation(180f).setDuration(180L).start()
+        arrow.animate().rotation(180f).setDuration(UiAnim.ms(180L)).start()
         layer.showMulti(this, items, state, onDismiss = {
-            arrow.animate().rotation(0f).setDuration(160L).start()
+            arrow.animate().rotation(0f).setDuration(UiAnim.ms(160L)).start()
         }) { s ->
             state = s
             renderValue()

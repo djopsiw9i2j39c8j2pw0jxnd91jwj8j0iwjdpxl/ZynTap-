@@ -273,14 +273,14 @@ internal class StatsBarView(ctx: Context, private val settings: StatsSettings) :
     }
 
     fun refreshKinds() {
-        
+
         val sg = StatKind.values().filter { settings.isOn(it) }.joinToString(",") { it.key } + "|" + editing + "|" + showEmptyHint
         if (sg == lastSig) return
         lastSig = sg
         removeAllViews()
         var n = 0
         val total = StatKind.values().count { settings.isOn(it) }
-        val gapDp = if (total >= 3) 6f else 10f      
+        val gapDp = if (total >= 3) 6f else 10f
         setPadding(dp(if (total >= 3) 10f else 13f), dp(6f), dp(if (total >= 3) 10f else 13f), dp(6f))
         if (editing) {
             val lp = LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -346,7 +346,7 @@ class StatsBarOverlay(
     private val screenBounds: () -> Rect,
     private val newParams: (width: Int, height: Int, flags: Int) -> WindowManager.LayoutParams,
 ) {
-     
+
     var onDrag: ((Boolean) -> Unit)? = null
 
     private val main = Handler(Looper.getMainLooper())
@@ -357,7 +357,7 @@ class StatsBarOverlay(
     private var params: WindowManager.LayoutParams? = null
     private var addedAt = 0L
     private var draggable = false
-    private val previews = ArrayList<StatsBarView>()   
+    private val previews = ArrayList<StatsBarView>()
     private var lastSnap: StatSnapshot? = null
 
     private var ticking = false
@@ -417,8 +417,8 @@ class StatsBarOverlay(
             timeFormatter!!.format(Date())
         } else ""
         val snap = StatSnapshot(
-            
-            fps = -1, // No target application is observed or sampled in manual mode.
+
+            fps = -1,
             batteryPct = bat.first, charging = bat.second,
             time = time, rxBps = rxBps, txBps = txBps,
         )
@@ -444,7 +444,7 @@ class StatsBarOverlay(
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        if (!drag) f = f or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE 
+        if (!drag) f = f or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         return f
     }
 
@@ -599,11 +599,11 @@ class StatsBarOverlay(
 
     @Volatile private var hidden = false
 
-    fun fadeOut(ms: Long) { hidden = true; view?.animate()?.alpha(0f)?.setDuration(ms)?.start() }
+    fun fadeOut(ms: Long) { hidden = true; view?.animate()?.alpha(0f)?.setDuration(UiAnim.ms(ms))?.start() }
 
     fun fadeTo(visible: Boolean, ms: Long) {
         hidden = !visible
-        view?.animate()?.alpha(if (visible) 1f else 0f)?.setDuration(ms)?.start()
+        view?.animate()?.alpha(if (visible) 1f else 0f)?.setDuration(UiAnim.ms(ms))?.start()
     }
 
     fun restore() { hidden = false; view?.animate()?.cancel(); view?.alpha = 1f }
@@ -663,7 +663,7 @@ class SettingsTab(
     private val settings: StatsSettings,
     private val dropdown: DropdownLayer,
     private val overlay: StatsBarOverlay,
-     
+
     private val onChanged: () -> Unit,
 ) {
     private val d = UiScale.density(ctx.resources)
@@ -689,7 +689,7 @@ class SettingsTab(
             else -> "Đang hiện: " + on.joinToString(" · ") { it.title }
         }
         summary.setTextColor(if (settings.anyOn()) C_CYAN else C_MUTED)
-        
+
         previewBox.alpha = if (settings.enabled) 1f else 0.45f
         pickerHolder.alpha = if (settings.enabled) 1f else 0.6f
     }
@@ -710,7 +710,7 @@ class SettingsTab(
         box.addView(pv, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER,
         ))
-        
+
         box.addOnLayoutChangeListener { _, l, _, r, _, ol, _, orr, _ ->
             val w = r - l
             if (w != orr - ol && w > 0) {
