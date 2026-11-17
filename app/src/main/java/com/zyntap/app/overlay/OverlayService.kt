@@ -58,10 +58,10 @@ class OverlayService : Service() {
     private var panelControls: View? = null
     private var cardBg: GradientDrawable? = null
     private var eyeIcon: ImageView? = null
-    private var solid = false          
-    private var solidAmount = 0f       
+    private var solid = false
+    private var solidAmount = 0f
     private var solidAnim: ValueAnimator? = null
-    @Volatile private var closing = false        
+    @Volatile private var closing = false
     private var panelAnimating = false
     private var panelClosing = false
     private var panelTransition = 0L
@@ -76,12 +76,12 @@ class OverlayService : Service() {
     private var handleDragging = false
     private var handleAddedAt = 0L
     private var panelAddedAt = 0L
-    private var panelGhost = false     
-    private var uiDensitySig = 0f      
-    private var ghostAmt = 0f          
+    private var panelGhost = false
+    private var uiDensitySig = 0f
+    private var ghostAmt = 0f
     private var ghostAnim: ValueAnimator? = null
-    private var panelHidden = false    
-    private var shownTabIdx = 0        
+    private var panelHidden = false
+    private var shownTabIdx = 0
 
     private lateinit var repo: MainButtonRepo
     private lateinit var circles: MainButtonOverlay
@@ -101,8 +101,8 @@ class OverlayService : Service() {
     private lateinit var pointPicker: PointPickerOverlay
     private lateinit var pointRunner: PointRunner
     private var inputActive = false
-    private var editLock = false     
-    private var editDim = 0f         
+    private var editLock = false
+    private var editDim = 0f
     private var editDimAnim: ValueAnimator? = null
     private val handler = Handler(Looper.getMainLooper())
     private val displayManager by lazy { getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager }
@@ -128,8 +128,8 @@ class OverlayService : Service() {
         running = true
         WifiState.start(this)
         com.zyntap.app.data.ConnectionWatcher.start(this)
-        wm = OverlayWindowManager(getSystemService(Context.WINDOW_SERVICE) as WindowManager, canRecover = { !interactionBusy() })
-        
+        wm = OverlayWindowManager(getSystemService(Context.WINDOW_SERVICE) as WindowManager, canRecover = { canRevive() })
+
         runCatching { CrosshairOverlay.sweepOrphans() }
         runCatching { StatsBarOverlay.sweepOrphans() }
         uiDensitySig = UiScale.density(resources)
@@ -147,24 +147,24 @@ class OverlayService : Service() {
         crosshair = CrosshairOverlay(this, wm, crosshairSettings, { realBounds }) { w, h, f -> overlayParams(w, h, f) }
         statsSettings = StatsSettings(this)
         stats = StatsBarOverlay(this, wm, statsSettings, { realBounds }, { w, h, f -> overlayParams(w, h, f) })
-        stats.onDrag = { dragging -> setPanelGhost(dragging) } 
+        stats.onDrag = { dragging -> setPanelGhost(dragging) }
         pointRunner = PointRunner(this, { Rect(realBounds) }, { displayRotation() }, { x, y ->
-            panelBlocksInput() || handleContainsPoint(x, y) 
+            panelBlocksInput() || handleContainsPoint(x, y)
         }) { text -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
         pointPicker = PointPickerOverlay(this, wm, { realBounds },
             { w, h, f -> overlayParams(w, h, f) },
             { picking ->
                 if (stopping) return@PointPickerOverlay
                 if (picking) { pointRunner.stopAll(); circles.cancelTouches() }
-                
+
                 editLock = picking
                 if (!picking) setPanelGhost(false)
                 circles.fadeAll(if (picking) 0f else 1f, 100)
-                if (::stats.isInitialized) stats.fadeTo(!picking, 100) 
+                if (::stats.isInitialized) stats.fadeTo(!picking, 100)
             },
-            { dragging -> setPanelGhost(dragging) }, 
+            { dragging -> setPanelGhost(dragging) },
         )
-        circles.onDrag = { dragging -> setPanelGhost(dragging) } 
+        circles.onDrag = { dragging -> setPanelGhost(dragging) }
         circles.onAction = { button, down ->
             if (!stopping && !closing && !pointPicker.isShowing && !editLock && !inputActive) pointRunner.touch(button, down)
             else { pointRunner.cancelTouch(button.id); false }
@@ -186,12 +186,12 @@ class OverlayService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
-                
+
                 if (!wanted(this)) {
                     stopSelf()
                     return START_NOT_STICKY
                 }
-                
+
                 ensureHandle()
                 circles.ensureAll()
                 crosshair.ensure()
@@ -211,7 +211,7 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
-        // START_STICKY lets Android restore a killed service; do not start a second owner during teardown.
+
         shutdownOverlays()
         runtimePrefs.unregisterOnSharedPreferenceChangeListener(runtimeListener)
         running = false
@@ -224,7 +224,7 @@ class OverlayService : Service() {
         displayManager.unregisterDisplayListener(displayListener)
         closing = true
         handler.removeCallbacksAndMessages(null)
-        
+
         safely("chủ cửa sổ") { if (::wm.isInitialized) wm.close() }
         safely("hiệu ứng") {
             solidAnim?.cancel()
@@ -253,7 +253,8 @@ class OverlayService : Service() {
         override fun run() {
             if (stopping || closing) return
             val now = SystemClock.uptimeMillis()
-            if (now - lastHealthAt >= 5000L) {
+            safely("khôi phục cửa sổ") { wm.recoverDetached() }
+            if (now - lastHealthAt >= HEALTH_MS) {
                 lastHealthAt = now
                 runCatching { checkHealth() }.onFailure { DebugLog.e("Watchdog", "checkHealth lỗi", it) }
             }
@@ -278,22 +279,31 @@ class OverlayService : Service() {
         (::circles.isInitialized && circles.interacting) ||
         (panelView?.isAttachedToWindow == true && SystemClock.uptimeMillis() < interactionUntil)
 
+    private val power by lazy { getSystemService(Context.POWER_SERVICE) as android.os.PowerManager }
+
+    private fun canRevive(): Boolean =
+        !stopping && !closing && wanted(this) && power.isInteractive && OverlayPermission.granted(this)
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (::wm.isInitialized) wm.requestSweep(250L)
+    }
+
     private var interactionUntil = 0L
     private fun noteInteraction(event: MotionEvent) {
-        interactionUntil = if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL)
-            SystemClock.uptimeMillis() + 400L else Long.MAX_VALUE
+        val ended = event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL
+        interactionUntil = SystemClock.uptimeMillis() + if (ended) 400L else INTERACTION_LEASE_MS
     }
 
     @Suppress("DEPRECATION")
     private fun displayRotation(): Int = wm.defaultDisplay.rotation
 
     private fun checkHealth() {
-        if (stopping || closing || !wanted(this) || interactionBusy()) return
-        
-        safely("khôi phục cửa sổ") { wm.recoverDetached() }
+        if (stopping || closing || !wanted(this)) return
         safely("tâm ảo") { crosshair.ensure() }
         safely("thanh thông số") { stats.ensure() }
         safely("nút main") { circles.ensureAll() }
+        if (interactionBusy()) return
         safely("tay nắm") {
             val h = handleView
             if (h == null) {
@@ -306,14 +316,13 @@ class OverlayService : Service() {
                     handleParams = null
                     ensureHandle()
                 } else if (!handleDragging && handleParams?.let { abs(it.y - placeHandleY(savedHandleY())) > dp(2) } == true) {
-                    relayoutHandle() 
+                    relayoutHandle()
                 } else if (h.isAttachedToWindow && (panelView == null || panelHidden) && !panelAnimating && !handleDragging) {
                     if (h.alpha != 1f) h.alpha = 1f
                     if (h.visibility != View.VISIBLE) h.visibility = View.VISIBLE
                 }
             }
         }
-
     }
 
     private val prefs get() = getSharedPreferences(PREFS, MODE_PRIVATE)
@@ -463,7 +472,7 @@ class OverlayService : Service() {
         return WindowManager.LayoutParams(width, height, type, flags, PixelFormat.TRANSLUCENT)
             .apply {
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                
+
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
                 } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -483,8 +492,8 @@ class OverlayService : Service() {
         val pad = dp(6)
         repeat(2) {
             for (r in rects) {
-                if (r.left >= handleW + pad || r.right <= 0) continue          
-                if (y + handleH <= r.top - pad || y >= r.bottom + pad) continue 
+                if (r.left >= handleW + pad || r.right <= 0) continue
+                if (y + handleH <= r.top - pad || y >= r.bottom + pad) continue
                 val candidates = listOfNotNull(
                     (r.top - pad - handleH).takeIf { it >= 0 },
                     (r.bottom + pad).takeIf { it <= maxY },
@@ -518,7 +527,7 @@ class OverlayService : Service() {
         interactionUntil = 0L
         pointRunner.stopAll()
         circles.cancelTouches()
-        // No stale press or picker survives a changed display frame (including 180-degree rotation).
+
         removePanel()
         val density = UiScale.density(resources)
         if (kotlin.math.abs(density - uiDensitySig) > 0.001f) {
@@ -552,7 +561,7 @@ class OverlayService : Service() {
     private fun ensureHandle() {
         if (stopping || handleView != null) return
         if (!OverlayPermission.granted(this)) return
-        
+
         val visW = dp(HANDLE_W_DP)
         val visH = dp(HANDLE_H_DP)
         val touchW = maxOf(visW, dp(MIN_TOUCH_W_DP))
@@ -574,7 +583,7 @@ class OverlayService : Service() {
         val r = dp(14).toFloat()
         val iconSize = minOf(dp(18), (visW * 0.9f).toInt()).coerceAtLeast(dp(10))
         val handle = FrameLayout(this).apply {
-            
+
             addView(FrameLayout(context).apply {
                 background = GradientDrawable().apply {
                     setColor(0xE60D1524.toInt())
@@ -587,7 +596,7 @@ class OverlayService : Service() {
                     scaleType = ImageView.ScaleType.FIT_CENTER
                 }, FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER))
             }, FrameLayout.LayoutParams(visW, visH, Gravity.START or Gravity.CENTER_VERTICAL))
-            
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
                     v.systemGestureExclusionRects = listOf(Rect(0, 0, v.width, v.height))
@@ -599,7 +608,7 @@ class OverlayService : Service() {
         var downX = 0f
         var downY = 0f
         var startY = 0
-        var mode = 0 
+        var mode = 0
         handle.setOnTouchListener { _, e ->
             if (e.actionMasked == MotionEvent.ACTION_DOWN) {
                 if (!menuGesture.down(SystemClock.uptimeMillis(), panelClosing || panelAnimating || stopping || closing)) return@setOnTouchListener true
@@ -632,8 +641,8 @@ class OverlayService : Service() {
                     menuGesture.finish()
                     handleDragging = false
                     when (mode) {
-                        2 -> saveHandlePosition() 
-                        0 -> openPanel() 
+                        2 -> saveHandlePosition()
+                        0 -> openPanel()
                         1 -> {
                             val p = ((e.rawX - downX) / travel).coerceIn(0f, 1f)
                             if (p > 0.25f) openPanel() else closePanel()
@@ -656,17 +665,17 @@ class OverlayService : Service() {
         handleAddedAt = SystemClock.uptimeMillis()
         runCatching { wm.addView(handle, params) }.onFailure {
             DebugLog.e("Giao diện", "Không gắn được nút mở menu (tay nắm)", it)
-            
+
             handleView = null
             handleParams = null
             return
         }
-        
+
         handle.setOnApplyWindowInsetsListener { v, insets ->
             v.post { if (!stopping && !closing) relayoutHandle() }
             insets
         }
-        
+
         handle.post { relayoutHandle() }
     }
 
@@ -682,7 +691,7 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
         ).apply {
-            
+
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
         }
         panelParams = params
@@ -691,12 +700,12 @@ class OverlayService : Service() {
             setBackgroundColor(0x66000000)
             alpha = 0f
         }
-        
+
         val slop = dp(8)
         var sDownX = 0f
         var sDragging = false
         scrim.setOnTouchListener { _, e ->
-            
+
             if (closing || editLock) return@setOnTouchListener true
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> { sDownX = e.rawX; sDragging = false; true }
@@ -724,7 +733,7 @@ class OverlayService : Service() {
 
         val card = FrameLayout(this).apply {
             background = bg
-            isClickable = true 
+            isClickable = true
             translationX = hiddenX
         }
         val content = DragCard(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -806,7 +815,7 @@ class OverlayService : Service() {
             val oldIdx = shownTab
             val old = viewForTab(oldIdx)
             val next = viewForTab(i)
-            if (oldIdx == 1) tab1.exitEdit()   
+            if (oldIdx == 1) tab1.exitEdit()
             if (oldIdx == 2) tab2.exit()
             if (oldIdx == 3) tab3.exit()
             if (oldIdx == 4) tab4.exit()
@@ -864,10 +873,9 @@ class OverlayService : Service() {
                 Gravity.TOP or Gravity.END,
             ).apply { topMargin = dp(10); marginEnd = dp(10) },
         )
-        
+
         card.addView(dd, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         card.addView(pr, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        
 
         panelView = scrim
         panelCard = card
@@ -880,7 +888,7 @@ class OverlayService : Service() {
             DebugLog.e("Giao diện", "Không gắn được cửa sổ menu", it)
             removePanel()
         }
-        stats.raise() 
+        stats.raise()
         startStatusTick()
     }
 
@@ -889,7 +897,7 @@ class OverlayService : Service() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        
+
         val logoBox = FrameLayout(this)
         logoBox.addView(View(this).apply {
             background = GradientDrawable().apply {
@@ -940,13 +948,13 @@ class OverlayService : Service() {
     private fun buildSidebar(initialTab: Int, onSelect: (Int) -> Unit): View {
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            
+
             setPadding(dp(6), dp(14), dp(12), dp(12))
-            
+
             clipToPadding = false
         }
         col.addView(buildHeader())
-        
+
         col.addView(View(this), LinearLayout.LayoutParams(1, dp(12)))
 
         val tabGap = dp(4)
@@ -962,7 +970,7 @@ class OverlayService : Service() {
                 cornerRadius = dp(10).toFloat()
                 setStroke(dp(1), 0x661E9BFF)
             }
-            
+
             addView(View(context).apply {
                 background = GradientDrawable().apply {
                     setColor(0xFF1E9BFF.toInt())
@@ -992,7 +1000,7 @@ class OverlayService : Service() {
             } else {
                 indicator.translationY = target
             }
-            
+
             fun paint(t: TextView, c: Int) {
                 t.setTextColor(c)
                 t.compoundDrawablesRelative[0]?.setTint(c)
@@ -1011,7 +1019,7 @@ class OverlayService : Service() {
                 }
             }
             current = i
-            onSelect(visibleOrder[i])   
+            onSelect(visibleOrder[i])
         }
         visibleOrder.forEachIndexed { i, logical ->
             val name = tabNames[logical]
@@ -1034,13 +1042,13 @@ class OverlayService : Service() {
                 LinearLayout.LayoutParams.MATCH_PARENT, tabH,
             ).apply { if (i < tabNames.lastIndex) bottomMargin = tabGap })
         }
-        
+
         col.addView(box, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
         ).apply { marginStart = dp(7) })
-        
+
         col.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
-        
+
         col.addView(buildStatus(), LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
         ).apply { marginStart = dp(5); marginEnd = -dp(5) })
@@ -1101,11 +1109,11 @@ class OverlayService : Service() {
     }
 
     private fun refreshStatus() {
-        val wifiOn = WifiAdbMonitor.isWifiAdbEnabled(this)   
-        val wifiNet = WifiState.isConnected(this)            
+        val wifiOn = WifiAdbMonitor.isWifiAdbEnabled(this)
+        val wifiNet = WifiState.isConnected(this)
         val paired = AdbLinkStore.isPaired(this)
         val linked = runCatching { ZynAdbConnectionManager.get(applicationContext).isConnected }.getOrDefault(false)
-        
+
         val key = (if (wifiOn) 1 else 0) or (if (paired) 2 else 0) or (if (linked) 4 else 0) or (if (wifiNet) 8 else 0)
         if (key == lastStatusKey) return
         lastStatusKey = key
@@ -1203,7 +1211,7 @@ class OverlayService : Service() {
             addUpdateListener { applySolid(it.animatedValue as Float) }
             start()
         }
-        
+
         eyeIcon?.let { icon ->
             icon.animate().cancel()
             icon.animate().scaleX(0.6f).scaleY(0.6f).alpha(0.3f).setDuration(90L).withEndAction {
@@ -1226,7 +1234,7 @@ class OverlayService : Service() {
         panelGhost = on
         if (stopping || closing) return
         panelControls?.animate()?.cancel()
-        
+
         ghostAnim?.cancel()
         ghostAnim = ValueAnimator.ofFloat(ghostAmt, if (on) 1f else 0f).apply {
             duration = if (on) 220L else 280L
@@ -1407,7 +1415,7 @@ class OverlayService : Service() {
         val scrim = panelView ?: return
         card.animate().cancel(); scrim.animate().cancel()
         panelAnimating = true
-        
+
         scrim.post {
             if (stopping || closing || panelClosing || panelTransition != transition || panelView !== scrim) return@post
             card.animate().translationX(0f).setDuration(PANEL_ANIM_MS)
@@ -1431,7 +1439,7 @@ class OverlayService : Service() {
         panelClosing = true
         settingsTab?.exit()
         debugTab?.exit()
-        setMenuOpenAll(false) 
+        setMenuOpenAll(false)
         mainTab?.exitEdit()
         pointsTab?.exit()
         configTab?.exit()
@@ -1443,7 +1451,7 @@ class OverlayService : Service() {
             .setInterpolator(DecelerateInterpolator(1.4f))
             .withEndAction {
                 panelAnimating = false
-                
+
                 if (panelCard === card && card.translationX <= hiddenX + 1f) hidePanel()
                 panelClosing = false
             }.start()
@@ -1478,7 +1486,7 @@ class OverlayService : Service() {
         stopHaloBreath()
         v.visibility = View.INVISIBLE
         if (p != null) {
-            
+
             p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
 
@@ -1616,24 +1624,26 @@ class OverlayService : Service() {
         private const val MIN_TOUCH_H_DP = 72
         private const val PANEL_ANIM_MS = 280L
         private const val TAB_ANIM_MS = 380L
-        
+
         private val TAB_INTERPOLATOR get() = android.view.animation.PathInterpolator(0.4f, 0f, 0.2f, 1f)
 
         private const val PREFS = "zyntap_overlay"
         private const val KEY_WANTED = "wanted"
         private const val KEY_Y_RATIO = "handle_y_ratio"
         private const val KEY_SOLID = "solid_mode"
-        private const val KEY_TAB = "active_tab_v2" 
-        
+        private const val KEY_TAB = "active_tab_v2"
+
         private const val CARD_ALPHA = 0xF2
         private const val SCRIM_ALPHA = 0x66
-        private const val EDIT_DIM_REDUCE = 0.7f 
-        private const val SCRIM_SOLID_ALPHA = 0x66 
+        private const val EDIT_DIM_REDUCE = 0.7f
+        private const val SCRIM_SOLID_ALPHA = 0x66
 
         private const val STATUS_MS = 1500L
         private const val BREATH_MS = 1600L
         private const val BREATH_FAST_MS = 800L
         private const val WATCHDOG_MS = 1000L
+        private const val HEALTH_MS = 5000L
+        private const val INTERACTION_LEASE_MS = 5000L
         private const val ATTACH_GRACE_MS = 1500L
 
         private fun setWanted(context: Context, value: Boolean) {
@@ -1649,7 +1659,6 @@ class OverlayService : Service() {
             }
         }
 
-        /** One persisted source of truth for UI visibility; all entry points share it. */
         fun setEnabled(context: Context, enabled: Boolean): Boolean {
             if (enabled && !OverlayPermission.granted(context)) return false
             val old = wanted(context)

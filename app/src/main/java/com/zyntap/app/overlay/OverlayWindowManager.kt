@@ -15,47 +15,40 @@ internal class OverlayWindowManager(
     private val main: Handler = Handler(Looper.getMainLooper()),
     private val canRecover: () -> Boolean = { true },
 ) : WindowManager by delegate {
-    private val windows = Collections.newSetFromMap(IdentityHashMap<View, Boolean>())
-    private class Desired(var params: ViewGroup.LayoutParams, var retryAt: Long) {
-        var detachedSince: Long? = null
+    private class Desired(var params: ViewGroup.LayoutParams, var graceUntil: Long) {
+        var badTicks = 0
+        var retryAt = 0L
         var listener: View.OnAttachStateChangeListener? = null
-        var recovery: Runnable? = null
     }
-    
+
+    private val windows = Collections.newSetFromMap(IdentityHashMap<View, Boolean>())
     private val desired = IdentityHashMap<View, Desired>()
+    private val sweep = Runnable { recoverDetached() }
     private var closed = false
     private var retry: Runnable? = null
     internal val pendingCount: Int get() = windows.size
 
     override fun addView(view: View, params: ViewGroup.LayoutParams) {
         check(!closed) { "Overlay owner is closed" }
-        
         windows.add(view)
-        val record = Desired(params, SystemClock.uptimeMillis() + 1500L)
-        desired[view] = record
-        val recovery = Runnable { if (!closed && desired[view] === record) recoverDetached() }
-        record.recovery = recovery
+        val record = Desired(params, SystemClock.uptimeMillis() + GRACE_MS)
         record.listener = object : View.OnAttachStateChangeListener {
             override fun onViewAttachedToWindow(v: View) {
-                record.detachedSince = null
-                main.removeCallbacks(recovery)
+                record.badTicks = 0
             }
+
             override fun onViewDetachedFromWindow(v: View) {
-                if (closed || desired[view] !== record) return
-                record.detachedSince = SystemClock.uptimeMillis()
-                main.removeCallbacks(recovery)
-                main.postDelayed(recovery, 1600L)
+                if (desired[view] === record) requestSweep(DETACH_SWEEP_MS)
             }
         }
+        desired[view] = record
         view.addOnAttachStateChangeListener(record.listener)
         try {
             delegate.addView(view, params)
         } catch (t: Throwable) {
             if (!view.isAttachedToWindow && view.parent == null) {
                 windows.remove(view)
-                desired.remove(view)
-                record.listener?.let { view.removeOnAttachStateChangeListener(it) }
-                main.removeCallbacks(recovery)
+                forget(view)
             }
             throw t
         }
@@ -70,62 +63,78 @@ internal class OverlayWindowManager(
     override fun removeView(view: View) = removeViewImmediate(view)
 
     override fun removeViewImmediate(view: View) {
-        
-        desired.remove(view)?.let { record ->
-            record.listener?.let { view.removeOnAttachStateChangeListener(it) }
-            record.recovery?.let { main.removeCallbacks(it) }
-        }
-        
+        forget(view)
         if (closed && !windows.contains(view)) return
         try {
             delegate.removeViewImmediate(view)
             windows.remove(view)
         } catch (t: Throwable) {
             if (!view.isAttachedToWindow && view.parent == null) windows.remove(view)
-            
             throw t
         }
     }
 
+    private fun forget(view: View) {
+        desired.remove(view)?.listener?.let { view.removeOnAttachStateChangeListener(it) }
+    }
+
     fun owns(view: View): Boolean = !closed && desired.containsKey(view)
 
+    fun requestSweep(delayMs: Long = 0L) {
+        if (closed) return
+        main.removeCallbacks(sweep)
+        main.postDelayed(sweep, delayMs)
+    }
+
     fun recoverDetached() {
-        if (closed || !canRecover()) return
+        if (closed) return
         val now = SystemClock.uptimeMillis()
+        var revived = false
+        var waiting = false
         for ((view, record) in desired.entries.toList()) {
             if (closed || desired[view] !== record) continue
-            if (view.isAttachedToWindow) {
-                record.detachedSince = null
+            if (view.isAttachedToWindow && view.windowVisibility == View.VISIBLE) {
+                record.badTicks = 0
                 continue
             }
-            val since = record.detachedSince
-            if (since == null) { record.detachedSince = now; continue }
-            if (now - since < 1500L || now < record.retryAt) continue
-            record.retryAt = now + 2000L
-            try {
-                
-                try { delegate.removeViewImmediate(view) } catch (t: Throwable) {
-                    if (view.isAttachedToWindow || view.parent != null) throw t
-                }
-                delegate.addView(view, record.params)
-                record.detachedSince = null
-                view.requestLayout()
-                view.invalidate()
-                DebugLog.i("Khôi phục", "Đã gắn lại cửa sổ nổi bị mất")
-            } catch (t: Throwable) {
-                DebugLog.e("Khôi phục", "Chưa gắn lại được cửa sổ; sẽ thử ở nhịp sau", t)
+            if (now < record.graceUntil) {
+                waiting = true
+                continue
             }
+            record.badTicks++
+            if (now < record.retryAt) continue
+            if (revived || !canRecover()) {
+                waiting = true
+                continue
+            }
+            revived = true
+            revive(view, record, now)
+        }
+        if (revived && waiting) requestSweep(STAGGER_MS)
+    }
+
+    private fun revive(view: View, record: Desired, now: Long) {
+        try {
+            if (view.isAttachedToWindow && record.badTicks < 2) {
+                delegate.updateViewLayout(view, record.params)
+                return
+            }
+            runCatching { delegate.removeViewImmediate(view) }
+            record.graceUntil = now + GRACE_MS
+            record.badTicks = 0
+            delegate.addView(view, record.params)
+            DebugLog.i("Khôi phục", "Đã gắn lại cửa sổ nổi bị mất")
+        } catch (t: Throwable) {
+            record.retryAt = now + RETRY_MS
+            DebugLog.e("Khôi phục", "Chưa gắn lại được cửa sổ; sẽ thử lại", t)
         }
     }
 
     fun close() {
         if (closed) return
         closed = true
-        for ((view, record) in desired) {
-            record.listener?.let { view.removeOnAttachStateChangeListener(it) }
-            record.recovery?.let { main.removeCallbacks(it) }
-        }
-        desired.clear()
+        main.removeCallbacks(sweep)
+        desired.entries.toList().forEach { (view, _) -> forget(view) }
         detachRemaining()
         if (windows.isEmpty()) return
         var attempts = 0
@@ -158,6 +167,13 @@ internal class OverlayWindowManager(
             retry?.let { main.removeCallbacks(it) }
             retry = null
         }
+    }
+
+    private companion object {
+        const val GRACE_MS = 2000L
+        const val RETRY_MS = 3000L
+        const val STAGGER_MS = 120L
+        const val DETACH_SWEEP_MS = 250L
     }
 }
 
