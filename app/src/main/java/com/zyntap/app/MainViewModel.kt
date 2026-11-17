@@ -34,7 +34,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     var uiAnimations by mutableStateOf(com.zyntap.app.overlay.UiAnim.run { init(app); enabled })
         private set
-    fun setUiAnimations(value: Boolean) {
+    fun changeUiAnimations(value: Boolean) {
         com.zyntap.app.overlay.UiAnim.set(getApplication(), value)
         uiAnimations = value
     }
