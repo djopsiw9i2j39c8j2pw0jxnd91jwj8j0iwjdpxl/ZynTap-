@@ -149,7 +149,7 @@ private fun SettingsFrame(vm: MainViewModel, onClose: () -> Unit, onPair: () -> 
                 HorizontalDivider(color = Zyn.Border)
                 Text("CÀI ĐẶT", color = Zyn.TextDim, fontSize = 11.sp, letterSpacing = 1.6.sp)
                 SettingRow("Nhật ký gỡ lỗi", "Tắt để ngừng thu và ghi log.", vm.debugEnabled, vm::setDebugLogging)
-                SettingRow("Hiệu ứng UI nổi", "Tắt để giảm lag: menu, nút main và hộp thoại đổi trạng thái ngay, không chuyển động.", vm.uiAnimations, vm::setUiAnimations)
+                SettingRow("Hiệu ứng UI nổi", "Tắt để giảm lag: menu, nút main và hộp thoại đổi trạng thái ngay, không chuyển động.", vm.uiAnimations, vm::changeUiAnimations)
             }
             HorizontalDivider(color = Zyn.Border)
             Text("ZynTap · ${BuildConfig.VERSION_NAME}\n${BuildConfig.APPLICATION_ID}", color = Zyn.TextDim, fontSize = 11.sp, lineHeight = 18.sp,
